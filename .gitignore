@@ -1,0 +1,13 @@
+*.class
+*.log
+*.jar
+*~
+*.swp
+*.pem
+target/
+.bsp/
+.idea/
+.metals/
+.bloop/
+.vscode/
+.DS_Store

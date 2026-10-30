@@ -30,7 +30,6 @@ class CommandLineTests extends AnyFlatSpec with Matchers with EitherValues
       "run", "submission-counts",
       "--site", "UKT,UKFR", "--site=UKM",
       "--usecase", "mtb",
-      "--tan", "a",
       "--from", "2026-01-01", "--until=2026-04-01T12:30",
       "--param", "period=month", "--param", "x=a=b",
       "--key", "/k.pem", "--passphrase-file", "/p", "--mongodb-uri", "mongodb://m/ccdn", "--output", "/out"
@@ -40,7 +39,6 @@ class CommandLineTests extends AnyFlatSpec with Matchers with EitherValues
         filter         = BackupFilter(
           sites    = Set("UKT", "UKFR", "UKM"),
           useCases = Set(UseCase.MTB),
-          tans     = Set("a"),
           from     = Some(LocalDateTime.of(2026, 1, 1, 0, 0)),
           until    = Some(LocalDateTime.of(2026, 4, 1, 12, 30))
         ),

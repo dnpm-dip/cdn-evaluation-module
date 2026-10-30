@@ -13,11 +13,20 @@ public key the CCDN encrypts the backups with.
 A run consists of two steps:
 
 1. **Data collection** (`collect`, common to all statistics): reads the backup documents matching
-   the filter given on the command line, only of the types the statistic needs (e.g. only the small
-   reports), decrypts them (RSA-OAEP-SHA256 + AES-256-CBC, reassembling ciphertexts the CCDN split
-   into `largeBackupParts`) and groups them by TAN, site and use case into `Case`s: report,
-   submission and deletions of one data submission. Cases are streamed, not loaded into memory all
-   at once. A case with an unreadable document is left out and counted.
+   the filter given on the command line, decrypts them (RSA-OAEP-SHA256 + AES-256-CBC, reassembling
+   ciphertexts the CCDN split into `largeBackupParts`) and groups them into `Case`s: all
+   submissions with their reports (one per TAN) of one episode of care of a patient, i.e. with the
+   same site, use case, patient and `episodeOfCare`, plus the patient's deletions.
+   - The reports are always read, since they define the cases; they are small and held in memory.
+     Older reports without `episodeOfCare` get the episode their submission refers to, or, like on
+     the DIP node, the one of the patient record in whose period the report was created.
+   - Submissions and deletions are only read if the statistic needs them. Submissions are fetched
+     case by case while the cases are streamed, so they are never all in memory at once.
+   - Deletions remove their TAN's report and submission, so their episode is unknown: a deletion
+     event is attached to all cases of its patient, or forms a case of its own if none are left. A
+     manual deletion notice names no patient, so it always forms a case of its own.
+   - An unreadable report or deletion is left out on its own, a case with an unreadable submission
+     as a whole; both are counted.
 2. **Aggregation** (`statistics`, one implementation per statistic): computes tables from the cases.
 
 The result is JSON: the tables plus everything needed to interpret and reproduce them (statistic,
@@ -37,9 +46,12 @@ Filters on the unencrypted fields (combined with AND; lists comma-separated or t
 |---|---|
 | `--site CODE[,CODE...]` | Site code(s), e.g. `UKT,UKFR` |
 | `--usecase UC[,UC...]` | `MTB` and/or `RD` |
-| `--tan TAN[,TAN...]` | Transfer TAN(s) |
-| `--from DATE` | Submitted at or after DATE (ISO, e.g. `2026-01-01` or `2026-01-01T12:00`) |
-| `--until DATE` | Submitted before DATE (exclusive) |
+| `--from DATE` | Cases with a submission at or after DATE (ISO, e.g. `2026-01-01` or `2026-01-01T12:00`) |
+| `--until DATE` | Cases with a submission before DATE (exclusive) |
+
+The time frame selects whole cases: those with at least one submission in it, with all their
+submissions, also those outside of it. Cases without submissions (deletions only) are left out
+when a time frame is given.
 
 Statistic-specific parameters are set with `--param NAME=VALUE`, see `list`.
 
@@ -56,14 +68,21 @@ There is deliberately no option for the passphrase itself, since command lines e
 history and process list.
 
 Logs go to stderr, so stdout carries only the result. Exit codes: `0` success, `1` failure,
-`2` result written, but cases were left out since documents couldn't be read (see the log).
+`2` result written, but documents couldn't be read and were left out (see the log).
 
 Example, the quarterly submission counts of 2026 for two sites:
 ```
 run submission-counts --site UKT,UKFR --from 2026-01-01 --until 2027-01-01 --param period=quarter
 ```
 
+For evaluations not implemented as statistic, `export` writes all matching documents as stored,
+with their content decrypted, e.g. the reports and submissions of one site:
+```
+run export --site UKT --output /out
+```
+
 Large submissions are decrypted in memory; for more heap, set `JAVA_OPTS=-Xmx4g` in the container.
+The `export` holds all exported documents in memory, so restrict large exports with the filters.
 
 ## Adding a statistic
 
@@ -73,10 +92,12 @@ When stakeholders request a new statistic:
    `SubmissionCounts` (reports only) or `MtbDiagnoses` (reads the submissions) as examples:
    - `name`: the kebab-case name to run it by. Never change it once released, since stakeholders
      and scripts refer to it.
-   - `documentTypes`: only what's needed. Reports are small, submissions may be several MB each.
+   - `documentTypes`: only what's needed. Reports are small (and always read, since they define the
+     cases), submissions may be several MB each.
    - `parameters`: statistic-specific options with defaults, validated before the run.
    - `restrict`: e.g. to the use case it applies to.
    - `aggregate`: fold over the cases (they can be traversed only once) into `Result` tables.
+     A case may hold several submissions (`Case.submissions`, ordered by time).
      Read submissions through the dnpm model (`SubmissionDocument.as`, `.mtb`, `.rd`); reading only
      the parts needed, e.g. `(json \ "diagnoses").validate[List[MTBDiagnosis]]`, tolerates
      deviations elsewhere in records from older DIP node versions.
@@ -97,4 +118,3 @@ Dependencies are kept at the versions of the central-data-node, whose backups th
 are read as `Submission.Report` of service-base; the CCDN's own processing statuses in their
 `status` field are mapped onto that class's `unsubmitted`/`submitted` (`model/Report.scala`).
 Check this when the CCDN's backup format changes.
-# cdn-evaluation-module

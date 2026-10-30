@@ -36,9 +36,8 @@ object CommandLine
        |Filters (combined with AND; lists are comma-separated or the option repeated):
        |  --site CODE[,CODE...]       Site code(s), e.g. UKT,UKFR
        |  --usecase UC[,UC...]        ${UseCase.values.mkString(" and/or ")}
-       |  --tan TAN[,TAN...]          Transfer TAN(s)
-       |  --from DATE                 Submitted at or after DATE (ISO, e.g. 2026-01-01 or 2026-01-01T12:00)
-       |  --until DATE                Submitted before DATE (exclusive)
+       |  --from DATE                 Cases with a submission at or after DATE (ISO, e.g. 2026-01-01 or 2026-01-01T12:00)
+       |  --until DATE                Cases with a submission before DATE (exclusive); with --from, in between
        |
        |Options:
        |  --param NAME=VALUE          Parameter of the statistic (repeatable), see "list"
@@ -106,7 +105,6 @@ object CommandLine
         val next: Either[String, (Run, Set[UseCase.Value])] =
           option match {
             case "--site"            => Right(run.copy(filter = f.copy(sites = f.sites ++ list(value))) -> useCasesGiven)
-            case "--tan"             => Right(run.copy(filter = f.copy(tans = f.tans ++ list(value))) -> useCasesGiven)
             case "--usecase"         => parseUseCases(value).map(ucs => run -> (useCasesGiven ++ ucs))
             case "--from"            => parseDateTime(value).map(d => run.copy(filter = f.copy(from = Some(d))) -> useCasesGiven)
             case "--until"           => parseDateTime(value).map(d => run.copy(filter = f.copy(until = Some(d))) -> useCasesGiven)

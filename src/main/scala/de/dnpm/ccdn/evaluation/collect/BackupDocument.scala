@@ -64,18 +64,17 @@ object BackupDocument
 
 
 /**
- * Filter on the plain fields of backup documents.
+ * Filter on the plain fields of backup documents. Sites and use cases select documents,
+ * the time frame selects whole cases: those with at least one submission in it.
  *
  * @param sites    site codes to match, empty matches all sites
  * @param useCases use cases to match (all by default), empty matches nothing
- * @param tans     transfer TANs to match, empty matches all
- * @param from     "submittedAt" at or after this point in time
- * @param until    "submittedAt" strictly before this point in time
+ * @param from     a submission of the case "submittedAt" at or after this point in time
+ * @param until    a submission of the case "submittedAt" strictly before this point in time
  */
 final case class BackupFilter(
   sites: Set[String] = Set.empty,
   useCases: Set[UseCase.Value] = UseCase.values,
-  tans: Set[String] = Set.empty,
   from: Option[LocalDateTime] = None,
   until: Option[LocalDateTime] = None
 )
@@ -83,6 +82,10 @@ final case class BackupFilter(
   /** Narrows the use cases to `allowed`, e.g. for statistics that only apply to one use case */
   def restrictUseCases(allowed: Set[UseCase.Value]): BackupFilter =
     copy(useCases = useCases intersect allowed)
+
+  /** True if a submission at this point in time lies in the time frame */
+  def inTimeFrame(submittedAt: LocalDateTime): Boolean =
+    from.forall(!submittedAt.isBefore(_)) && until.forall(submittedAt.isBefore)
 
   /** True if no document can match, e.g. after restricting to disjoint use cases */
   def isUnsatisfiable: Boolean =
@@ -92,7 +95,6 @@ final case class BackupFilter(
     (
       Seq(s"use cases ${useCases.mkString(",")}") ++
       Option.when(sites.nonEmpty)(s"sites ${sites.toSeq.sorted.mkString(",")}") ++
-      Option.when(tans.nonEmpty)(s"${tans.size} TAN(s)") ++
       from.map(f => s"from ${BackupFilter.format(f)}") ++
       until.map(u => s"until ${BackupFilter.format(u)}")
     )

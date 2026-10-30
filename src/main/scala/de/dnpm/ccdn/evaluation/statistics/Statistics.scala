@@ -9,7 +9,8 @@ object Statistics
   val all: Seq[Statistic] =
     Seq(
       SubmissionCounts,
-      MtbDiagnoses
+      MtbDiagnoses,
+      Export
     )
 
   def find(name: String): Option[Statistic] =

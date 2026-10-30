@@ -36,7 +36,6 @@ object ResultWriter
       "filter"        -> Json.obj(
         "sites"    -> filter.sites.toSeq.sorted,
         "useCases" -> filter.useCases.toSeq.map(_.toString).sorted,
-        "tans"     -> filter.tans.toSeq.sorted,
         "from"     -> filter.from,
         "until"    -> filter.until
       ),

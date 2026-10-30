@@ -2,7 +2,7 @@ package de.dnpm.ccdn.evaluation.collect
 
 import com.mongodb.ConnectionString
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
-import com.mongodb.client.model.{Filters, Sorts}
+import com.mongodb.client.model.Filters
 import de.dnpm.dip.util.Logging
 import org.bson.Document
 import org.bson.conversions.Bson
@@ -18,10 +18,17 @@ import scala.util.Try
 trait BackupSource extends AutoCloseable
 {
   /**
-   * The documents of the given types matching the filter, ordered by "tan", so that all
-   * documents of a TAN are consecutive. The iterator is only valid until the source is closed.
+   * The documents of the given types of the filter's sites and use cases. The filter's time frame
+   * is not applied, since it selects cases, not documents. The iterator is only valid until the
+   * source is closed.
    */
   def documents(filter: BackupFilter, types: Set[DocumentType.Value]): Iterator[BackupDocument]
+
+  /**
+   * The documents of the given types with one of the TANs, of the site and use case.
+   * The iterator is only valid until the source is closed.
+   */
+  def documents(site: String, useCase: String, tans: Set[String], types: Set[DocumentType.Value]): Iterator[BackupDocument]
 }
 
 
@@ -69,10 +76,7 @@ object MongoBackupSource
           Filters.in("type", types.map(_.toString).asJava),
           Filters.in("usecase", filter.useCases.map(_.toString).asJava)
         ) ++
-        Option.when(filter.sites.nonEmpty)(Filters.in("site", filter.sites.asJava)) ++
-        Option.when(filter.tans.nonEmpty)(Filters.in("tan", filter.tans.asJava)) ++
-        filter.from.map(f => Filters.gte("submittedAt", BackupFilter.format(f))) ++
-        filter.until.map(u => Filters.lt("submittedAt", BackupFilter.format(u)))
+        Option.when(filter.sites.nonEmpty)(Filters.in("site", filter.sites.asJava))
       ): _*
     )
 }
@@ -89,15 +93,28 @@ final class MongoBackupSource private (
 
   override def documents(filter: BackupFilter, types: Set[DocumentType.Value]): Iterator[BackupDocument] =
     if (types.isEmpty || filter.isUnsatisfiable) Iterator.empty
+    else find(toBson(filter, types))
+
+  override def documents(site: String, useCase: String, tans: Set[String], types: Set[DocumentType.Value]): Iterator[BackupDocument] =
+    if (types.isEmpty || tans.isEmpty) Iterator.empty
     else
-      db.getCollection(BackupCollection)
-        .find(toBson(filter, types))
-        // matches the unique index the central-data-node ensures on the backup collection
-        .sort(Sorts.ascending("tan", "type", "site", "usecase"))
-        .batchSize(BatchSize)
-        .iterator()
-        .asScala
-        .flatMap(toBackupDocument)
+      find(
+        Filters.and(
+          // served by the unique index the central-data-node ensures on the backup collection
+          Filters.in("tan", tans.asJava),
+          Filters.in("type", types.map(_.toString).asJava),
+          Filters.eq("site", site),
+          Filters.eq("usecase", useCase)
+        )
+      )
+
+  private def find(filter: Bson): Iterator[BackupDocument] =
+    db.getCollection(BackupCollection)
+      .find(filter)
+      .batchSize(BatchSize)
+      .iterator()
+      .asScala
+      .flatMap(toBackupDocument)
 
   /**
    * None (logged) for documents lacking a plain field, which the central-data-node always sets

@@ -43,13 +43,11 @@ object SubmissionCounts extends Statistic
     val period = params(Period)
 
     val counts =
-      cases.foldLeft(Map.empty[Key, Counts]) { (acc, c) =>
-        c.report.fold(acc) { report =>
-          val key = Key(c.site, c.useCase.toString, periodOf(report.createdAt, period), report.`type`.toString)
-          acc.updatedWith(key) { current =>
-            val Counts(n, patients) = current.getOrElse(Counts(0, Set.empty))
-            Some(Counts(n + 1, patients + report.patient.value))
-          }
+      cases.flatMap(c => c.submissions.map(c -> _.report)).foldLeft(Map.empty[Key, Counts]) { case (acc, (c, report)) =>
+        val key = Key(c.site, c.useCase.toString, periodOf(report.createdAt, period), report.`type`.toString)
+        acc.updatedWith(key) { current =>
+          val Counts(n, patients) = current.getOrElse(Counts(0, Set.empty))
+          Some(Counts(n + 1, patients + report.patient.value))
         }
       }
 

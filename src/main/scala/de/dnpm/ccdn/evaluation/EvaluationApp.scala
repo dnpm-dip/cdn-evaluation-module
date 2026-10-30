@@ -16,7 +16,7 @@ import play.api.libs.json.Json
  * Runs a statistic on the backups of the central-data-node, on demand: collects the backup
  * documents (common to all statistics), then aggregates them as implemented per statistic.
  *
- * Exit codes: 0 success, 1 failure, 2 result written, but cases had to be left out (see the log).
+ * Exit codes: 0 success, 1 failure, 2 result written, but documents had to be left out (see the log).
  * Logs go to stderr, so that stdout carries only the result.
  */
 object EvaluationApp extends Logging
@@ -122,8 +122,8 @@ object EvaluationApp extends Logging
               output(evaluation, run.outputDir.orElse(envOrNone(OutputDirEnv)).filter(_.nonEmpty).map(Paths.get(_)))
 
               log.info(s"Done: ${summary.cases} cases evaluated from ${summary.documents.values.sum} documents")
-              if (summary.skippedCases > 0) {
-                log.warn(s"${summary.skippedCases} cases were left out, since ${summary.failedDocuments} of their documents couldn't be read, see the errors above")
+              if (summary.failedDocuments > 0) {
+                log.warn(s"${summary.failedDocuments} documents couldn't be read and were left out, ${summary.skippedCases} cases with them, see the errors above")
                 IncompleteResult
               }
               else Success

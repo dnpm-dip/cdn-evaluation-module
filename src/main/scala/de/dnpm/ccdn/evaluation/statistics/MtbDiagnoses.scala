@@ -48,9 +48,9 @@ object MtbDiagnoses extends Statistic
     }
 
     val state =
-      cases.foldLeft(State(Map.empty, 0, 0)) { (state, c) =>
-        (c.submission, c.submittedAt) match {
-          case (Some(submission), Some(submittedAt)) =>
+      cases.flatMap(c => c.submissions.map(c -> _)).foldLeft(State(Map.empty, 0, 0)) { case (state, (c, s)) =>
+        s.submission match {
+          case Some(submission) =>
             if (submission.submissionType.contains(Submission.Type.Test))
               state.copy(tests = state.tests + 1)
             else {
@@ -64,13 +64,13 @@ object MtbDiagnoses extends Statistic
               content.asOpt match {
                 case Some((patient, diagnoses)) =>
                   val key = PatientKey(c.site, patient)
-                  if (state.latest.get(key).exists(_.submittedAt.isAfter(submittedAt))) state
-                  else state.copy(latest = state.latest.updated(key, Latest(submittedAt, diagnoses.map(code).toSet)))
+                  if (state.latest.get(key).exists(_.submittedAt.isAfter(s.submittedAt))) state
+                  else state.copy(latest = state.latest.updated(key, Latest(s.submittedAt, diagnoses.map(code).toSet)))
                 case None =>
                   state.copy(unreadable = state.unreadable + 1)
               }
             }
-          case _ => state
+          case None => state
         }
       }
 

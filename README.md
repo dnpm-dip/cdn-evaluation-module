@@ -90,6 +90,19 @@ mappings' config, given as file in `CCDN_BFARM_MAPPINGS_CONFIG_FILE`, else its b
 run export-datenkranz --site UKT --usecase RD --output /out
 ```
 
+The RD evaluation matrix (Auswertematrix Geltungszeitraum 1) is computed from such an export by
+`scripts/rd_evaluation_matrix/rd_evaluation_matrix.py`, in Python (standard library only) and on
+the Datenkranz alone, so that it can be shared with the other KDKs. Specification:
+`docs/rd-evaluation-matrix.txt`. Export without `--until`, since later follow-ups determine the
+status of a case, and set the evaluation period in the script instead:
+```
+python3 scripts/rd_evaluation_matrix/rd_evaluation_matrix.py /out/export-datenkranz_<time>.json \
+  --orphanet en_product7.xml --from 2024-07-01 --until 2026-01-01 \
+  --template docs/Update_Auswertematrix_GZ1.xlsx --output matrix
+```
+`--orphanet` is the Orphadata linearisation (https://www.orphadata.com/data/xml/en_product7.xml),
+needed for the disease groups. Tests: `python3 -m unittest discover -s scripts/rd_evaluation_matrix`.
+
 Large submissions are decrypted in memory; for more heap, set `JAVA_OPTS=-Xmx4g` in the container.
 `export` and `export-datenkranz` hold all exported documents in memory, so restrict large exports
 with the filters.

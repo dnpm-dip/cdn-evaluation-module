@@ -11,3 +11,4 @@ target/
 .bloop/
 .vscode/
 .DS_Store
+__pycache__/

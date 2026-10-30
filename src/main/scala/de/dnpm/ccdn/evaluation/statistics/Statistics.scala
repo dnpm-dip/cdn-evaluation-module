@@ -10,7 +10,8 @@ object Statistics
     Seq(
       SubmissionCounts,
       MtbDiagnoses,
-      Export
+      Export,
+      ExportDatenkranz
     )
 
   def find(name: String): Option[Statistic] =

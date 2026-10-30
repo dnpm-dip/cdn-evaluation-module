@@ -81,8 +81,18 @@ with their content decrypted, e.g. the reports and submissions of one site:
 run export --site UKT --output /out
 ```
 
+`export-datenkranz` writes the submissions converted into the BfArM "Datenkranz" schema (oncology
+for MTB, rare diseases for RD) by the mappings of
+[bfarm-schema-dto-model](https://github.com/dnpm-dip/bfarm-schema-dto-model), listing those that
+couldn't be read or converted with the error. The submitter and data node IDs come from the
+mappings' config, given as file in `CCDN_BFARM_MAPPINGS_CONFIG_FILE`, else its built-in defaults.
+```
+run export-datenkranz --site UKT --usecase RD --output /out
+```
+
 Large submissions are decrypted in memory; for more heap, set `JAVA_OPTS=-Xmx4g` in the container.
-The `export` holds all exported documents in memory, so restrict large exports with the filters.
+`export` and `export-datenkranz` hold all exported documents in memory, so restrict large exports
+with the filters.
 
 ## Adding a statistic
 
@@ -114,7 +124,9 @@ Releases are packaged as Docker image through the GitHub action in `.github/work
 like the central-data-node itself. The dnpm libraries are resolved from GitHub Packages, which
 requires `GITHUB_TOKEN` to be set.
 
-Dependencies are kept at the versions of the central-data-node, whose backups this reads. Reports
+Dependencies are kept at the versions of the central-data-node, whose backups this reads, except
+for service-base, mtb-dto-model and rd-dto-model, raised to the versions bfarm-schema-dto-model
+(the Datenkranz mappings) requires. Reports
 are read as `Submission.Report` of service-base; the CCDN's own processing statuses in their
 `status` field are mapped onto that class's `unsubmitted`/`submitted` (`model/Report.scala`).
 Check this when the CCDN's backup format changes.

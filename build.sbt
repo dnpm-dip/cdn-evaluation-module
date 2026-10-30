@@ -29,10 +29,23 @@ lazy val evaluation = project
     settings,
     libraryDependencies ++= Seq(
       dependencies.scalatest,
+      dependencies.mtb_generators,
+      dependencies.rd_generators,
+      dependencies.icd10gm,
+      dependencies.icdo3,
+      dependencies.icd_catalogs,
+      dependencies.atc_impl,
+      dependencies.atc_catalogs,
+      dependencies.hgnc_geneset,
+      dependencies.hpo,
+      dependencies.alpha_id_se,
+      dependencies.orphanet,
       dependencies.logback,
       dependencies.service_base,
       dependencies.mtb_dto_model,
       dependencies.rd_dto_model,
+      dependencies.bfarm_onco,
+      dependencies.bfarm_rd,
       dependencies.mongodb_driver,
       dependencies.jsr305
     ),
@@ -45,14 +58,31 @@ lazy val evaluation = project
 // DEPENDENCIES
 //-----------------------------------------------------------------------------
 
-// Kept in line with the versions of the central-data-node, whose backups are evaluated
+// Kept in line with the versions of the central-data-node, whose backups are evaluated, except for
+// service-base, mtb-dto-model and rd-dto-model, raised to the versions bfarm-schema-dto-model requires
 lazy val dependencies =
   new {
     val scalatest      = "org.scalatest"     %% "scalatest"               % "3.2.18" % Test
+    // Test-only: random patient records for the Datenkranz export (rd-dto-generators 1.2.2 isn't resolvable),
+    // and the code systems they draw from, as in the tests of bfarm-schema-dto-model
+    val mtb_generators = "de.dnpm.dip"       %% "mtb-dto-generators"      % "1.2.4" % Test
+    val rd_generators  = "de.dnpm.dip"       %% "rd-dto-generators"       % "1.2.1" % Test
+    val icd10gm        = "de.dnpm.dip"       %% "icd10gm-impl"            % "1.1.5" % Test
+    val icdo3          = "de.dnpm.dip"       %% "icdo3-impl"              % "1.1.5" % Test
+    val icd_catalogs   = "de.dnpm.dip"       %% "icd-claml-packaged"      % "1.1.5" % Test
+    val atc_impl       = "de.dnpm.dip"       %% "atc-impl"                % "1.1.4" % Test
+    val atc_catalogs   = "de.dnpm.dip"       %% "atc-catalogs-packaged"   % "1.1.4" % Test
+    val hgnc_geneset   = "de.dnpm.dip"       %% "hgnc-gene-set-impl"      % "1.1.4" % Test
+    val hpo            = "de.dnpm.dip"       %% "hp-ontology"             % "1.2.2" % Test
+    val alpha_id_se    = "de.dnpm.dip"       %% "alpha-id-se"             % "1.2.2" % Test
+    val orphanet       = "de.dnpm.dip"       %% "orphanet-ordo"           % "1.2.2" % Test
     val logback        = "ch.qos.logback"    %  "logback-classic"         % "1.5.18"
-    val service_base   = "de.dnpm.dip"       %% "service-base"            % "1.5.0"
-    val mtb_dto_model  = "de.dnpm.dip"       %% "mtb-dto-model"           % "1.2.3"
-    val rd_dto_model   = "de.dnpm.dip"       %% "rd-dto-model"            % "1.2.1"
+    val service_base   = "de.dnpm.dip"       %% "service-base"            % "1.5.4"
+    val mtb_dto_model  = "de.dnpm.dip"       %% "mtb-dto-model"           % "1.2.4"
+    val rd_dto_model   = "de.dnpm.dip"       %% "rd-dto-model"            % "1.2.2"
+    // Mappings to the BfArM "Datenkranz" schemata, see https://github.com/dnpm-dip/bfarm-schema-dto-model
+    val bfarm_onco     = "de.dnpm"           %% "dnpm-bfarm-model-oncology"     % "1.0.7"
+    val bfarm_rd       = "de.dnpm"           %% "dnpm-bfarm-model-rare-disease" % "1.0.6"
     val mongodb_driver = "org.mongodb" % "mongodb-driver-sync" % "5.3.0"
     // Compile-only: resolves JSR-305 annotations used by the MongoDB driver (e.g. com.mongodb.lang.Nullable), which results in a compiler warning
     val jsr305         = "com.google.code.findbugs" % "jsr305" % "3.0.2" % Provided

@@ -1,14 +1,21 @@
 package de.dnpm.ccdn.evaluation
 
-import java.time.LocalDateTime
+import java.time.{LocalDate, LocalDateTime}
+import scala.util.Random
 import de.dnpm.ccdn.evaluation.collect.BackupFilter
 import de.dnpm.ccdn.evaluation.model.Deletion
-import de.dnpm.ccdn.evaluation.statistics.{Export, MtbDiagnoses, Statistic, Statistics, SubmissionCounts}
-import de.dnpm.dip.service.mvh.{Submission, UseCase}
+import de.dnpm.ccdn.evaluation.statistics.{Export, ExportDatenkranz, MtbDiagnoses, Statistic, Statistics, SubmissionCounts}
+import de.dnpm.dip.model.{Id, PatientRecord}
+import de.dnpm.dip.mtb.gens.{Generators => MtbGenerators}
+import de.dnpm.dip.mtb.model.MTBPatientRecord
+import de.dnpm.dip.rd.gens.{Generators => RdGenerators}
+import de.dnpm.dip.rd.model.RDPatientRecord
+import de.dnpm.dip.service.mvh.{BroadConsent, Consent, ModelProjectConsent, Submission, TransferTAN, UseCase}
+import de.ekut.tbi.generators.Gen
 import org.scalatest.EitherValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import play.api.libs.json.{JsValue, Json}
+import play.api.libs.json.{JsObject, JsValue, Json, OWrites}
 
 
 class StatisticsTests extends AnyFlatSpec with Matchers with EitherValues
@@ -106,5 +113,58 @@ class StatisticsTests extends AnyFlatSpec with Matchers with EitherValues
       Statistic.Table.row("UKT", "MTB", Option.empty[String], Option.empty[String], "t9", "manual-deletion")
     )
     result.map(_(7)) shouldBe Seq(Json.toJson(r1), mtbSubmission("t1", "p1"), deletionEvent("t0", "p1", event.at), Json.toJson(r2), Json.toJson("withdrawn"))
+  }
+
+  "export-datenkranz" should "convert the submissions into the BfArM Datenkranz schema of their use case" in {
+    implicit val rnd: Random = new Random(42)
+
+    // generated records have no managing site, so the case's site is filled in
+    def submission[T <: PatientRecord: OWrites](record: T, tan: String): JsObject =
+      Json.toJsObject(
+        Submission(
+          record,
+          Submission.Metadata(
+            `type`        = Submission.Type.Initial,
+            transferTAN   = Id[TransferTAN](tan),
+            episodeOfCare = None,
+            modelProjectConsent = ModelProjectConsent(
+              "Patient Info TE Consent MVGenomSeq vers01",
+              Some(LocalDate.of(2025, 1, 1)),
+              ModelProjectConsent.Purpose.values.toList.map(Consent.Provision(LocalDate.of(2025, 1, 1), _, Consent.Provision.Type.Permit))
+            ),
+            researchConsents             = None,
+            reasonResearchConsentMissing = Some(BroadConsent.ReasonMissing.OtherPatientReason)
+          ),
+          LocalDateTime.of(2025, 3, 1, 0, 0)
+        )
+      )
+
+    val mtb = submission(Gen.of[MTBPatientRecord](MtbGenerators.genPatientRecord).next, "t1")
+    val rd  = submission(Gen.of[RDPatientRecord](RdGenerators.genRDPatientRecord).next, "t2")
+
+    val cases = Seq(
+      caseOf(report("t1"), mtb),
+      caseOf(report("t2", useCase = UseCase.RD), rd),
+      // not in the mappings' config
+      caseOf(report("t3", site = "XYZ"), mtb),
+      caseOf(report("t4"), mtbSubmission("t4") - "diagnoses")
+    )
+
+    val result = ExportDatenkranz.aggregate(cases.iterator, params(ExportDatenkranz))
+    val Seq(converted, failures) = result.tables
+
+    converted.rows.map(_.take(5)) shouldBe Seq(
+      Statistic.Table.row("UKT", "MTB", "patient-1", "episode-1", "t1"),
+      Statistic.Table.row("UKT", "RD", "patient-1", "episode-1", "t2")
+    )
+    converted.rows.map(r => (r(6) \ "metaData" \ "tanC").as[String]) shouldBe Seq("t1", "t2")
+    converted.rows.map(r => (r(6) \ "metaData" \ "submission" \ "submitterId").as[String]) shouldBe Seq("260840108", "260840108")
+    (converted.rows(0)(6) \ "metaData" \ "submission" \ "diseaseType").as[String] shouldBe "oncological"
+    (converted.rows(1)(6) \ "metaData" \ "submission" \ "diseaseType").as[String] shouldBe "rare"
+
+    failures.rows.map(_(4).as[String]) shouldBe Seq("t3", "t4")
+    failures.rows(0)(6).as[String] should startWith ("conversion failed")
+    failures.rows(1)(6).as[String] should startWith ("unreadable submission")
+    result.notes.head shouldBe "2 submissions converted, 2 couldn't be read or converted, see \"failures\"."
   }
 }

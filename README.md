@@ -132,7 +132,8 @@ When stakeholders request a new statistic:
    the statistic can be run (and rerun with other filters) by its name.
 
 ## Building
-`sbt test` runs the tests, `sbt assembly` creates `target/scala-2.13/dnpm-ccdn-evaluation.jar`.
+`sbt test` runs the tests, `sbt assembly` creates `target/scala-2.13/dnpm-ccdn-evaluation.jar` and
+copies it into the project root, so that `docker build .` picks it up.
 Releases are packaged as Docker image through the GitHub action in `.github/workflows/release.yml`,
 like the central-data-node itself. The dnpm libraries are resolved from GitHub Packages, which
 requires `GITHUB_TOKEN` to be set.

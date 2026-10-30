@@ -44,13 +44,21 @@ lazy val evaluation = project
       dependencies.service_base,
       dependencies.mtb_dto_model,
       dependencies.rd_dto_model,
+      dependencies.bfarm_base,
       dependencies.bfarm_onco,
       dependencies.bfarm_rd,
       dependencies.mongodb_driver,
       dependencies.jsr305
     ),
     assembly / assemblyJarName := "dnpm-ccdn-evaluation.jar",
-    assembly / mainClass       := Some("de.dnpm.ccdn.evaluation.EvaluationApp")
+    assembly / mainClass       := Some("de.dnpm.ccdn.evaluation.EvaluationApp"),
+    // Also copies the jar into the project root, where the Dockerfile expects it
+    assembly := {
+      val jar = assembly.value
+      IO.copyFile(jar, baseDirectory.value / jar.getName)
+      streams.value.log.info(s"Copied to ${baseDirectory.value / jar.getName}")
+      jar
+    }
   )
 
 
@@ -63,10 +71,10 @@ lazy val evaluation = project
 lazy val dependencies =
   new {
     val scalatest      = "org.scalatest"     %% "scalatest"               % "3.2.18" % Test
-    // Test-only: random patient records for the Datenkranz export (rd-dto-generators 1.2.2 isn't resolvable),
+    // Test-only: random patient records for the Datenkranz export,
     // and the code systems they draw from, as in the tests of bfarm-schema-dto-model
     val mtb_generators = "de.dnpm.dip"       %% "mtb-dto-generators"      % "1.2.4" % Test
-    val rd_generators  = "de.dnpm.dip"       %% "rd-dto-generators"       % "1.2.1" % Test
+    val rd_generators  = "de.dnpm.dip"       %% "rd-dto-generators"       % "1.2.2" % Test
     val icd10gm        = "de.dnpm.dip"       %% "icd10gm-impl"            % "1.1.5" % Test
     val icdo3          = "de.dnpm.dip"       %% "icdo3-impl"              % "1.1.5" % Test
     val icd_catalogs   = "de.dnpm.dip"       %% "icd-claml-packaged"      % "1.1.5" % Test
@@ -80,7 +88,10 @@ lazy val dependencies =
     val service_base   = "de.dnpm.dip"       %% "service-base"            % "1.5.4"
     val mtb_dto_model  = "de.dnpm.dip"       %% "mtb-dto-model"           % "1.2.4"
     val rd_dto_model   = "de.dnpm.dip"       %% "rd-dto-model"            % "1.2.2"
-    // Mappings to the BfArM "Datenkranz" schemata, see https://github.com/dnpm-dip/bfarm-schema-dto-model
+    // Mappings to the BfArM "Datenkranz" schemata, see https://github.com/dnpm-dip/bfarm-schema-dto-model.
+    // The base module is pinned to the version released along with oncology and rare-disease: their
+    // published POMs declare base 1.0.0, although they were built against the base of their release
+    val bfarm_base     = "de.dnpm"           %% "dnpm-bfarm-model-base"         % "1.0.6"
     val bfarm_onco     = "de.dnpm"           %% "dnpm-bfarm-model-oncology"     % "1.0.7"
     val bfarm_rd       = "de.dnpm"           %% "dnpm-bfarm-model-rare-disease" % "1.0.6"
     val mongodb_driver = "org.mongodb" % "mongodb-driver-sync" % "5.3.0"

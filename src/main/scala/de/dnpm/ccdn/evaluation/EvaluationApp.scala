@@ -5,11 +5,10 @@ import java.nio.file.{Files, Path, Paths}
 import java.time.LocalDateTime
 import scala.util.{Try, Using}
 import scala.util.Properties.envOrNone
-import de.dnpm.ccdn.evaluation.collect.{DataCollector, MongoBackupSource, RsaHybridDecryptor, WrongKeyException}
+import de.dnpm.ccdn.evaluation.collect.{CollectionSummary, DataCollector, MongoBackupSource, RsaHybridDecryptor, WrongKeyException}
 import de.dnpm.ccdn.evaluation.output.{Evaluation, ResultWriter}
 import de.dnpm.ccdn.evaluation.statistics.{Statistic, Statistics}
 import de.dnpm.dip.util.Logging
-import play.api.libs.json.Json
 
 
 /**
@@ -114,16 +113,19 @@ object EvaluationApp extends Logging
               log.info(s"Running statistic '${statistic.name}' (module version $version) with ${params.toMap} on backups matching $filter")
               val collection = new DataCollector(source, decryptor).collect(filter, statistic.documentTypes)
               val result     = statistic.aggregate(collection.cases, params)
-              // drain the cases the statistic didn't consume, so that the summary is complete
-              collection.cases.foreach(_ => ())
-              val summary    = collection.summary
+              val evaluation = Evaluation(statistic, version, startedAt, filter, params, result)
+              // the summary is written after the tables, which may stream the cases
+              def summary = {
+                // drain the cases the statistic didn't consume, so that the summary is complete
+                collection.cases.foreach(_ => ())
+                collection.summary
+              }
+              output(evaluation, summary, run.outputDir.orElse(envOrNone(OutputDirEnv)).filter(_.nonEmpty).map(Paths.get(_)))
 
-              val evaluation = Evaluation(statistic, version, startedAt, filter, params, summary, result)
-              output(evaluation, run.outputDir.orElse(envOrNone(OutputDirEnv)).filter(_.nonEmpty).map(Paths.get(_)))
-
-              log.info(s"Done: ${summary.cases} cases evaluated from ${summary.documents.values.sum} documents")
-              if (summary.failedDocuments > 0) {
-                log.warn(s"${summary.failedDocuments} documents couldn't be read and were left out, ${summary.skippedCases} cases with them, see the errors above")
+              val done = collection.summary
+              log.info(s"Done: ${done.cases} cases evaluated from ${done.documents.values.sum} documents")
+              if (done.failedDocuments > 0) {
+                log.warn(s"${done.failedDocuments} documents couldn't be read and were left out, ${done.skippedCases} cases with them, see the errors above")
                 IncompleteResult
               }
               else Success
@@ -132,11 +134,11 @@ object EvaluationApp extends Logging
     }
   }
 
-  private def output(evaluation: Evaluation, dir: Option[Path]): Unit =
+  private def output(evaluation: Evaluation, summary: => CollectionSummary, dir: Option[Path]): Unit =
     dir match {
       case Some(d) =>
-        ResultWriter.write(evaluation, d).foreach(file => log.info(s"Written $file"))
+        ResultWriter.write(evaluation, summary, d).foreach(file => log.info(s"Written $file"))
       case None =>
-        println(Json.prettyPrint(ResultWriter.toJson(evaluation)))
+        ResultWriter.print(evaluation, summary)
     }
 }

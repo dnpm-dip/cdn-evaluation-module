@@ -1,5 +1,6 @@
 package de.dnpm.ccdn.evaluation
 
+import java.nio.file.Files
 import java.time.LocalDateTime
 import de.dnpm.ccdn.evaluation.CommandLine._
 import de.dnpm.ccdn.evaluation.collect.BackupFilter
@@ -10,7 +11,7 @@ import de.dnpm.dip.service.mvh.UseCase
 import org.scalatest.EitherValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import play.api.libs.json.{JsNull, Json}
+import play.api.libs.json.{JsNull, JsObject, Json}
 
 
 class CommandLineTests extends AnyFlatSpec with Matchers with EitherValues
@@ -79,15 +80,46 @@ class CommandLineTests extends AnyFlatSpec with Matchers with EitherValues
         SubmissionCounts, "1.0.0", LocalDateTime.of(2026, 10, 1, 12, 0),
         BackupFilter(sites = Set("UKT")),
         Statistic.Params.validate(SubmissionCounts, Map.empty).value,
-        CollectionSummary(Map(DocumentType.Report -> 3), 3, 0, 0),
         Statistic.Result(Seq(Statistic.Table("t", Seq("site", "n"), Seq(Statistic.Table.row("UKT", 3)))))
       )
-    val json = ResultWriter.toJson(evaluation)
+    val json = ResultWriter.toJson(evaluation, CollectionSummary(Map(DocumentType.Report -> 3), 3, 0, 0))
     (json \ "statistic").as[String] shouldBe "submission-counts"
     (json \ "filter" \ "sites").as[Seq[String]] shouldBe Seq("UKT")
     (json \ "filter" \ "useCases").as[Seq[String]] shouldBe Seq("MTB", "RD")
     (json \ "parameters" \ "period").as[String] shouldBe "quarter"
     (json \ "collection" \ "documents" \ "report").as[Int] shouldBe 3
     (json \ "tables" \ 0 \ "rows" \ 0).get shouldBe Json.obj("site" -> "UKT", "n" -> 3)
+  }
+
+  it should "stream the rows into the JSON and CSV files, followed by the notes and collection summary" in {
+    var streamed = 0
+    val rows = Iterator.tabulate(3) { i => streamed += 1; Statistic.Table.row(s"t$i", Json.obj("n" -> i)) }
+    var drained = false
+    val evaluation =
+      Evaluation(
+        SubmissionCounts, "1.0.0", LocalDateTime.of(2026, 10, 1, 12, 0),
+        BackupFilter(),
+        Statistic.Params.validate(SubmissionCounts, Map.empty).value,
+        Statistic.Result(
+          Seq(Statistic.Table("streamed", Seq("tan", "content"), rows), Statistic.Table("empty", Seq("x"), Seq.empty)),
+          Seq(s"$streamed rows")
+        )
+      )
+    val dir   = Files.createTempDirectory("evaluation")
+    val files = ResultWriter.write(evaluation, { drained = true; CollectionSummary(Map.empty, streamed, 0, 0) }, dir)
+    drained shouldBe true
+
+    files.map(_.getFileName.toString) shouldBe Seq(
+      "submission-counts_2026-10-01_12-00-00.json",
+      "submission-counts_2026-10-01_12-00-00_streamed.csv",
+      "submission-counts_2026-10-01_12-00-00_empty.csv"
+    )
+    val json = Json.parse(Files.readString(files(0)))
+    (json \ "tables" \ 0 \ "rows").as[Seq[JsObject]].map(r => (r \ "content" \ "n").as[Int]) shouldBe Seq(0, 1, 2)
+    (json \ "tables" \ 1 \ "rows").as[Seq[JsObject]] shouldBe empty
+    (json \ "notes").as[Seq[String]] shouldBe Seq("3 rows")
+    (json \ "collection" \ "cases").as[Int] shouldBe 3
+    Files.readString(files(1)) shouldBe "tan,content\r\nt0,\"{\"\"n\"\":0}\"\r\nt1,\"{\"\"n\"\":1}\"\r\nt2,\"{\"\"n\"\":2}\"\r\n"
+    Files.readString(files(2)) shouldBe "x\r\n"
   }
 }

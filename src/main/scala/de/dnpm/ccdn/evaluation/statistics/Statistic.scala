@@ -35,7 +35,8 @@ trait Statistic
   /**
    * Computes the statistic from the collected cases. The cases are streamed: they can be
    * traversed only once, and shouldn't be held in memory all at once, so aggregate
-   * them while traversing (e.g. with foldLeft).
+   * them while traversing (e.g. with foldLeft), or, for tables too large for memory (e.g.
+   * exports), stream them into the rows of the table (see [[Statistic.Table.rows]]).
    */
   def aggregate(cases: Iterator[Case], params: Statistic.Params): Statistic.Result
 }
@@ -89,16 +90,17 @@ object Statistic
 
   /**
    * @param columns names of the columns
-   * @param rows    each with one value per column
+   * @param rows    each with one value per column (checked when written). May be streamed, i.e.
+   *                computed while the cases are traversed, so that large tables (e.g. exports) are
+   *                never held in memory as a whole: the rows are then traversable only once. Tables
+   *                are written in order, so the rows of a table may be filled while those of an
+   *                earlier one are traversed.
    */
   final case class Table(
     name: String,
     columns: Seq[String],
-    rows: Seq[Seq[JsValue]]
+    rows: IterableOnce[Seq[JsValue]]
   )
-  {
-    require(rows.forall(_.size == columns.size), s"Table '$name': each row needs ${columns.size} values")
-  }
 
   object Table
   {
@@ -108,10 +110,21 @@ object Statistic
   }
 
   /**
-   * @param notes remarks needed to interpret the tables, e.g. on cases left out
+   * @param tables the tables, see [[Table.rows]] on streaming them
+   * @param notes  remarks needed to interpret the tables, e.g. on cases left out. Evaluated once
+   *               all tables are written, so they may report counts of streamed tables.
    */
-  final case class Result(
-    tables: Seq[Table],
-    notes: Seq[String] = Seq.empty
+  final class Result(
+    val tables: Seq[Table],
+    notesOf: => Seq[String]
   )
+  {
+    lazy val notes: Seq[String] = notesOf
+  }
+
+  object Result
+  {
+    def apply(tables: Seq[Table], notes: => Seq[String] = Seq.empty): Result =
+      new Result(tables, notes)
+  }
 }

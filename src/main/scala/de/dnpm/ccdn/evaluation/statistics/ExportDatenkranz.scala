@@ -1,5 +1,6 @@
 package de.dnpm.ccdn.evaluation.statistics
 
+import scala.collection.mutable.ArrayBuffer
 import scala.util.Try
 import de.dnpm.bfarm.model.onco.MTBMappings
 import de.dnpm.bfarm.model.rd.RDMappings
@@ -23,8 +24,8 @@ object ExportDatenkranz extends Statistic
   override val description =
     "All backed up submissions, converted into the BfArM \"Datenkranz\" schema (oncology for MTB, rare " +
     "diseases for RD), one row per submission, along with the patient and episode of care of its case. " +
-    "Submissions that can't be read or converted are listed with the error instead. Reads the submissions, " +
-    "and holds them in memory: restrict large exports with the filters."
+    "Submissions that can't be read or converted are listed with the error instead. The submissions are " +
+    "streamed into the output case by case, so exports aren't limited by memory."
 
   override val documentTypes = Set(DocumentType.Submission)
 
@@ -50,19 +51,24 @@ object ExportDatenkranz extends Statistic
   }
 
   override def aggregate(cases: Iterator[Case], params: Params): Result = {
-    val (rows, failures) =
-      cases.foldLeft((Vector.empty[Seq[JsValue]], Vector.empty[Seq[JsValue]])) { case ((rows, failures), c) =>
-        c.submissions.foldLeft((rows, failures)) { case ((rows, failures), s) =>
-          s.submission match {
-            case Some(submission) =>
-              datenkranz(c, submission) match {
-                case Right(content) =>
-                  (rows :+ Table.row(c.site, c.useCase.toString, c.patient, c.episodeOfCare, s.tan, s.submittedAt, content), failures)
-                case Left(error) =>
-                  (rows, failures :+ Table.row(c.site, c.useCase.toString, c.patient, c.episodeOfCare, s.tan, s.submittedAt, error))
-              }
-            case None =>
-              (rows, failures)
+    // the failures are few and small, so they are collected while the converted submissions are
+    // streamed, and written after them
+    val failures  = ArrayBuffer.empty[Seq[JsValue]]
+    var converted = 0
+
+    // streamed: one case in memory at a time
+    val rows =
+      cases.flatMap { c =>
+        c.submissions.iterator.flatMap { s =>
+          s.submission.flatMap { submission =>
+            datenkranz(c, submission) match {
+              case Right(content) =>
+                converted += 1
+                Some(Table.row(c.site, c.useCase.toString, c.patient, c.episodeOfCare, s.tan, s.submittedAt, content))
+              case Left(error) =>
+                failures += Table.row(c.site, c.useCase.toString, c.patient, c.episodeOfCare, s.tan, s.submittedAt, error)
+                None
+            }
           }
         }
       }
@@ -81,7 +87,7 @@ object ExportDatenkranz extends Statistic
         )
       ),
       notes = Seq(
-        s"${rows.size} submissions converted, ${failures.size} couldn't be read or converted, see \"failures\".",
+        s"$converted submissions converted, ${failures.size} couldn't be read or converted, see \"failures\".",
         "\"content\" is the submission in the BfArM Datenkranz schema, as the mappings produce it; it isn't validated against the schema.",
         "The submitter and data node IDs come from the mappings' config, set with the environment variable " +
           "CCDN_BFARM_MAPPINGS_CONFIG_FILE, else its defaults; submissions of sites not contained there fail.",

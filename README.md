@@ -30,7 +30,8 @@ A run consists of two steps:
 2. **Aggregation** (`statistics`, one implementation per statistic): computes tables from the cases.
 
 The result is JSON: the tables plus everything needed to interpret and reproduce them (statistic,
-module version, filter, parameters, numbers of documents read and cases left out).
+module version, filter, parameters, numbers of documents read and cases left out). The tables are
+written row by row, so the notes and the numbers of the collection follow them.
 
 ## Usage
 
@@ -104,8 +105,8 @@ python3 scripts/rd_evaluation_matrix/rd_evaluation_matrix.py /out/export-datenkr
 needed for the disease groups. Tests: `python3 -m unittest discover -s scripts/rd_evaluation_matrix`.
 
 Large submissions are decrypted in memory; for more heap, set `JAVA_OPTS=-Xmx4g` in the container.
-`export` and `export-datenkranz` hold all exported documents in memory, so restrict large exports
-with the filters.
+`export` and `export-datenkranz` stream the documents into the output case by case, so only one
+case (and the reports, see above) is held in memory at a time.
 
 ## Adding a statistic
 
@@ -120,6 +121,9 @@ When stakeholders request a new statistic:
    - `parameters`: statistic-specific options with defaults, validated before the run.
    - `restrict`: e.g. to the use case it applies to.
    - `aggregate`: fold over the cases (they can be traversed only once) into `Result` tables.
+     Tables too large for memory, like those of the exports, can instead be streamed: rows given
+     as an `Iterator` over the cases are written while the cases are read (see `Export`), and the
+     notes are evaluated after the tables, so they can report counts of the streamed rows.
      A case may hold several submissions (`Case.submissions`, ordered by time).
      Read submissions through the dnpm model (`SubmissionDocument.as`, `.mtb`, `.rd`); reading only
      the parts needed, e.g. `(json \ "diagnoses").validate[List[MTBDiagnosis]]`, tolerates

@@ -17,7 +17,7 @@ object Export extends Statistic
   override val description =
     "All backed up reports, submissions and deletions as stored in the central-data-node, with their " +
     "content decrypted, one row per document, along with the patient and episode of care of its case. " +
-    "Reads all documents, and holds them in memory: restrict large exports with the filters."
+    "The documents are streamed into the output case by case, so exports aren't limited by memory."
 
   override val documentTypes = DocumentType.values.toSet
 
@@ -25,19 +25,30 @@ object Export extends Statistic
 
   override def aggregate(cases: Iterator[Case], params: Params): Result = {
     // a deletion event is attached to all cases of its patient, but exported once
-    val (rows, _) =
-      cases.foldLeft((Vector.empty[Seq[JsValue]], Set.empty[DeletionKey])) { case ((rows, exported), c) =>
-        def row(tan: String, documentType: DocumentType.Value, episode: Option[String], submittedAt: JsValue, content: JsValue) =
-          Table.row(c.site, c.useCase.toString, c.patient, episode, tan, documentType.toString, submittedAt, content)
+    var exported = Set.empty[DeletionKey]
+
+    // streamed: one case in memory at a time
+    val rows =
+      cases.flatMap { c =>
+        def row(tan: String, documentType: DocumentType.Value,
+                episode: Option[String], submittedAt: JsValue,
+                content: JsValue) =
+          Table.row(
+            c.site, c.useCase.toString, c.patient, episode, tan,
+            documentType.toString, submittedAt, content)
 
         val submissionRows =
           c.submissions.flatMap { s =>
-            row(s.tan, DocumentType.Report, c.episodeOfCare, Json.toJson(s.submittedAt), s.reportJson) +:
-            s.submission.toSeq.map(sub => row(s.tan, DocumentType.Submission, c.episodeOfCare, Json.toJson(s.submittedAt), sub.json))
+            row(s.tan, DocumentType.Report, c.episodeOfCare,
+              Json.toJson(s.submittedAt), s.reportJson) +:
+            s.submission.toSeq
+              .map(sub => row(s.tan, DocumentType.Submission, c.episodeOfCare,
+                Json.toJson(s.submittedAt), sub.json))
           }
 
         val deletions =
           c.deletions.filterNot(d => exported(DeletionKey(c.site, c.useCase.toString, d.tan, d.kind)))
+        exported ++= deletions.map(d => DeletionKey(c.site, c.useCase.toString, d.tan, d.kind))
 
         // the episode of a deletion is unknown, see Case
         val deletionRows =
@@ -48,7 +59,7 @@ object Export extends Statistic
             }
           }
 
-        (rows ++ submissionRows ++ deletionRows, exported ++ deletions.map(d => DeletionKey(c.site, c.useCase.toString, d.tan, d.kind)))
+        submissionRows ++ deletionRows
       }
 
     Result(

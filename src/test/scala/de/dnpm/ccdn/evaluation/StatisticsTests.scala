@@ -26,7 +26,7 @@ class StatisticsTests extends AnyFlatSpec with Matchers with EitherValues
     Statistic.Params.validate(statistic, values.toMap).value
 
   private def rows(result: Statistic.Result): Seq[Seq[JsValue]] =
-    result.tables.head.rows
+    result.tables.head.rows.iterator.toSeq
 
   "The registry" should "contain statistics with unique kebab-case names" in {
     val names = Statistics.all.map(_.name)
@@ -151,20 +151,21 @@ class StatisticsTests extends AnyFlatSpec with Matchers with EitherValues
     )
 
     val result = ExportDatenkranz.aggregate(cases.iterator, params(ExportDatenkranz))
-    val Seq(converted, failures) = result.tables
+    // streamed: the failures are complete once the converted rows are traversed
+    val Seq(converted, failures) = result.tables.map(_.rows.iterator.toSeq)
 
-    converted.rows.map(_.take(5)) shouldBe Seq(
+    converted.map(_.take(5)) shouldBe Seq(
       Statistic.Table.row("UKT", "MTB", "patient-1", "episode-1", "t1"),
       Statistic.Table.row("UKT", "RD", "patient-1", "episode-1", "t2")
     )
-    converted.rows.map(r => (r(6) \ "metaData" \ "tanC").as[String]) shouldBe Seq("t1", "t2")
-    converted.rows.map(r => (r(6) \ "metaData" \ "submission" \ "submitterId").as[String]) shouldBe Seq("260840108", "260840108")
-    (converted.rows(0)(6) \ "metaData" \ "submission" \ "diseaseType").as[String] shouldBe "oncological"
-    (converted.rows(1)(6) \ "metaData" \ "submission" \ "diseaseType").as[String] shouldBe "rare"
+    converted.map(r => (r(6) \ "metaData" \ "tanC").as[String]) shouldBe Seq("t1", "t2")
+    converted.map(r => (r(6) \ "metaData" \ "submission" \ "submitterId").as[String]) shouldBe Seq("260840108", "260840108")
+    (converted(0)(6) \ "metaData" \ "submission" \ "diseaseType").as[String] shouldBe "oncological"
+    (converted(1)(6) \ "metaData" \ "submission" \ "diseaseType").as[String] shouldBe "rare"
 
-    failures.rows.map(_(4).as[String]) shouldBe Seq("t3", "t4")
-    failures.rows(0)(6).as[String] should startWith ("conversion failed")
-    failures.rows(1)(6).as[String] should startWith ("unreadable submission")
+    failures.map(_(4).as[String]) shouldBe Seq("t3", "t4")
+    failures(0)(6).as[String] should startWith ("conversion failed")
+    failures(1)(6).as[String] should startWith ("unreadable submission")
     result.notes.head shouldBe "2 submissions converted, 2 couldn't be read or converted, see \"failures\"."
   }
 }

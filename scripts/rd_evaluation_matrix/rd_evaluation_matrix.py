@@ -373,6 +373,7 @@ class Evaluated:
     research_consent: bool
     medical_days: object        # int or None
     documentary_days: object    # int or None
+    impossible_dates: list      # notes on board dates after the submission reporting them
     prior_type: str
     prior_year: str
     prior_after_2025: bool
@@ -417,11 +418,25 @@ def evaluate_case(case, reference_date):
     ]
     later = [(d, s) for d, s in plans if d > gfk1]
     medical_days = documentary_days = None
+    # a submission can't report a board that took place after its own submission date; the
+    # durations of a case with such an impossible date are left out
+    impossible_dates = []
+    if gfk1 > submission_date(latest):
+        impossible_dates.append(
+            f"{case.key}: GFK1 (metaData.molecularBoardDecisionDate) {gfk1} is after the date "
+            f"{submission_date(latest)} of the submission reporting it (metaData.submission.date)"
+        )
     if later:
         gfk2 = min(d for d, _ in later)
         first = next(s for d, s in later if d == gfk2)  # submissions are ordered by time
-        medical_days = (gfk2 - gfk1).days
-        documentary_days = (submission_date(first) - gfk2).days
+        if gfk2 > submission_date(first):
+            impossible_dates.append(
+                f"{case.key}: GFK2 (plan.carePlanRd.molecularBoardDecisionDate) {gfk2} is after the date "
+                f"{submission_date(first)} of the submission reporting it (metaData.submission.date)"
+            )
+        if not impossible_dates:
+            medical_days = (gfk2 - gfk1).days
+            documentary_days = (submission_date(first) - gfk2).days
 
     priors = latest["case"].get("priorRds") or []
     prior = max(priors, key=lambda p: p.get("diagnosticDate") or "", default=None)
@@ -457,6 +472,7 @@ def evaluate_case(case, reference_date):
         research_consent = permits_research_use(meta.get("researchConsents") or [], reference_date),
         medical_days     = medical_days,
         documentary_days = documentary_days,
+        impossible_dates = impossible_dates,
         prior_type       = prior_type,
         prior_year       = year_bucket(prior_date),
         prior_after_2025 = prior_date is not None and prior_date.year > 2025,
@@ -772,6 +788,9 @@ def run(rows, export_failures, heads, start, end, reference_date):
     if unmapped_heads:
         notes.append("Orphanet classification heads without template group, counted as unbekannt: "
                      + ", ".join(sorted(unmapped_heads)) + "; extend HEAD_GROUP.")
+    for e in evaluated:
+        for impossible in e.impossible_dates:
+            notes.append(f"Impossible date, durations of the case (rows 21-22) left out: {impossible}.")
     if any(e.prior_after_2025 for e in evaluated):
         notes.append("Prior findings after 2025 are counted under '2025/2024'.")
 

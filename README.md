@@ -104,6 +104,17 @@ python3 scripts/rd_evaluation_matrix/rd_evaluation_matrix.py /out/export-datenkr
 `--orphanet` is the Orphadata linearisation (https://www.orphadata.com/data/xml/en_product7.xml),
 needed for the disease groups. Tests: `python3 -m unittest discover -s scripts/rd_evaluation_matrix`.
 
+The data quality queries (sheet "Datenqualität_KDK (V2) opt" of
+`docs/Daten Qualitätsabfragen und Statistik.V4sb.xlsx`) are computed from such an export by
+`scripts/data_quality_mvh/data_quality_mvh.py`, also standard library only. It reads the export row by row,
+so it isn't limited by memory, and writes a CSV for Excel: per field of the sheet and value, the
+count over all sites and per Leistungserbringer (submitterId).
+```
+python3 scripts/data_quality_mvh/data_quality_mvh.py /out/export-datenkranz_<time>.json \
+  --from 2026-01-01 --until 2027-01-01 --output datenqualitaet.csv
+```
+Tests: `python3 -m unittest discover -s scripts/data_quality_mvh`.
+
 Large submissions are decrypted in memory; for more heap, set `JAVA_OPTS=-Xmx4g` in the container.
 `export` and `export-datenkranz` stream the documents into the output case by case, so only one
 case (and the reports, see above) is held in memory at a time.

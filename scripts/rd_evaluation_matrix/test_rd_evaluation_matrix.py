@@ -171,6 +171,27 @@ class RowTests(unittest.TestCase):
         self.assertEqual(extras[("Bearbeitungsdauer (medizinisch, GFK1 bis GFK2) in Tagen", "Fälle")], 2)
         self.assertEqual(extras[("Bearbeitungsdauer (medizinisch, GFK1 bis GFK2) in Tagen", "Maximum")], 60)
 
+    def test_impossible_dates_are_noted_and_left_out_of_the_durations(self):
+        rows = [
+            row("a", datenkranz("t1", gfk1="2025-01-10", plan_date="2025-02-10", submitted="2025-03-01")),
+            # GFK2 three years after the submission reporting it
+            row("b", datenkranz("t2", gfk1="2025-01-10", plan_date="2028-02-10", submitted="2025-03-01")),
+            # GFK1 after the submission reporting it
+            row("c", datenkranz("t3", gfk1="2025-04-10", plan_date="2025-05-10", submitted="2025-03-01")),
+        ]
+        result = run(rows)
+        self.assertEqual(result["cells"]["C3"], 3)
+        self.assertEqual(result["cells"]["C21"], 31.0)
+        self.assertEqual(result["cells"]["C22"], 19.0)
+        extras = {(e["section"], e["item"]): e["value"] for e in result["extras"]}
+        documentary = "Bearbeitungsdauer (dokumentarisch, GFK2 bis Einreichung beim KDK) in Tagen"
+        self.assertEqual(extras[(documentary, "Fälle")], 1)
+        self.assertEqual(extras[(documentary, "Minimum")], 19)
+        impossible = [note for note in result["notes"] if note.startswith("Impossible date")]
+        self.assertEqual(len(impossible), 3)  # GFK1 and GFK2 of c both after its submission
+        self.assertTrue(any("GFK2" in note and "2028-02-10" in note and '"b"' in note for note in impossible))
+        self.assertTrue(any("GFK1" in note and "2025-04-10" in note and '"c"' in note for note in impossible))
+
     def test_diagnosis_rates(self):
         cells = self.cells(
             datenkranz("t1", extent="trioGenome", library="wgs", birth="1990-01"),

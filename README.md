@@ -91,18 +91,23 @@ mappings' config, given as file in `CCDN_BFARM_MAPPINGS_CONFIG_FILE`, else its b
 run export-datenkranz --site UKT --usecase RD --output /out
 ```
 
-The RD evaluation matrix (Auswertematrix Geltungszeitraum 1) is computed from such an export by
+The RD evaluation matrix (Auswertematrix) is computed from such an export by
 `scripts/rd_evaluation_matrix/rd_evaluation_matrix.py`, in Python (standard library only) and on
-the Datenkranz alone, so that it can be shared with the other KDKs. Specification:
-`docs/rd-evaluation-matrix.txt`. Export without `--until`, since later follow-ups determine the
-status of a case, and set the evaluation period in the script instead:
+the Datenkranz alone, so that it can be shared with the other KDKs. It reports every value in total
+and per Leistungserbringer (counts below 5 suppressed), and lists the cases to clarify with their LE
+(Rückfragen). Specification: `docs/rd-evaluation-matrix.txt`. Export without `--until`, since later
+follow-ups determine the status of a case, and set the evaluation period in the script instead:
 ```
 python3 scripts/rd_evaluation_matrix/rd_evaluation_matrix.py /out/export-datenkranz_<time>.json \
-  --orphanet en_product7.xml --from 2024-07-01 --until 2026-01-01 \
-  --template docs/Update_Auswertematrix_GZ1.xlsx --output matrix
+  --orphanet en_product7.xml --from 2024-07-01 --until 2026-01-01 --output matrix
+uv run --with openpyxl python scripts/rd_evaluation_matrix/fill_template.py matrix.json \
+  scripts/rd_evaluation_matrix/Auswertmatrix_Template.xlsx --output matrix.xlsx
 ```
-`--orphanet` is the Orphadata linearisation (https://www.orphadata.com/data/xml/en_product7.xml),
-needed for the disease groups. Tests: `python3 -m unittest discover -s scripts/rd_evaluation_matrix`.
+This writes `matrix.json`, `matrix.csv` (long table LE | Abschnitt | Kategorie | ... for per-LE
+analyses), `matrix_rueckfragen.csv` (case keys: only for the respective LE) and `matrix.xlsx` (one
+value column per LE). `--orphanet` is the Orphadata linearisation
+(https://www.orphadata.com/data/xml/en_product7.xml), needed for the disease groups.
+Tests: `python3 -m unittest discover -s scripts/rd_evaluation_matrix`.
 
 The data quality queries (sheet "Datenqualität_KDK (V2) opt" of
 `docs/Daten Qualitätsabfragen und Statistik.V4sb.xlsx`) are computed from such an export by

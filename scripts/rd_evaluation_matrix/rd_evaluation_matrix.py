@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-RD evaluation matrix ("Auswertematrix Geltungszeitraum 1") from BfArM Datenkranz submissions.
+RD evaluation matrix (Auswertematrix) from BfArM Datenkranz submissions, in total and per
+Leistungserbringer (LE).
 
 Specification: docs/rd-evaluation-matrix.txt. Standard library only, so it can be shared with the
 other clinical data nodes (KDKs).
@@ -11,34 +12,41 @@ Input, either
   - a JSON list of {"case": <any case key>, "submittedAt": <ISO datetime>, "content": <Datenkranz>},
     one entry per submission, for KDKs with their own export.
 
-Output: a JSON file with the value of every template cell (plus extras the template has no cells
-for, and notes), and, with --template, the filled template.
+Output (<output> without extension):
+  <output>.json          every value, in total and per LE, the cases to clarify with the LEs, notes
+  <output>.csv           long table LE | Abschnitt | Kategorie | Einheit | Wert | Bezug | Basis | Anteil
+  <output>_rueckfragen.csv  cases to clarify with their LE (contains case keys: only for the LEs)
+Counts below --min-cell (default 5) are suppressed ("<5") in all outputs except the Rückfragen.
+The xlsx is written from the JSON by fill_template.py (needs openpyxl).
 
 Example:
   python3 rd_evaluation_matrix.py export-datenkranz_2026-10-30_10-00-00.json \\
-    --orphanet en_product7.xml --from 2024-07-01 --until 2026-01-01 \\
-    --template ../../docs/Update_Auswertematrix_GZ1.xlsx --output matrix
+    --orphanet en_product7.xml --from 2024-07-01 --until 2026-01-01 --output matrix
+  uv run fill_template.py matrix.json Auswertmatrix_Template.xlsx --output matrix.xlsx
 """
 
 import argparse
+import csv
 import json
 import re
 import statistics
 import sys
 import xml.etree.ElementTree as ET
-import zipfile
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
-from xml.sax.saxutils import escape
 
 
 # ---------------------------------------------------------------------------------------------
 # Labels and mappings, see docs/rd-evaluation-matrix.txt
 # ---------------------------------------------------------------------------------------------
 
-DIAGNOSED, UNCLEAR, UNDIAGNOSED = "Diagnose", "Unklar", "Undiagnostiziert"
-STATUSES = (DIAGNOSED, UNCLEAR, UNDIAGNOSED)
+TOTAL = "Gesamt"
+
+DIAGNOSED, UNCLEAR, UNDIAGNOSED, OPEN = "Diagnose", "Unklar", "Undiagnostiziert", "offen"
+STATUSES = (DIAGNOSED, UNCLEAR, UNDIAGNOSED)    # of the closed cases
+CASE_STATUSES = STATUSES + (OPEN,)
 
 ASSESSMENT_STATUS = {
     "confirmedGeneticDiagnosis":           DIAGNOSED,
@@ -49,25 +57,26 @@ ASSESSMENT_STATUS = {
 }
 PARTIAL = "partialGeneticDiagnosis"
 
+NEONATE_DAYS = 37  # as in the stakeholders' template (not the WHO's 28)
 NEONATES, CHILDREN, ADOLESCENTS, ADULTS, SENIORS = (
-    "Neonaten (bis 37 Tage)", "Kinder (0 -12 Jahre)", "Jugendliche (13-17 Jahre)",
+    f"Neonaten (bis {NEONATE_DAYS} Tage)", f"Kinder ({NEONATE_DAYS + 1} Tage - 12 Jahre)", "Jugendliche (13-17 Jahre)",
     "Erwachsene (18-64 Jahre)", "Senioren (65+ Jahre)",
 )
 AGE_GROUPS = (NEONATES, CHILDREN, ADOLESCENTS, ADULTS, SENIORS)
 
+GENOME_LIBRARIES = {"wgs": "WGS", "wgs_lr": "lrWGS"}
+OTHER_LIBRARIES = {"panel": "Panel", "wes": "Exom (WES)", "none": "keine (noch nicht sequenziert)"}
 EXTENTS = {"singleGenome": "Single", "duoGenome": "Duo", "trioGenome": "Trio"}
 
 OTHER_TESTS = "Array, Einzelgentestung, Chromosomenanalyse, andere"
-NO_TEST = "keine"
-PRIOR_TYPES = ("Genom (SR)", "Genom (LR)", "Exom", "Panel", OTHER_TESTS, NO_TEST)  # left, rows in template order
+PRIOR_TYPES = ("Genom (SR)", "Genom (LR)", "Exom", "Panel", OTHER_TESTS)
 PRIOR_TYPE = {
     "genomeShortRead": "Genom (SR)", "genomeLongRead": "Genom (LR)", "exome": "Exom", "panel": "Panel",
     "array": OTHER_TESTS, "single": OTHER_TESTS, "karyotyping": OTHER_TESTS, "other": OTHER_TESTS,
-    "none": NO_TEST,
 }
-# right cross tables: the template orders the types differently
-PRIOR_TYPES_BY_YEAR = (OTHER_TESTS, "Panel", "Exom", "Genom (SR)", "Genom (LR)", NO_TEST)
-YEAR_BUCKETS = ("2025/2024", "2023/2022", "2021/2020", "2019/2018", "2017 und älter", "unbekannt")
+PRIOR_NONE_PERFORMED = "keine durchgeführt (genomicTestType none)"
+PRIOR_NOT_DOCUMENTED = "nicht dokumentiert (priorRds fehlt)"
+YEAR_BUCKETS = ("2026 und später", "2025/2024", "2023/2022", "2021/2020", "2019/2018", "2017 und älter", "unbekannt")
 
 RECOMMENDATIONS = (
     ("studyRecommended",        "1) Klinische Studie"),
@@ -76,7 +85,8 @@ RECOMMENDATIONS = (
     ("therapyRecommended",      "4) Therapieempfehlung"),
 )
 
-# OPEN: assignment of the strategies, to be confirmed by the stakeholders
+# strategy (all 9 of the schema) -> kind of the template; OPEN: to be confirmed by the stakeholders
+NOT_ASSIGNABLE = "nicht zuordenbar"
 THERAPY_KIND = {
     "systemicMedication":   "medikamentös",
     "targetedMedication":   "medikamentös",
@@ -85,15 +95,10 @@ THERAPY_KIND = {
     "prophylactic":         "nicht medikamentös",
     "earlyDetection":       "nicht medikamentös",
     "nutrition":            "nicht medikamentös",
+    "combination":          NOT_ASSIGNABLE,
+    "other":                NOT_ASSIGNABLE,
 }
-NOT_ASSIGNABLE = "nicht zuordenbar"
-THERAPY_ROWS = (  # (category, kind) per template row 68-72
-    ("symptomatic", "nicht medikamentös"),
-    ("symptomatic", "medikamentös"),
-    ("symptomatic", "interventionell"),
-    ("causal",      "medikamentös"),
-    ("causal",      "interventionell"),
-)
+THERAPY_KINDS = ("nicht medikamentös", "medikamentös", "interventionell", NOT_ASSIGNABLE)
 THERAPY_CATEGORY = {"symptomatic": "Symptomatisch", "causal": "Kausal"}
 
 MANAGEMENT = (
@@ -105,14 +110,14 @@ MANAGEMENT = (
     ("gp",                            "6) Hausarzt"),
     ("specialist",                    "7) Niedergelassener Facharzt"),
 )
-NO_MANAGEMENT = "8) NA"
+MANAGEMENT_UNSPECIFIED = "8a) empfohlen, nicht näher angegeben"
+MANAGEMENT_NOT_RECOMMENDED = "8b) nicht empfohlen (clinicalManagementRecommended = false)"
 
 ORPHANET = "https://www.orpha.net"
 ICD10GM = "http://fhir.de/CodeSystem/bfarm/icd-10-gm"
 
 NEUROMUSCULAR = "Muskuläre / neuromuskul. Erkrankungen"
-UNKNOWN_GROUP = "unbekannt"
-DISEASE_GROUPS = (
+NAMED_GROUPS = (
     NEUROMUSCULAR,
     "Neurologische Erkrankungen, Entwicklungsstörungen",
     "Hereditäre Stoffwechselerkrankungen",
@@ -130,11 +135,16 @@ DISEASE_GROUPS = (
     "Seltene Tumorerkrankungen",
     "Kongenitale Fehlbildungen und seltene geistige Beeinträchtigungen",
     "Urogenitale Krankheiten",
-    UNKNOWN_GROUP,
 )
+# "unbekannt", split by reason
+UNKNOWN_NO_ORPHA = "unbekannt: kein Orphacode"
+UNKNOWN_NOT_LINEARISED = "unbekannt: Orphacode nicht in der Linearisierung"
+UNKNOWN_UNDETERMINED = "unbekannt: ohne Diagnose nach vollständiger Abklärung (ORPHA:616874)"
+UNKNOWN_HEAD = "unbekannt: Gruppenkopf ohne Vorlagengruppe (genetisch, infektiös, toxisch, Transplantation)"
+UNKNOWN_GROUPS = (UNKNOWN_NO_ORPHA, UNKNOWN_NOT_LINEARISED, UNKNOWN_UNDETERMINED, UNKNOWN_HEAD)
+DISEASE_GROUPS = NAMED_GROUPS + UNKNOWN_GROUPS
 
-# Orphanet classification heads of the linearisation (Orphadata product 7) -> template group.
-# Heads not listed (genetic, infectious, toxic, transplant-related) count as unbekannt.
+# Orphanet classification heads of the linearisation (Orphadata product 7) -> template group
 HEAD_GROUP = {
     "98006":  "Neurologische Erkrankungen, Entwicklungsstörungen",   # Rare neurologic disease
     "68367":  "Hereditäre Stoffwechselerkrankungen",                 # Rare inborn error of metabolism
@@ -164,6 +174,7 @@ HEAD_GROUP = {
     "101433": "Urogenitale Krankheiten",                             # Rare urogenital disease
     "96344":  "Urogenitale Krankheiten",                             # Rare gynecologic or obstetric disease
     "98047":  "Urogenitale Krankheiten",                             # Rare infertility
+    "616874": UNKNOWN_UNDETERMINED,                                  # Rare disorder without a determined diagnosis after full investigation
 }
 UNASSIGNED_HEADS = {"98053", "68416", "108999", "506207", "565779"}
 
@@ -178,6 +189,40 @@ RESEARCH_PROVISIONS = (
     "2.16.840.1.113883.3.1937.777.24.5.3.1",  # PATDAT_STORE_AND_USE
 )
 
+# optional variant fields whose fill rate is reported (molecular.*Variants[])
+VARIANT_FIELDS = (
+    ("zygosity",            "Zygotie"),
+    ("segregationAnalysis", "Segregation"),
+    ("modeOfInheritance",   "Erbgang"),
+    ("acmgClass",           "ACMG-Klasse"),
+    ("acmgCriteria",        "ACMG-Kriterien"),
+    ("cdnaChange",          "HGVS c."),
+    ("gdnaChange",          "HGVS g."),
+    ("proteinChange",       "HGVS p."),
+)
+VARIANT_LISTS = ("smallVariants", "structuralVariants", "copyNumberVariants")
+# optional case fields whose fill rate is reported, with the cases they apply to
+CASE_FIELDS = (
+    ("case.diagnosisRd.diagnosisGmfcs", "Fälle"),
+    ("case.priorRds",                   "Fälle"),
+    ("followUp",                        "Fälle"),
+    ("followUp.diseaseProgression",     "Fälle mit Follow-up"),
+    ("followUp.deathDate",              "Fälle mit Follow-up, verstorben"),
+)
+
+# Problems to clarify with the LE, one entry per case (or submission)
+P_GFK1_AFTER_SUBMISSION = "GFK1 nach dem Einreichungsdatum"
+P_GFK2_AFTER_SUBMISSION = "GFK2 nach dem Einreichungsdatum"
+P_SHORT_MEDICAL = "Medizinische Bearbeitungsdauer unplausibel kurz"
+P_NO_GENOME = "Keine Genomsequenzierung (libraryType panel/wes)"
+P_PRIOR_AFTER_GFK1 = "Vorbefund nach GFK1"
+P_DIAGNOSIS_WITHOUT_GROUP = "Diagnose ohne Erkrankungsgruppe"
+P_NOT_CONVERTED = "Einreichung nicht konvertierbar"
+P_WITHOUT_INITIAL = "Episode ohne Erstmeldung"
+P_UNREADABLE = "Fall nicht auswertbar"
+PROBLEMS = (P_GFK1_AFTER_SUBMISSION, P_GFK2_AFTER_SUBMISSION, P_SHORT_MEDICAL, P_NO_GENOME,
+            P_PRIOR_AFTER_GFK1, P_DIAGNOSIS_WITHOUT_GROUP, P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)
+
 
 # ---------------------------------------------------------------------------------------------
 # Input
@@ -188,10 +233,19 @@ class SubmissionRow:
     case: str
     submitted_at: str
     content: dict
+    site: str = None
+
+
+@dataclass
+class Failure:
+    site: str
+    case: str
+    tan: str
+    error: str
 
 
 def load_submissions(path):
-    """The submissions of the input file, and the number of failures of the export"""
+    """The submissions of the input file, and the submissions the export couldn't convert"""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
@@ -199,19 +253,25 @@ def load_submissions(path):
         tables = {t["name"]: t for t in data["tables"]}
         if "datenkranz" not in tables:
             raise ValueError(f"{path}: no table 'datenkranz', not a result of export-datenkranz")
+
+        def key(r):
+            return json.dumps([r.get("site"), r.get("patient"), r.get("episodeOfCare")])
+
         rows = [
-            SubmissionRow(
-                json.dumps([r.get("site"), r.get("patient"), r.get("episodeOfCare")]),
-                r.get("submittedAt") or "",
-                r["content"],
-            )
+            SubmissionRow(key(r), r.get("submittedAt") or "", r["content"], r.get("site"))
             for r in tables["datenkranz"]["rows"]
             if r.get("useCase") in (None, "RD")
         ]
-        return rows, len(tables.get("failures", {}).get("rows", []))
+        failures = [
+            Failure(r.get("site"), key(r), r.get("tan"), str(r.get("error") or ""))
+            for r in tables.get("failures", {}).get("rows", [])
+            if r.get("useCase") in (None, "RD")
+        ]
+        return rows, failures
 
     if isinstance(data, list):
-        return [SubmissionRow(json.dumps(e["case"]), e.get("submittedAt") or "", e["content"]) for e in data], 0
+        return [SubmissionRow(json.dumps(e["case"]), e.get("submittedAt") or "", e["content"], e.get("site"))
+                for e in data], []
 
     raise ValueError(f"{path}: neither a result of export-datenkranz nor a list of submissions")
 
@@ -242,17 +302,22 @@ def parse_date(s):
     return date.fromisoformat(s[:10]) if s else None
 
 
+def submission_meta(content):
+    return content["metaData"]["submission"]
+
+
 def submission_type(content):
-    return content["metaData"]["submission"]["type"]
+    return submission_meta(content)["type"]
 
 
 def submission_date(content):
-    return parse_date(content["metaData"]["submission"]["date"])
+    return parse_date(submission_meta(content)["date"])
 
 
 @dataclass
 class Case:
     key: str
+    le: str
     submissions: list  # non-test, ordered by submittedAt
 
     @property
@@ -264,13 +329,21 @@ class Case:
         return next(s for s in self.submissions if submission_type(s) == "initial")
 
 
+def leistungserbringer(row):
+    """The LE of a submission: the site of the export, else the submitterId"""
+    if row.site:
+        return str(row.site)
+    return str(row.content.get("metaData", {}).get("submission", {}).get("submitterId") or "?")
+
+
 def build_cases(rows, start=None, end=None):
     """
-    The cases (episodes with an initial submission, initial submitted in [start, end)), and the
-    number of tests left out and of episodes without initial
+    The cases (episodes with an initial submission, initial submitted in [start, end)), the
+    number of tests left out, the episodes without initial as (LE, key), and the submitterIds by LE
     """
     by_key = {}
     tests = 0
+    submitters = {}
     for row in rows:
         content = row.content
         if content.get("metaData", {}).get("submission", {}).get("diseaseType") != "rare":
@@ -279,20 +352,23 @@ def build_cases(rows, start=None, end=None):
             tests += 1
             continue
         by_key.setdefault(row.case, []).append(row)
+        submitter = submission_meta(content).get("submitterId")
+        if row.site and submitter:
+            submitters.setdefault(str(row.site), set()).add(str(submitter))
 
-    cases, without_initial = [], 0
+    cases, without_initial = [], []
     for key, subs in by_key.items():
         # stable sort: equal times keep the order of the input
-        subs = [r.content for r in sorted(subs, key=lambda r: r.submitted_at)]
-        case = Case(key, subs)
-        if not any(submission_type(s) == "initial" for s in subs):
-            without_initial += 1
+        subs = sorted(subs, key=lambda r: r.submitted_at)
+        case = Case(key, leistungserbringer(subs[0]), [r.content for r in subs])
+        if not any(submission_type(s) == "initial" for s in case.submissions):
+            without_initial.append((case.le, key, case.latest["metaData"].get("tanC")))
             continue
         initial_date = submission_date(case.initial)
         if (start and initial_date < start) or (end and initial_date >= end):
             continue
         cases.append(case)
-    return cases, tests, without_initial
+    return cases, tests, without_initial, submitters
 
 
 def age(birth_month, at):
@@ -303,7 +379,7 @@ def age(birth_month, at):
 
 
 def age_group(years, days):
-    if days <= 37:
+    if days <= NEONATE_DAYS:
         return NEONATES
     if years <= 12:
         return CHILDREN
@@ -358,36 +434,18 @@ def permits_research_use(research_consents, reference_date):
     return any(decisions.values())
 
 
-@dataclass
-class Evaluated:
-    """The facts of a case the matrix counts"""
-    status: str
-    partial: bool
-    sex: str
-    age_group: str
-    adult: bool
-    insurance: str
-    no_indication: bool
-    extent: str
-    library_type: str
-    research_consent: bool
-    medical_days: object        # int or None
-    documentary_days: object    # int or None
-    impossible_dates: list      # notes on board dates after the submission reporting them
-    prior_type: str
-    prior_year: str
-    prior_after_2025: bool
-    recommendations: set
-    therapies: set              # (category, kind)
-    management: set
-    orpha_code: object          # str or None
-    icd10_codes: list
-    no_matching_code: bool
+def permits_mv_sequencing(mv_consent):
+    """The latest metaData.mvConsent.scope entry of the domain mvSequencing is a permit"""
+    scopes = [s for s in (mv_consent or {}).get("scope") or [] if s.get("domain") == "mvSequencing"]
+    latest = max(scopes, key=lambda s: s.get("date") or "", default=None)
+    return latest is not None and latest.get("type") == "permit"
 
 
 def year_bucket(d):
     if d is None:
         return "unbekannt"
+    if d.year >= 2026:
+        return "2026 und später"
     if d.year >= 2024:
         return "2025/2024"
     if d.year >= 2022:
@@ -399,14 +457,55 @@ def year_bucket(d):
     return "2017 und älter"
 
 
-def evaluate_case(case, reference_date):
+@dataclass
+class Evaluated:
+    """The facts of a case the matrix counts"""
+    key: str
+    le: str
+    tan: str
+    status: str                 # Diagnose / Unklar / Undiagnostiziert
+    case_status: str            # the same, or offen
+    partial: bool
+    sex: str
+    age_group: str
+    adult: bool
+    insurance: str
+    no_indication: bool
+    library_type: str
+    extent: str
+    consent_at_submission: bool
+    consent_at_reference: bool
+    mv_sequencing_consent: bool
+    has_gfk2: bool
+    impossible_dates: bool
+    medical_days: object        # int or None
+    documentary_days: object    # int or None
+    prior_types: set            # (type, year bucket)
+    prior_state: str            # documented / PRIOR_NONE_PERFORMED / PRIOR_NOT_DOCUMENTED
+    recommendations: set
+    therapies: set              # (category, strategy)
+    therapy_count: int          # distinct recommended therapies
+    management: set
+    management_recommended: bool
+    orpha_code: object          # str or None
+    icd10_codes: list
+    no_matching_code: bool
+    case_fields: dict           # optional case field -> filled, or None if not applicable
+    variants: list              # per variant: field -> filled
+    problems: list = field(default_factory=list)   # (problem, detail)
+    group: object = None        # disease group, with a linearisation
+
+
+def evaluate_case(case, reference_date, min_medical_days):
     latest = case.latest
     meta = latest["metaData"]
     diagnosis = latest["case"]["diagnosisRd"]
+    problems = []
 
     assessment = diagnosis["diagnosticAssessment"]
     if assessment not in ASSESSMENT_STATUS:
         raise ValueError(f"unknown diagnosticAssessment '{assessment}'")
+    status = ASSESSMENT_STATUS[assessment]
 
     gfk1 = parse_date(meta["molecularBoardDecisionDate"])
     years, days = age(meta["birthDate"], gfk1)
@@ -420,381 +519,485 @@ def evaluate_case(case, reference_date):
     medical_days = documentary_days = None
     # a submission can't report a board that took place after its own submission date; the
     # durations of a case with such an impossible date are left out
-    impossible_dates = []
+    impossible = False
     if gfk1 > submission_date(latest):
-        impossible_dates.append(
-            f"{case.key}: GFK1 (metaData.molecularBoardDecisionDate) {gfk1} is after the date "
-            f"{submission_date(latest)} of the submission reporting it (metaData.submission.date)"
-        )
+        impossible = True
+        problems.append((P_GFK1_AFTER_SUBMISSION,
+                         f"metaData.molecularBoardDecisionDate {gfk1} nach metaData.submission.date "
+                         f"{submission_date(latest)} ({(gfk1 - submission_date(latest)).days} Tage)"))
     if later:
         gfk2 = min(d for d, _ in later)
         first = next(s for d, s in later if d == gfk2)  # submissions are ordered by time
         if gfk2 > submission_date(first):
-            impossible_dates.append(
-                f"{case.key}: GFK2 (plan.carePlanRd.molecularBoardDecisionDate) {gfk2} is after the date "
-                f"{submission_date(first)} of the submission reporting it (metaData.submission.date)"
-            )
-        if not impossible_dates:
+            impossible = True
+            problems.append((P_GFK2_AFTER_SUBMISSION,
+                             f"plan.carePlanRd.molecularBoardDecisionDate {gfk2} nach metaData.submission.date "
+                             f"{submission_date(first)} ({(gfk2 - submission_date(first)).days} Tage) "
+                             f"der Einreichung {first['metaData'].get('tanC')}"))
+        if not impossible:
             medical_days = (gfk2 - gfk1).days
             documentary_days = (submission_date(first) - gfk2).days
+            if medical_days < min_medical_days:
+                problems.append((P_SHORT_MEDICAL,
+                                 f"GFK1 {gfk1} bis GFK2 {gfk2}: {medical_days} Tage (< {min_medical_days}), "
+                                 "obwohl Sequenzierung und Auswertung dazwischenliegen"))
 
-    priors = latest["case"].get("priorRds") or []
-    prior = max(priors, key=lambda p: p.get("diagnosticDate") or "", default=None)
-    prior_type = PRIOR_TYPE.get(prior["genomicTestType"], OTHER_TESTS) if prior else NO_TEST
-    prior_date = parse_date(prior.get("diagnosticDate")) if prior and prior_type != NO_TEST else None
+    library_type = diagnosis.get("libraryType") or "none"
+    if library_type in ("panel", "wes"):
+        problems.append((P_NO_GENOME,
+                         f"case.diagnosisRd.libraryType = {library_type}; das MV GenomSeq verlangt WGS oder lrWGS: "
+                         "Protokollabweichung oder falsch gesetzter libraryType"))
 
-    recommendations, therapies, management = set(), set(), set()
+    # prior findings: each test, a case counts once per (type, year)
+    priors = latest["case"].get("priorRds")
+    prior_types = set()
+    for p in priors or []:
+        test_type = p.get("genomicTestType")
+        if test_type == "none":
+            continue
+        prior_date = parse_date(p.get("diagnosticDate"))
+        prior_types.add((PRIOR_TYPE.get(test_type, OTHER_TESTS), year_bucket(prior_date)))
+        if prior_date and prior_date > gfk1:
+            problems.append((P_PRIOR_AFTER_GFK1,
+                             f"case.priorRds[].diagnosticDate {prior_date} nach GFK1 {gfk1} ({test_type})"))
+    if priors is None or priors == []:
+        prior_state = PRIOR_NOT_DOCUMENTED
+    elif not prior_types:
+        prior_state = PRIOR_NONE_PERFORMED
+    else:
+        prior_state = "documented"
+
+    recommendations, therapies, therapy_ids, management = set(), set(), set(), set()
+    management_recommended = False
     for s in case.submissions:
         plan = s.get("plan")
         if not plan:
             continue
         care_plan = plan["carePlanRd"]
         recommendations |= {label for flag, label in RECOMMENDATIONS if care_plan.get(flag)}
-        therapies |= {
-            (t["type"], THERAPY_KIND.get(t["strategy"], NOT_ASSIGNABLE)) for t in plan.get("recommendedTherapies") or []
-        }
-        management |= set(care_plan.get("clinicalManagementDescriptions") or [])
+        for t in plan.get("recommendedTherapies") or []:
+            therapies.add((t["type"], t["strategy"]))
+            therapy_ids.add(t.get("identifier") or json.dumps(t, sort_keys=True))
+        descriptions = set(care_plan.get("clinicalManagementDescriptions") or [])
+        management |= descriptions
+        management_recommended |= bool(care_plan.get("clinicalManagementRecommended")) or bool(descriptions)
 
     codings = diagnosis.get("diagnoses") or []
     orpha = next((c["code"] for c in codings if c.get("system") == ORPHANET), None)
     orpha_code = re.search(r"\d+", orpha).group() if orpha and re.search(r"\d+", orpha) else None
 
+    follow_ups = (latest.get("followUp") or {}).get("followUpRds") or []
+    follow_up = max(follow_ups, key=lambda f: f.get("followUpDate") or "", default=None)
+    case_fields = {
+        "case.diagnosisRd.diagnosisGmfcs": diagnosis.get("diagnosisGmfcs") is not None,
+        "case.priorRds": bool(priors),
+        "followUp": follow_up is not None,
+        "followUp.diseaseProgression": None if follow_up is None else bool(follow_up.get("diseaseProgression")),
+        "followUp.deathDate": (
+            follow_up.get("deathDate") is not None if follow_up and follow_up.get("vitalStatus") == "deceased" else None
+        ),
+    }
+    molecular = latest.get("molecular") or {}
+    variants = [
+        {name: v.get(name) not in (None, "", []) for name, _ in VARIANT_FIELDS}
+        for kind in VARIANT_LISTS for v in molecular.get(kind) or []
+    ]
+
+    is_open = status == UNDIAGNOSED and not later
     return Evaluated(
-        status           = ASSESSMENT_STATUS[assessment],
-        partial          = assessment == PARTIAL,
-        sex              = {"male": "m", "female": "w", "other": "d"}.get(meta.get("gender"), "unbekannt"),
-        age_group        = age_group(years, days),
-        adult            = years >= 18,
-        insurance        = meta.get("coverageType") if meta.get("coverageType") in ("GKV", "PKV") else "andere",
-        no_indication    = meta.get("decisionToInclude") is False,
-        extent           = EXTENTS.get(diagnosis.get("diagnosticExtent"), "unbekannt"),
-        library_type     = diagnosis.get("libraryType") or "none",
-        research_consent = permits_research_use(meta.get("researchConsents") or [], reference_date),
-        medical_days     = medical_days,
-        documentary_days = documentary_days,
-        impossible_dates = impossible_dates,
-        prior_type       = prior_type,
-        prior_year       = year_bucket(prior_date),
-        prior_after_2025 = prior_date is not None and prior_date.year > 2025,
-        recommendations  = recommendations,
-        therapies        = therapies,
-        management       = management,
-        orpha_code       = orpha_code,
-        icd10_codes      = [c["code"] for c in codings if c.get("system") == ICD10GM],
-        no_matching_code = diagnosis.get("noMatchingCodeExists") is True,
+        key                    = case.key,
+        le                     = case.le,
+        tan                    = meta.get("tanC"),
+        status                 = status,
+        case_status            = OPEN if is_open else status,
+        partial                = assessment == PARTIAL,
+        sex                    = {"male": "m", "female": "w", "other": "d"}.get(meta.get("gender"), "unbekannt"),
+        age_group              = age_group(years, days),
+        adult                  = years >= 18,
+        insurance              = meta.get("coverageType") if meta.get("coverageType") in ("GKV", "PKV") else "andere",
+        no_indication          = meta.get("decisionToInclude") is False,
+        library_type           = library_type,
+        extent                 = EXTENTS.get(diagnosis.get("diagnosticExtent"), "unbekannt"),
+        consent_at_submission  = permits_research_use(meta.get("researchConsents") or [], submission_date(latest)),
+        consent_at_reference   = permits_research_use(meta.get("researchConsents") or [], reference_date),
+        mv_sequencing_consent  = permits_mv_sequencing(meta.get("mvConsent")),
+        has_gfk2               = bool(later),
+        impossible_dates       = impossible,
+        medical_days           = medical_days,
+        documentary_days       = documentary_days,
+        prior_types            = prior_types,
+        prior_state            = prior_state,
+        recommendations        = recommendations,
+        therapies              = therapies,
+        therapy_count          = len(therapy_ids),
+        management             = management,
+        management_recommended = management_recommended,
+        orpha_code             = orpha_code,
+        icd10_codes            = [c["code"] for c in codings if c.get("system") == ICD10GM],
+        no_matching_code       = diagnosis.get("noMatchingCodeExists") is True,
+        case_fields            = case_fields,
+        variants               = variants,
+        problems               = problems,
     )
 
 
 def disease_group(e, heads):
-    """The template's disease group of a case, and the unmapped Orphanet head, if any"""
+    """The disease group of a case, and the Orphanet head missing in HEAD_GROUP, if any"""
     if any(NEUROMUSCULAR_ICD10.match(code) for code in e.icd10_codes):
         return NEUROMUSCULAR, None
-    if e.orpha_code is None or e.orpha_code not in heads:
-        return UNKNOWN_GROUP, None
+    if e.orpha_code is None:
+        return UNKNOWN_NO_ORPHA, None
+    if e.orpha_code not in heads:
+        return UNKNOWN_NOT_LINEARISED, None
     head = heads[e.orpha_code]
     if head in HEAD_GROUP:
         return HEAD_GROUP[head], None
-    return UNKNOWN_GROUP, (None if head in UNASSIGNED_HEADS else head)
+    return UNKNOWN_HEAD, (None if head in UNASSIGNED_HEADS else head)
 
 
 # ---------------------------------------------------------------------------------------------
-# Matrix
+# Matrix: rows of (section, item), evaluated for all cases and per LE
 # ---------------------------------------------------------------------------------------------
+
+COUNT, VALUE = "Anzahl", "Tage"
+
+
+@dataclass
+class Row:
+    section: str
+    item: str
+    unit: str                   # Anzahl (n of base) or Tage (a statistic)
+    base_label: str = None      # what the percentage refers to
+    n: object = None            # count or statistic
+    base: int = None            # denominator of the percentage
+    support: int = None         # number of values a statistic is computed from
+
+    @property
+    def key(self):
+        return f"{self.section} | {self.item}"
+
 
 def percent(n, base):
-    if not base:
+    if not base or not isinstance(n, int):
         return None
     return float((Decimal(n) * 100 / Decimal(base)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
 
 
-def mean(values):
-    return float(Decimal(statistics.mean(values)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)) if values else None
+def rounded(x):
+    return None if x is None else float(Decimal(x).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
 
 
-class Matrix:
-    def __init__(self):
-        self.cells = {}
-        self.extras = []
-
-    def count(self, row, n, base, count_col="C", percent_col="E"):
-        self.cells[f"{count_col}{row}"] = n
-        if percent_col:
-            self.cells[f"{percent_col}{row}"] = percent(n, base)
-
-    def extra(self, section, item, value):
-        self.extras.append({"section": section, "item": item, "value": value})
+def quartiles(values):
+    """(Q1, median, Q3), method 'inclusive' (as Excel's QUARTILE.INC)"""
+    if len(values) == 1:
+        return values[0], values[0], values[0]
+    q1, q2, q3 = statistics.quantiles(values, n=4, method="inclusive")
+    return q1, q2, q3
 
 
-def build_matrix(evaluated, heads, period_label=None):
-    m = Matrix()
-    total = len(evaluated)
+def matrix_rows(cases, losses, problem_counts, with_groups):
+    """The rows of the matrix for a set of cases; the same rows for every set"""
+    rows = []
+    total = len(cases)
 
-    def n(pred, cases=evaluated):
-        return sum(1 for e in cases if pred(e))
+    def add(section, item, n, base=None, base_label=None):
+        rows.append(Row(section, item, COUNT, base_label, n, base))
 
-    m.cells["G5"] = f"Auswertungszeitraum: {period_label or 'gesamter Export'}"
+    def count(section, item, pred, of=cases, base_label="Fälle"):
+        add(section, item, sum(1 for e in of if pred(e)), len(of), base_label)
 
-    m.count(3, total, None, percent_col=None)
-    m.count(5, n(lambda e: e.research_consent), total)
+    s = "Fälle"
+    add(s, "Fallzahl gesamt (Episoden mit Erstmeldung)", total)
+    add(s, "Einreichungen nicht konvertierbar (nicht in den Fällen)", losses.get(P_NOT_CONVERTED, 0))
+    add(s, "Episoden ohne Erstmeldung (nicht in den Fällen)", losses.get(P_WITHOUT_INITIAL, 0))
+    add(s, "Fälle nicht auswertbar (nicht in den Fällen)", losses.get(P_UNREADABLE, 0))
 
-    for row, sex in zip((8, 9, 10), ("m", "w", "d")):
-        m.count(row, n(lambda e: e.sex == sex), total)
-    m.extra("Geschlechterverteilung", "unbekannt", n(lambda e: e.sex == "unbekannt"))
+    s = "Einwilligung"
+    count(s, "Broad Consent gültig zum Datum der letzten Einreichung", lambda e: e.consent_at_submission)
+    count(s, "Broad Consent gültig zum Stichtag", lambda e: e.consent_at_reference)
+    count(s, "MV-Einwilligung Sequenzierung (mvSequencing: permit)", lambda e: e.mv_sequencing_consent)
+    s = "Broad Consent nach Altersgruppe (zum Datum der letzten Einreichung)"
+    for group in AGE_GROUPS:
+        count(s, group, lambda e: e.consent_at_submission, [e for e in cases if e.age_group == group], f"Fälle {group}")
 
-    for row, group in zip(range(12, 17), AGE_GROUPS):
-        m.count(row, n(lambda e: e.age_group == group), total)
+    s = "Geschlecht"
+    for sex in ("m", "w", "d", "unbekannt"):
+        count(s, sex, lambda e: e.sex == sex)
 
-    m.count(18, n(lambda e: e.insurance == "GKV"), total)
-    m.count(19, n(lambda e: e.insurance == "PKV"), total)
-    m.extra("Versicherung", "andere", n(lambda e: e.insurance == "andere"))
+    s = "Alter bei Einschluss (GFK1)"
+    for group in AGE_GROUPS:
+        count(s, group, lambda e: e.age_group == group)
 
-    m.count(20, n(lambda e: e.no_indication), total)
+    s = "Versicherung"
+    for insurance in ("GKV", "PKV", "andere"):
+        count(s, insurance, lambda e: e.insurance == insurance)
 
-    for row, attr, label in ((21, "medical_days", "medizinisch, GFK1 bis GFK2"),
-                             (22, "documentary_days", "dokumentarisch, GFK2 bis Einreichung beim KDK")):
-        days = [getattr(e, attr) for e in evaluated if getattr(e, attr) is not None]
-        m.cells[f"C{row}"] = mean(days)
-        section = f"Bearbeitungsdauer ({label}) in Tagen"
-        m.extra(section, "Fälle", len(days))
-        m.extra(section, "Median", statistics.median(days) if days else None)
-        m.extra(section, "Minimum", min(days, default=None))
-        m.extra(section, "Maximum", max(days, default=None))
+    s = "Indikation"
+    count(s, "Keine Indikation zur Genomsequenzierung (metaData.decisionToInclude = false)", lambda e: e.no_indication)
 
-    extents = ("Single", "Duo", "Trio")
-    for row, extent in zip((24, 25, 26), extents):
-        m.count(row, n(lambda e: e.extent == extent), total)
+    for s, attr in (("Bearbeitungsdauer medizinisch (GFK1 bis GFK2)", "medical_days"),
+                    ("Bearbeitungsdauer dokumentarisch (GFK2 bis Einreichung beim KDK)", "documentary_days")):
+        days = sorted(getattr(e, attr) for e in cases if getattr(e, attr) is not None)
+        count(s, "Dauer berechenbar", lambda e: getattr(e, attr) is not None)
+        count(s, "nicht berechenbar: noch keine GFK2", lambda e: not e.has_gfk2)
+        count(s, "nicht berechenbar: unmögliches Datum (siehe Rückfragen)", lambda e: e.has_gfk2 and e.impossible_dates)
+        q1, median, q3 = quartiles(days) if days else (None, None, None)
+        for item, value in (("Mittelwert", statistics.mean(days) if days else None), ("Median", median),
+                            ("1. Quartil", q1), ("3. Quartil", q3),
+                            ("Minimum", min(days, default=None)), ("Maximum", max(days, default=None))):
+            rows.append(Row(s, f"{item} (Tage)", VALUE, n=rounded(value), support=len(days)))
 
-    m.count(28, n(lambda e: e.library_type == "wgs"), total)
-    m.count(29, n(lambda e: e.library_type == "wgs_lr"), total)
-    for library_type in ("none", "panel", "wes"):
-        m.extra("Anzahl WGS/lRG", library_type, n(lambda e: e.library_type == library_type))
+    s = "Sequenzierung (libraryType)"
+    for code, label in {**GENOME_LIBRARIES, **OTHER_LIBRARIES}.items():
+        count(s, label, lambda e: e.library_type == code)
 
-    for row, status in zip((31, 32, 33), STATUSES):
-        m.count(row, n(lambda e: e.status == status), total)
-    m.extra("Diagnoserate", "davon partiell (unter Unklar)", n(lambda e: e.partial))
+    genome = [e for e in cases if e.library_type in GENOME_LIBRARIES]
+    s = "WGS-Seq. Art (Fälle mit WGS/lrWGS)"
+    for extent in ("Single", "Duo", "Trio"):
+        count(s, extent, lambda e: e.extent == extent, genome, "Fälle mit WGS/lrWGS")
 
-    for row, extent in zip((34, 35, 36), extents):
-        of_extent = [e for e in evaluated if e.extent == extent]
-        m.count(row, n(lambda e: e.status == DIAGNOSED, of_extent), len(of_extent))
-        m.extra(f"Diagnoserate {extent}-Genom", "davon partiell (unter Unklar)", n(lambda e: e.partial, of_extent))
+    s = "Diagnosestatus (alle Fälle)"
+    for status in CASE_STATUSES:
+        label = f"{OPEN} (Undiagnostiziert, noch keine GFK2)" if status == OPEN else status
+        count(s, label, lambda e: e.case_status == status)
 
-    # diagnosis status by age group
-    for row, group in zip(range(31, 37), AGE_GROUPS + ("SUMME",)):
-        cases = evaluated if group == "SUMME" else [e for e in evaluated if e.age_group == group]
-        for (count_col, percent_col), status in zip((("I", "J"), ("K", "L"), ("M", "N")), STATUSES):
-            m.count(row, n(lambda e: e.status == status, cases), len(cases), count_col, percent_col)
+    closed = [e for e in cases if e.case_status != OPEN]
+    s = "Diagnoserate (abgeschlossene Fälle)"
+    for status in STATUSES:
+        count(s, status, lambda e: e.status == status, closed, "abgeschlossene Fälle")
+    count(s, "davon partiell (unter Unklar)", lambda e: e.partial, closed, "abgeschlossene Fälle")
 
-    # prior findings per diagnosis status
-    for first_row, status in zip((39, 47, 55), STATUSES):
-        cases = [e for e in evaluated if e.status == status]
-        for row, prior_type in zip(range(first_row, first_row + 6), PRIOR_TYPES):
-            m.count(row, n(lambda e: e.prior_type == prior_type, cases), len(cases))
-        for row, prior_type in zip(range(first_row, first_row + 6), PRIOR_TYPES_BY_YEAR):
-            of_type = [e for e in cases if e.prior_type == prior_type]
-            for col, bucket in zip("HIJKLM", YEAR_BUCKETS):
-                m.cells[f"{col}{row}"] = n(lambda e: e.prior_year == bucket, of_type)
-            m.cells[f"N{row}"] = len(of_type)
+    s = "Diagnoserate nach WGS-Seq. Art (abgeschlossene Fälle mit WGS/lrWGS)"
+    for extent in ("Single", "Duo", "Trio"):
+        of_extent = [e for e in closed if e.library_type in GENOME_LIBRARIES and e.extent == extent]
+        base_label = f"abgeschlossene {extent}-Genome"
+        count(s, f"{extent}: Diagnose", lambda e: e.status == DIAGNOSED, of_extent, base_label)
+        count(s, f"{extent}: davon partiell (unter Unklar)", lambda e: e.partial, of_extent, base_label)
 
-    for row, (_, label) in zip(range(64, 68), RECOMMENDATIONS):
-        m.count(row, n(lambda e: label in e.recommendations), total)
-    for row, therapy in zip(range(68, 73), THERAPY_ROWS):
-        m.count(row, n(lambda e: therapy in e.therapies), total)
-    for category, label in THERAPY_CATEGORY.items():
-        for kind in ("nicht medikamentös", NOT_ASSIGNABLE) if category == "causal" else (NOT_ASSIGNABLE,):
-            m.extra("Therapieempfehlung", f"{label} {kind}", n(lambda e: (category, kind) in e.therapies))
+    s = "Diagnosestatus nach Altersgruppe"
+    for group in AGE_GROUPS:
+        of_group = [e for e in cases if e.age_group == group]
+        closed_group = [e for e in of_group if e.case_status != OPEN]
+        for status in STATUSES:
+            count(s, f"{group}: {status}", lambda e: e.status == status, closed_group, f"abgeschlossene Fälle {group}")
+        count(s, f"{group}: {OPEN}", lambda e: e.case_status == OPEN, of_group, f"Fälle {group}")
 
-    for row, (code, _) in zip(range(75, 82), MANAGEMENT):
-        m.count(row, n(lambda e: code in e.management), total)
-    m.count(82, n(lambda e: not (e.management & {code for code, _ in MANAGEMENT})), total)
+    for status in CASE_STATUSES:
+        of_status = [e for e in cases if e.case_status == status]
+        base_label = f"Fälle {status}"
+        s = f"Vorbefunde, Status {status} (Mehrfachnennung möglich)"
+        for prior_type in PRIOR_TYPES:
+            count(s, prior_type, lambda e: any(t == prior_type for t, _ in e.prior_types), of_status, base_label)
+        for state in (PRIOR_NONE_PERFORMED, PRIOR_NOT_DOCUMENTED):
+            count(s, state, lambda e: e.prior_state == state, of_status, base_label)
+        s = f"Vorbefunde nach Jahr, Status {status}"
+        for prior_type in PRIOR_TYPES:
+            for bucket in YEAR_BUCKETS:
+                count(s, f"{prior_type}: {bucket}", lambda e: (prior_type, bucket) in e.prior_types, of_status, base_label)
 
-    m.count(84, n(lambda e: e.orpha_code is None), total)
-    m.extra("Erkr. ohne Orphacode", "noMatchingCodeExists (alle Kodiersysteme)", n(lambda e: e.no_matching_code))
+    s = "Weiterempfehlungen"
+    for _, label in RECOMMENDATIONS:
+        count(s, label, lambda e: label in e.recommendations)
 
-    unmapped_heads = set()
-    if heads is not None:
-        groups = []
-        for e in evaluated:
-            group, unmapped = disease_group(e, heads)
-            groups.append(group)
-            if unmapped:
-                unmapped_heads.add(unmapped)
-        blocks = (
-            (88, list(zip(evaluated, groups))),
-            (110, [(e, g) for e, g in zip(evaluated, groups) if e.adult]),
-            (131, [(e, g) for e, g in zip(evaluated, groups) if not e.adult]),
-        )
-        for first_row, block in blocks:
-            for row, group in zip(range(first_row, first_row + len(DISEASE_GROUPS)), DISEASE_GROUPS):
-                of_group = [e for e, g in block if g == group]
-                m.count(row, len(of_group), len(block), "C", "D")
-                for (count_col, percent_col), status in zip((("E", "F"), ("G", "H"), ("I", "K")), STATUSES):
-                    m.count(row, n(lambda e: e.status == status, of_group), len(of_group), count_col, percent_col)
+    s = "Therapieempfehlungen (Fälle, Mehrfachnennung möglich)"
+    for category, category_label in THERAPY_CATEGORY.items():
+        for kind in THERAPY_KINDS:
+            count(s, f"{category_label} {kind}",
+                  lambda e: any(c == category and THERAPY_KIND.get(st, NOT_ASSIGNABLE) == kind for c, st in e.therapies))
+    s = "Therapieempfehlungen nach Strategie (Fälle, Mehrfachnennung möglich)"
+    for category, category_label in THERAPY_CATEGORY.items():
+        for strategy in THERAPY_KIND:
+            count(s, f"{category_label} {strategy}", lambda e: (category, strategy) in e.therapies)
+    add("Therapieempfehlungen (Anzahl Empfehlungen)", "Empfehlungen gesamt", sum(e.therapy_count for e in cases))
 
-    return m, unmapped_heads
+    s = "Weitere Empfehlungen Krankheitsmanagement (Mehrfachnennung möglich)"
+    for code, label in MANAGEMENT:
+        count(s, label, lambda e: code in e.management)
+    count(s, MANAGEMENT_UNSPECIFIED, lambda e: e.management_recommended and not e.management)
+    count(s, MANAGEMENT_NOT_RECOMMENDED, lambda e: not e.management_recommended)
 
+    s = "Orphacode"
+    count(s, "Erkr. ohne Orphacode (keine Orphanet-Kodierung)", lambda e: e.orpha_code is None)
+    count(s, "ohne Orphacode, davon noMatchingCodeExists = true", lambda e: e.orpha_code is None and e.no_matching_code)
+    count(s, "mit Orphacode, aber noMatchingCodeExists = true", lambda e: e.orpha_code is not None and e.no_matching_code)
 
-# ---------------------------------------------------------------------------------------------
-# Template
-# ---------------------------------------------------------------------------------------------
+    if with_groups:
+        for s, block in (("Erkrankungsgruppen gesamt", cases),
+                         ("Erkrankungsgruppen Adult (ab 18)", [e for e in cases if e.adult]),
+                         ("Erkrankungsgruppen Pädiatrisch (unter 18)", [e for e in cases if not e.adult])):
+            for group in DISEASE_GROUPS:
+                of_group = [e for e in block if e.group == group]
+                count(s, group, lambda e: e.group == group, block, f"Fälle ({s})")
+                for status in CASE_STATUSES:
+                    count(s, f"{group}: {status}", lambda e: e.case_status == status, of_group, f"Fälle {group}")
 
-SHEET = "xl/worksheets/sheet1.xml"
-MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    s = "Füllgrad optionaler Felder (Fälle)"
+    for name, base_label in CASE_FIELDS:
+        applicable = [e for e in cases if e.case_fields[name] is not None]
+        count(s, name, lambda e: e.case_fields[name], applicable, base_label)
+    variants = [v for e in cases for v in e.variants]
+    s = "Füllgrad optionaler Felder (Varianten der letzten Einreichung)"
+    add(s, "Varianten gesamt", len(variants))
+    for name, label in VARIANT_FIELDS:
+        add(s, f"{label} ({name})", sum(1 for v in variants if v[name]), len(variants), "Varianten")
 
-# labels the cells are filled in for, to refuse a template of another layout
-EXPECTED_LABELS = {
-    "B3":   "Fallzahl gesamt",
-    "B21":  "Bearbeitungsdauer (medzinisch, GFK1 bis GFK2)",
-    "B22":  "Bearbeitungsdauer (dokumentarisch, GFK2 bis Einreichung beim KDK)",
-    "B24":  "Single",
-    "B36":  "Diagnoserate Trio-Genom",
-    "G31":  "Neonaten (bis 37 Tage)",
-    "B39":  "Genom (SR)",
-    "G39":  "Array, Chromosomenanalyse, Einzelgentestung, andere",
-    "B60":  "keine",
-    "B64":  "1)",
-    "B72":  "Kausal interventionell",
-    "B82":  "8)",
-    "B84":  "Erkr. ohne Orphacode",
-    "I86":  "Undiagnostiziert",
-    "B88":  "Muskuläre",
-    "B105": "unbekannt",
-    "B129": "Pädiatrisch",
-    "B148": "unbekannt/andere",
-}
+    s = "Rückfragen an LE (Anzahl, Einzelfälle siehe Rückfragen)"
+    for problem in PROBLEMS:
+        add(s, problem, problem_counts.get(problem, 0))
 
-ROW_RE = re.compile(r'<row r="(\d+)"[^>]*?(?:/>|>(.*?)</row>)', re.S)
-CELL_RE = re.compile(r'<c r="([A-Z]+)(\d+)"([^>]*?)(?:/>|>(.*?)</c>)', re.S)
-
-
-def column_index(col):
-    i = 0
-    for ch in col:
-        i = i * 26 + ord(ch) - 64
-    return i
-
-
-def cell_texts(archive):
-    """Cell reference -> text of the string cells of the sheet"""
-    shared = []
-    if "xl/sharedStrings.xml" in archive.namelist():
-        for si in ET.fromstring(archive.read("xl/sharedStrings.xml")).findall(f"{MAIN_NS}si"):
-            shared.append("".join(t.text or "" for t in si.iter(f"{MAIN_NS}t")))
-    texts = {}
-    for c in ET.fromstring(archive.read(SHEET)).iter(f"{MAIN_NS}c"):
-        v = c.find(f"{MAIN_NS}v")
-        if c.get("t") == "s" and v is not None:
-            texts[c.get("r")] = shared[int(v.text)]
-        elif c.get("t") == "inlineStr":
-            texts[c.get("r")] = "".join(t.text or "" for t in c.iter(f"{MAIN_NS}t"))
-    return texts
+    return rows
 
 
-def check_template(archive):
-    texts = cell_texts(archive)
-    wrong = [
-        f"{ref}: expected '{label}…', found '{texts.get(ref, '')}'"
-        for ref, label in EXPECTED_LABELS.items()
-        if not texts.get(ref, "").replace("\xa0", " ").strip().startswith(label)
-    ]
-    if wrong:
-        raise ValueError("template doesn't have the layout of Update_Auswertematrix_GZ1.xlsx:\n  " + "\n  ".join(wrong))
-
-
-def cell_xml(ref, attrs, value):
-    style = re.search(r'\ss="\d+"', attrs)
-    style = style.group() if style else ""
-    if value is None:
-        return f'<c r="{ref}"{style}/>'
-    if isinstance(value, str):
-        return f'<c r="{ref}"{style} t="inlineStr"><is><t>{escape(value)}</t></is></c>'
-    return f'<c r="{ref}"{style}><v>{value}</v></c>'
-
-
-def fill_sheet(sheet, cells):
-    """The sheet XML with the cells set, keeping their styles; string manipulation, since
-    rewriting with ElementTree would lose namespace declarations Excel relies on"""
-    by_row = {}
-    for ref, value in cells.items():
-        col, row = re.match(r"([A-Z]+)(\d+)", ref).groups()
-        by_row.setdefault(int(row), {})[col] = value
-
-    found = set()
-
-    def replace_row(match):
-        row = int(match.group(1))
-        if row not in by_row:
-            return match.group(0)
-        found.add(row)
-        head = match.group(0)[:match.group(0).index(">") + 1].rstrip("/>").rstrip("/") + ">"
-        existing = {c.group(1): (c.group(3), c.group(0)) for c in CELL_RE.finditer(match.group(2) or "")}
-        merged = {col: xml for col, (_, xml) in existing.items()}
-        for col, value in by_row[row].items():
-            merged[col] = cell_xml(f"{col}{row}", existing.get(col, ("", ""))[0], value)
-        return head + "".join(merged[c] for c in sorted(merged, key=column_index)) + "</row>"
-
-    filled = ROW_RE.sub(replace_row, sheet)
-    missing = set(by_row) - found
-    if missing:
-        raise ValueError(f"template has no rows {sorted(missing)}")
-    return filled
-
-
-def write_template(template, output, cells):
-    with zipfile.ZipFile(template) as src:
-        check_template(src)
-        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as dst:
-            for item in src.infolist():
-                data = src.read(item.filename)
-                if item.filename == SHEET:
-                    data = fill_sheet(data.decode("utf-8"), cells).encode("utf-8")
-                dst.writestr(item, data)
+def suppressed(row, min_cell):
+    """(value, base, percent) of a row, counts 1..min_cell-1 replaced by '<min_cell'"""
+    hidden = f"<{min_cell}"
+    if row.unit == VALUE:
+        return (hidden if row.n is not None and row.support < min_cell else row.n), None, None
+    n, base = row.n, row.base
+    pct = percent(n, base)
+    if 0 < n < min_cell:
+        n, pct = hidden, None
+    if base is not None and 0 < base < min_cell:
+        base, pct = hidden, None
+    return n, base, pct
 
 
 # ---------------------------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------------------------
 
-def run(rows, export_failures, heads, start, end, reference_date):
-    cases, tests, without_initial = build_cases(rows, start, end)
+def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medical_days=14):
+    cases, tests, without_initial, submitters = build_cases(rows, start, end)
 
-    evaluated, unreadable = [], []
+    problems = []   # dicts LE, Problem, Fall, Einreichung (tanC), Detail
+
+    def problem(le, kind, case, tan, detail):
+        problems.append({"le": le, "problem": kind, "case": case, "tan": tan, "detail": detail})
+
+    evaluated = []
     for case in cases:
         try:
-            evaluated.append(evaluate_case(case, reference_date))
+            evaluated.append(evaluate_case(case, reference_date, min_medical_days))
         except (KeyError, TypeError, ValueError) as error:
-            unreadable.append(f"{case.key}: {error!r}")
+            problem(case.le, P_UNREADABLE, case.key, case.latest.get("metaData", {}).get("tanC"), repr(error))
 
-    period_label = None
+    unmapped_heads = set()
+    if heads is not None:
+        for e in evaluated:
+            e.group, unmapped = disease_group(e, heads)
+            if unmapped:
+                unmapped_heads.add(unmapped)
+            if e.status == DIAGNOSED and e.group in UNKNOWN_GROUPS:
+                orpha = f"ORPHA:{e.orpha_code}" if e.orpha_code else "kein Orphacode"
+                e.problems.append((P_DIAGNOSIS_WITHOUT_GROUP, f"{e.group.split(': ', 1)[1]} ({orpha})"))
+
+    for e in evaluated:
+        for kind, detail in e.problems:
+            problem(e.le, kind, e.key, e.tan, detail)
+    for le, key, tan in without_initial:
+        problem(le, P_WITHOUT_INITIAL, key, tan, "nur Folgemeldungen/Ergänzungen/Korrekturen, keine Erstmeldung")
+    for f in failures:
+        problem(str(f.site or "?"), P_NOT_CONVERTED, f.case, f.tan, f.error[:300])
+
+    les = sorted({e.le for e in evaluated} | {p["le"] for p in problems})
+    # Rückfragen counted in cases (submissions for P_NOT_CONVERTED): a case with two problems of a kind counts once
+    case_problems = {le: Counter() for le in les}
+    for p in {(p["le"], p["problem"], p["case"], p["tan"] if p["problem"] == P_NOT_CONVERTED else None) for p in problems}:
+        case_problems[p[0]][p[1]] += 1
+    losses_by_le = {le: {k: case_problems[le][k] for k in (P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)} for le in les}
+
+    def losses(selected):
+        return {k: sum(losses_by_le[le][k] for le in selected) for k in (P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)}
+
+    def counts(selected):
+        return sum((case_problems[le] for le in selected), Counter())
+
+    with_groups = heads is not None
+    entities = {TOTAL: matrix_rows(evaluated, losses(les), counts(les), with_groups)}
+    for le in les:
+        entities[le] = matrix_rows([e for e in evaluated if e.le == le], losses([le]), counts([le]), with_groups)
+
     if start or end:
         until = date.fromordinal(end.toordinal() - 1) if end else None
-        period_label = f"{start.strftime('%d.%m.%Y') if start else '…'} - {until.strftime('%d.%m.%Y') if until else '…'}"
+        period = f"{start.strftime('%d.%m.%Y') if start else '…'} - {until.strftime('%d.%m.%Y') if until else '…'}"
+    else:
+        dates = [submission_date(c.initial) for c in cases]
+        period = (f"gesamter Export (Erstmeldungen {min(dates).strftime('%d.%m.%Y')} - {max(dates).strftime('%d.%m.%Y')})"
+                  if dates else "gesamter Export")
 
-    matrix, unmapped_heads = build_matrix(evaluated, heads, period_label)
+    template_rows = entities[TOTAL]
+    result_rows = []
+    for i, r in enumerate(template_rows):
+        values = {}
+        for name, entity_rows in entities.items():
+            n, base, pct = suppressed(entity_rows[i], min_cell)
+            values[name] = {"value": n, "base": base, "percent": pct}
+        result_rows.append({"key": r.key, "section": r.section, "item": r.item, "unit": r.unit,
+                            "base_label": r.base_label, "values": values})
+
+    labels = {le: f"{le} ({', '.join(sorted(submitters[le]))})" if le in submitters else le for le in les}
 
     notes = [
-        f"{len(evaluated)} cases (episodes of care with an initial submission) counted, the status of each from "
-        "its latest non-test submission; specification: docs/rd-evaluation-matrix.txt.",
-        f"{tests} test submissions left out, {without_initial} episodes without initial submission not counted.",
-        f"Research consent evaluated as of {reference_date.isoformat()}.",
+        f"{len(evaluated)} Fälle (Episoden mit Erstmeldung) ausgewertet, Stand je Fall aus der letzten "
+        "Nicht-Test-Einreichung; Spezifikation: docs/rd-evaluation-matrix.txt.",
+        f"{tests} Testeinreichungen verworfen.",
+        (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso Anteile mit Basis unter "
+         f"{min_cell} und Kennzahlen der Bearbeitungsdauer aus weniger als {min_cell} Werten (nicht in den Rückfragen)."
+         if min_cell > 1 else "Keine Zellen unterdrückt (--min-cell 1)."),
+        "Diagnosestatus 'offen': Undiagnostiziert und noch keine Fallkonferenz nach dem Indikationsboard (GFK2); "
+        "die Diagnoserate bezieht sich auf die abgeschlossenen Fälle.",
+        f"Broad Consent bewertet zum Datum der letzten Einreichung und zum Stichtag {reference_date.isoformat()}.",
+        "Therapieempfehlungen: Zuordnung Strategie -> Kategorie (offen, mit den Stakeholdern abzustimmen): "
+        + ", ".join(f"{k} -> {v}" for k, v in THERAPY_KIND.items()) + ". Ein Fall zählt je Zeile einmal, "
+        "mit mehreren Empfehlungen ggf. in mehreren Zeilen; die Zeilen summieren sich daher nicht zur Fallzahl.",
+        "Krankheitsmanagement: über alle Einreichungen des Falls, jede genannte Kategorie einmal je Fall "
+        "(das DIP liefert je Versorgungsplan genau eine Kategorie).",
+        "Vorbefunde: jeder Vortest in case.priorRds zählt (je Art und Jahr einmal je Fall). Das DIP übermittelt "
+        "höchstens einen Vorbefund je Fall (den letzten Befund vor dem Indikationsboard) und immer mit Datum.",
+        f"Medizinische Bearbeitungsdauer unter {min_medical_days} Tagen wird als unplausibel kurz zurückgefragt.",
+        f"LE: Standort des Exports, sonst metaData.submission.submitterId. LEs: " + ", ".join(labels[le] for le in les) + ".",
     ]
     if start or end:
-        notes.append(f"Cases with initial submission from {start or '…'} until before {end or '…'}.")
-    if export_failures:
-        notes.append(f"{export_failures} submissions couldn't be converted by the export, see its table 'failures'.")
-    if unreadable:
-        notes.append(f"{len(unreadable)} cases left out, since their latest submission couldn't be read: " + "; ".join(unreadable))
+        notes.append(f"Fälle mit Erstmeldung vom {start or '…'} bis vor dem {end or '…'}.")
     if heads is None:
-        notes.append("Disease groups (rows 86-148) not filled: no Orphanet linearisation given (--orphanet).")
+        notes.append("Erkrankungsgruppen nicht ausgewertet: keine Orphanet-Linearisierung angegeben (--orphanet).")
     if unmapped_heads:
-        notes.append("Orphanet classification heads without template group, counted as unbekannt: "
-                     + ", ".join(sorted(unmapped_heads)) + "; extend HEAD_GROUP.")
-    for e in evaluated:
-        for impossible in e.impossible_dates:
-            notes.append(f"Impossible date, durations of the case (rows 21-22) left out: {impossible}.")
-    if any(e.prior_after_2025 for e in evaluated):
-        notes.append("Prior findings after 2025 are counted under '2025/2024'.")
+        notes.append("Orphanet-Gruppenköpfe ohne Vorlagengruppe, gezählt unter 'unbekannt: Gruppenkopf': "
+                     + ", ".join(sorted(unmapped_heads)) + "; HEAD_GROUP ergänzen.")
 
-    return {"cells": matrix.cells, "extras": matrix.extras, "notes": notes}
+    return {
+        "title": f"AUSWERTUNG {period}",
+        "period": period,
+        "min_cell": min_cell,
+        "entities": [TOTAL] + les,
+        "labels": {TOTAL: TOTAL, **labels},
+        "rows": result_rows,
+        "problems": sorted(problems, key=lambda p: (p["le"], PROBLEMS.index(p["problem"]), p["case"])),
+        "notes": notes,
+    }
+
+
+def write_csv(path, result, delimiter=";"):
+    """Long table: one line per LE and row of the matrix"""
+    def fmt(x):
+        return str(x).replace(".", ",") if isinstance(x, float) and delimiter == ";" else ("" if x is None else x)
+
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, delimiter=delimiter)
+        writer.writerow(["LE", "Abschnitt", "Kategorie", "Einheit", "Wert", "Bezug", "Basis", "Anteil (%)"])
+        for entity in result["entities"]:
+            for r in result["rows"]:
+                v = r["values"][entity]
+                writer.writerow([result["labels"][entity], r["section"], r["item"], r["unit"],
+                                 fmt(v["value"]), r["base_label"] or "", fmt(v["base"]), fmt(v["percent"])])
+
+
+def write_problems_csv(path, result, delimiter=";"):
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, delimiter=delimiter)
+        writer.writerow(["LE", "Problem", "Fall", "Einreichung (tanC)", "Detail"])
+        for p in result["problems"]:
+            writer.writerow([result["labels"].get(p["le"], p["le"]), p["problem"], p["case"], p["tan"] or "", p["detail"]])
 
 
 def main(argv=None):
@@ -804,25 +1007,28 @@ def main(argv=None):
     parser.add_argument("--from", dest="start", type=date.fromisoformat, help="initial submitted on or after (YYYY-MM-DD)")
     parser.add_argument("--until", dest="end", type=date.fromisoformat, help="initial submitted before (YYYY-MM-DD)")
     parser.add_argument("--reference-date", type=date.fromisoformat, default=date.today(),
-                        help="date the research consents are evaluated at (default: today)")
-    parser.add_argument("--template", help="Update_Auswertematrix_GZ1.xlsx, to write the filled template")
+                        help="date the research consents are additionally evaluated at (default: today)")
+    parser.add_argument("--min-cell", type=int, default=5,
+                        help="counts below are suppressed, 1 disables (default: %(default)s)")
+    parser.add_argument("--min-medical-days", type=int, default=14,
+                        help="shorter GFK1-GFK2 durations are listed for clarification (default: %(default)s)")
+    parser.add_argument("--delimiter", default=";", help="CSV delimiter (default: %(default)s, for Excel with German locale)")
     parser.add_argument("--output", default="rd-evaluation-matrix", help="output path without extension (default: %(default)s)")
     args = parser.parse_args(argv)
 
-    rows, export_failures = load_submissions(args.input)
+    rows, failures = load_submissions(args.input)
     heads = load_linearisation(args.orphanet) if args.orphanet else None
-    result = run(rows, export_failures, heads, args.start, args.end, args.reference_date)
+    result = run(rows, failures, heads, args.start, args.end, args.reference_date, args.min_cell, args.min_medical_days)
 
     with open(f"{args.output}.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    written = [f"{args.output}.json"]
-    if args.template:
-        write_template(args.template, f"{args.output}.xlsx", result["cells"])
-        written.append(f"{args.output}.xlsx")
+    write_csv(f"{args.output}.csv", result, args.delimiter)
+    write_problems_csv(f"{args.output}_rueckfragen.csv", result, args.delimiter)
 
     for note in result["notes"]:
         print(note, file=sys.stderr)
-    print("Written: " + ", ".join(written), file=sys.stderr)
+    print(f"{len(result['problems'])} Rückfragen an LEs, siehe {args.output}_rueckfragen.csv", file=sys.stderr)
+    print(f"Written: {args.output}.json, {args.output}.csv, {args.output}_rueckfragen.csv", file=sys.stderr)
 
 
 if __name__ == "__main__":

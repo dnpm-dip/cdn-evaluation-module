@@ -15,7 +15,7 @@ import de.ekut.tbi.generators.Gen
 import org.scalatest.EitherValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import play.api.libs.json.{JsObject, JsValue, Json, OWrites}
+import play.api.libs.json.{JsObject, JsString, JsValue, Json, OWrites}
 
 
 class StatisticsTests extends AnyFlatSpec with Matchers with EitherValues
@@ -162,6 +162,8 @@ class StatisticsTests extends AnyFlatSpec with Matchers with EitherValues
     converted.map(r => (r(6) \ "metaData" \ "submission" \ "submitterId").as[String]) shouldBe Seq("260840108", "260840108")
     (converted(0)(6) \ "metaData" \ "submission" \ "diseaseType").as[String] shouldBe "oncological"
     (converted(1)(6) \ "metaData" \ "submission" \ "diseaseType").as[String] shouldBe "rare"
+    // the reason for a missing broad consent, beside the Datenkranz, which doesn't carry it
+    converted.map(_(7)) shouldBe Seq(JsString("other-patient-reason"), JsString("other-patient-reason"))
 
     failures.map(_(4).as[String]) shouldBe Seq("t3", "t4")
     failures(0)(6).as[String] should startWith ("conversion failed")

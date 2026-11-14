@@ -109,6 +109,54 @@ value column per LE). `--orphanet` is the Orphadata linearisation
 (https://www.orphadata.com/data/xml/en_product7.xml), needed for the disease groups.
 Tests: `python3 -m unittest discover -s scripts/rd_evaluation_matrix`.
 
+Time series of the matrix's key figures, per month or quarter, in total and per Leistungserbringer, are
+computed from the same export by `scripts/rd_evaluation_matrix/rd_time_series.py`, also standard library
+only. It uses the functions of `rd_evaluation_matrix.py`, so that cases, LEs, the status of a case and the
+validity of its broad consent are defined in one place: over the whole period (Zeitraum `gesamt`) its figures
+equal those of the matrix. By the period of a case's initial submission (the date `--from`/`--until` refer
+to) it reports
+- the cases,
+- the broad consent of the latest submission: transmitted, valid, valid of the transmitted ones
+  (Zustimmungsquote), why not valid (denied, expired, no research provision) and why not transmitted
+  (`metaData.researchConsents[].noScopeJustification`),
+- the diagnosis status of all cases and of the closed ones, as the sections of the matrix,
+- the follow-ups: cases with a follow-up submission and with follow-up content, of all cases and of those
+  with GFK2; median and quartiles of the days from GFK2 to the first follow-up,
+
+and by the calendar period of the submissions themselves their number by type, the submissions the export
+couldn't convert and the episodes without initial submission, e.g. to reconcile with the number of
+Meldebestätigungen.
+```
+python3 scripts/rd_evaluation_matrix/rd_time_series.py /out/export-datenkranz_<time>.json \
+  --from 2024-07-01 --until 2026-11-01 --period quarter --follow-up-due-days 365 --output time-series
+uv run --with matplotlib python scripts/rd_evaluation_matrix/plot_time_series.py time-series.csv \
+  --output time-series
+```
+This writes `time-series.csv` (long table LE | Zeitraum | Block | Kennzahl | Wert | Bezug | Nenner | Anteil_% |
+Median | Q1 | Q3 | n) and `time-series.json`, and from the CSV `time-series.pdf` and
+`time-series_<figure>.png`: per figure one page of small multiples, a panel per LE with the total as
+reference line, ordered by the value of the LE over the whole period (`--order`).
+
+Three things to know when reading the figures:
+- The Zustimmungsquote (valid, of the transmitted consents) is an upper bound of the share of patients who
+  agreed: who declines without signing has no consent transmitted, but the justification
+  `patient refuses to sign consent`. A second rate counts these cases in its base. For exports of DIP nodes
+  the justifications are missing ("ohne Begründung"), as long as the Datenkranz mapping of
+  bfarm-schema-dto-model doesn't write `noScopeJustification`; until then both rates are upper bounds.
+- By the period of the initial submission, a recent period holds only the early follow-ups, so its
+  follow-up rates are lower and its durations shorter. With `--follow-up-due-days N` the lines
+  "fällig: … innerhalb der Frist" compare between periods: cases whose GFK2 is at least N days before
+  `--reference-date` (best the date of the export), follow-ups within N days of the GFK2.
+- Counts below `--min-cell` (default 5) are suppressed as in the matrix, percentages with a suppressed count
+  or base and medians of fewer values are left out, and, stricter than the matrix, every count within fewer
+  cases, also a zero; the plots show such periods as gaps. Neither output contains case keys or TANs. The
+  cells per LE and month are small all the same, and part of the suppressed ones follow from the totals and
+  the other cells: the tables, suppressed or not (`--min-cell 1`), are meant for the data nodes and the LE
+  concerned, not for publication.
+
+The tests run with those of the matrix (`python3 -m unittest discover -s scripts/rd_evaluation_matrix`);
+those of the plots are skipped without matplotlib.
+
 The data quality queries (sheet "Datenqualität_KDK (V2) opt" of
 `docs/Daten Qualitätsabfragen und Statistik.V4sb.xlsx`) are computed from such an export by
 `scripts/data_quality_mvh/data_quality_mvh.py`, also standard library only. It reads the export row by row,

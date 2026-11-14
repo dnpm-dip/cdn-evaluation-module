@@ -741,6 +741,20 @@ class InputOutputTests(unittest.TestCase):
         self.assertEqual(get(result, ts.B_SUBMISSIONS, ts.NOT_CONVERTED, "2025-04", "LE1"), 1)
         self.assertEqual(result["periods"], ["2025-03", "2025-04", ts.WHOLE])
 
+    def test_categorical_sections_per_period_with_the_labels_of_the_matrix(self):
+        rows = [rdm.SubmissionRow(json.dumps(["LE1", str(i)]), d + "T10:00:00", datenkranz(f"t{i}", submitted=d, gender=g, library=lib), "LE1")
+                for i, (d, g, lib) in enumerate([("2025-03-01", "male", "wgs"), ("2025-03-02", "female", "wgs_lr"),
+                                                  ("2025-04-01", "female", "wgs")])]
+        series = ts.run(rows, [], None, None, date(2026, 10, 30), min_cell=1)
+        matrix = rdm.run(rows, [], None, None, None, date(2026, 10, 30), min_cell=1)
+        self.assertEqual(get(series, ts.B_SEX, "w", "2025-03", "LE1"), 1)
+        self.assertEqual(get(series, ts.B_SEX, "w", "2025-04", "LE1"), 1)
+        self.assertEqual(get(series, ts.B_LIBRARY, "lrWGS", "2025-03", "LE1"), 1)
+        # the whole period equals the matrix, row for row of these sections
+        for block in (ts.B_SEX, ts.B_AGE, ts.B_INSURANCE, ts.B_LIBRARY, ts.B_EXTENT):
+            for r in [r for r in matrix["rows"] if r["section"] == block]:
+                self.assertEqual(get(series, block, r["item"], ts.WHOLE, "LE1"), r["values"]["LE1"]["value"], (block, r["item"]))
+
     def test_counts_the_dip_reason_for_a_missing_consent_per_period(self):
         def row(patient, tan, submitted, reason, consents=None):
             return {"site": "LE1", "useCase": "RD", "patient": patient, "episodeOfCare": "e1", "tan": tan,

@@ -70,6 +70,8 @@ MONTH, QUARTER = "month", "quarter"
 B_CASES = "Fälle"
 B_CONSENT = "Forschungseinwilligung"
 B_STATUS = "Diagnosestatus (alle Fälle)"             # the sections of the matrix
+B_SEX, B_AGE, B_INSURANCE = "Geschlecht", "Alter bei Einschluss (GFK1)", "Versicherung"
+B_LIBRARY, B_EXTENT = "Sequenzierung (libraryType)", "WGS-Seq. Art (Fälle mit WGS/lrWGS)"
 B_RATE = "Diagnoserate (abgeschlossene Fälle)"
 B_FOLLOW_UP = "Follow-up"
 B_SUBMISSIONS = "Einreichungen (Kalenderzeitraum der Einreichung)"
@@ -418,6 +420,19 @@ def case_lines(facts, unreadable, due_days):
     for reason in [label for _, label in DIP_REASONS] + [DIP_OTHER, DIP_NONE, DIP_NOT_EXPORTED]:
         count(b, f"{CONSENT_MISSING_DIP}: {reason}", lambda f: f.dip_reason == reason, missing,
               "Fälle ohne übermittelten Broad Consent")
+
+    # the categorical sections of the matrix, with its labels, so the distributions can be followed over time
+    for sex in ("m", "w", "d", "unbekannt"):
+        count(B_SEX, sex, lambda f: f.e.sex == sex)
+    for group in rdm.AGE_GROUPS:
+        count(B_AGE, group, lambda f: f.e.age_group == group)
+    for insurance in ("GKV", "PKV", "andere"):
+        count(B_INSURANCE, insurance, lambda f: f.e.insurance == insurance)
+    for code, label in {**rdm.GENOME_LIBRARIES, **rdm.OTHER_LIBRARIES}.items():
+        count(B_LIBRARY, label, lambda f: f.e.library_type == code)
+    genome = [f for f in facts if f.e.library_type in rdm.GENOME_LIBRARIES]
+    for extent in ("Single", "Duo", "Trio"):
+        count(B_EXTENT, extent, lambda f: f.e.extent == extent, genome, "Fälle mit WGS/lrWGS")
 
     for status in rdm.CASE_STATUSES:
         count(B_STATUS, OPEN if status == rdm.OPEN else status, lambda f: f.e.case_status == status)

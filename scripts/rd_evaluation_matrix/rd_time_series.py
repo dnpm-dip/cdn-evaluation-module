@@ -109,6 +109,21 @@ NOT_AN_OBJECT = "scope ist kein FHIR-Objekt (nicht im Schema)"
 NO_JUSTIFICATION = "ohne Begründung"
 REASONS = JUSTIFICATIONS + (OTHER_JUSTIFICATION, NOT_AN_OBJECT, NO_JUSTIFICATION)
 
+# metadata.reasonResearchConsentMissing of the DIP submission (dnpm-dip service-base, BroadConsent.ReasonMissing),
+# exported by export-datenkranz in the column of that name beside the Datenkranz, which doesn't carry it
+CONSENT_MISSING_DIP = "nicht übermittelt, Grund laut DIP"
+DIP_REASONS = (
+    ("patient-inability",     "Patient nicht einwilligungsfähig"),
+    ("patient-refusal",       "Patient lehnt ab"),
+    ("consent-not-returned",  "Einwilligung nicht zurückgegeben"),
+    ("other-patient-reason",  "anderer patientenbezogener Grund"),
+    ("technical-issues",      "technische Gründe"),
+    ("organizational-issues", "organisatorische Gründe"),
+)
+DIP_OTHER = "anderer Wert"                   # counted, the value is never printed
+DIP_NONE = "kein Grund angegeben"
+DIP_NOT_EXPORTED = "nicht im Export (Spalte reasonResearchConsentMissing fehlt)"
+
 FOLLOW_UP_SUBMISSION = "Fälle mit Folgemeldung (submission.type followup)"
 FOLLOW_UP_CONTENT = "Fälle mit Follow-up-Inhalt (followUp.followUpRds der letzten Einreichung)"
 WITH_GFK2 = "Fälle mit GFK2"
@@ -151,6 +166,42 @@ def load_failures(path):
     return [(r.get("site"), r.get("submittedAt") or "")
             for r in tables.get("failures", {}).get("rows", [])
             if r.get("useCase") in (None, "RD")]
+
+
+def load_dip_reasons(path):
+    """
+    The reason for a missing broad consent of each submission as the DIP states it, by (case key as
+    rdm.load_submissions builds it, tanC), from the column reasonResearchConsentMissing of the export;
+    None if the export has no such column (older exports). For a JSON list of submissions the
+    entries' field reasonResearchConsentMissing is read.
+    """
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict) and "tables" in data:
+        table = {t["name"]: t for t in data["tables"]}.get("datenkranz", {})
+        if "reasonResearchConsentMissing" not in (table.get("columns") or []):
+            return None
+        return {
+            (json.dumps([r.get("site"), r.get("patient"), r.get("episodeOfCare")]),
+             ((r.get("content") or {}).get("metaData") or {}).get("tanC")): r.get("reasonResearchConsentMissing")
+            for r in table.get("rows", []) if r.get("useCase") in (None, "RD")
+        }
+    if isinstance(data, list):
+        if not any("reasonResearchConsentMissing" in e for e in data):
+            return None
+        return {(json.dumps(e["case"]), ((e.get("content") or {}).get("metaData") or {}).get("tanC")): e.get("reasonResearchConsentMissing")
+                for e in data}
+    return None
+
+
+def dip_reason(reasons, case):
+    """The DIP reason of the latest submission of a case, as one of the labels of DIP_REASONS or the other labels"""
+    if reasons is None:
+        return DIP_NOT_EXPORTED
+    code = reasons.get((case.key, case.latest.get("metaData", {}).get("tanC")))
+    if not code:
+        return DIP_NONE
+    return dict(DIP_REASONS).get(code, DIP_OTHER)
 
 
 def readable_date(s):
@@ -278,6 +329,7 @@ class Fact:
     period: str                 # of the initial submission
     consent: object             # VALID / EXPIRED / DENIED / NO_PROVISION, None if no consent is transmitted
     justification: object       # why no consent is transmitted, None if one is
+    dip_reason: object          # the reason the DIP submission states (DIP_REASONS labels), whether or not a consent is transmitted
     follow_up_submission: bool  # a submission of type followup
     gfk2_follow_up: bool        # one from the submission reporting the GFK2 on
     due: bool                   # GFK2 at least --follow-up-due-days before the reference date
@@ -285,7 +337,7 @@ class Fact:
     days_from_submission: bool  # ... to the follow-up submission, for lack of a followUpDate
 
 
-def fact(case, e, resolution, reference_date, due_days):
+def fact(case, e, resolution, reference_date, due_days, reasons=None):
     consents = case.latest["metaData"].get("researchConsents") or []
     transmitted = any(isinstance(rc.get("scope"), dict) for rc in consents)
 
@@ -312,6 +364,7 @@ def fact(case, e, resolution, reference_date, due_days):
         period               = period_of(rdm.submission_date(case.initial), resolution),
         consent              = consent_state(consents, rdm.submission_date(case.latest)) if transmitted else None,
         justification        = None if transmitted else justification(consents),
+        dip_reason           = dip_reason(reasons, case),
         follow_up_submission = bool(follow_ups),
         gfk2_follow_up       = bool(since_gfk2),
         due                  = due,
@@ -361,6 +414,9 @@ def case_lines(facts, unreadable, due_days):
     count(b, CONSENT_MISSING, lambda f: f.consent is None)
     for reason in REASONS:
         count(b, f"{CONSENT_MISSING}: {reason}", lambda f: f.justification == reason, missing,
+              "Fälle ohne übermittelten Broad Consent")
+    for reason in [label for _, label in DIP_REASONS] + [DIP_OTHER, DIP_NONE, DIP_NOT_EXPORTED]:
+        count(b, f"{CONSENT_MISSING_DIP}: {reason}", lambda f: f.dip_reason == reason, missing,
               "Fälle ohne übermittelten Broad Consent")
 
     for status in rdm.CASE_STATUSES:
@@ -437,10 +493,10 @@ def suppressed(line, min_cell, cases=None):
 # Main
 # ---------------------------------------------------------------------------------------------
 
-def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH, due_days=None):
+def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH, due_days=None, reasons=None):
     """
     The time series of the submissions (rdm.SubmissionRow) and the failures of the export, given
-    as (site, submittedAt)
+    as (site, submittedAt); reasons as load_dip_reasons returns them (None: not in the export)
     """
     cases, _, without_initial, submitters = rdm.build_cases(rows, start, end)
 
@@ -458,7 +514,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
         except (KeyError, TypeError, ValueError):
             unreadable[(case.le, period_of(initial_date, resolution))] += 1
             continue
-        facts.append(fact(case, e, resolution, reference_date, due_days))
+        facts.append(fact(case, e, resolution, reference_date, due_days, reasons))
 
     # block by the calendar period of the submissions; a period None is counted in WHOLE only
     events = Counter()      # (LE, period, item)
@@ -600,6 +656,12 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
     if any(f.consent is None for f in facts) and all(f.justification == NO_JUSTIFICATION for f in facts if f.consent is None):
         notes.append("Kein Fall ohne übermittelten Broad Consent trägt eine Begründung (noScopeJustification): "
                      "Ablehnungen sind in diesen Daten nicht erkennbar, beide Zustimmungsquoten sind Obergrenzen.")
+    if any(f.dip_reason == DIP_NOT_EXPORTED for f in facts):
+        notes.append(f"Der Export enthält keine Spalte reasonResearchConsentMissing (Grund laut DIP): die Zeilen "
+                     f"'{CONSENT_MISSING_DIP}: …' sind leer. Exporte ab der Version von export-datenkranz mit dieser Spalte liefern ihn.")
+    else:
+        notes.append("Grund laut DIP: metadata.reasonResearchConsentMissing der DIP-Einreichung (Spalte des Exports). "
+                     "Das Mapping in den Datenkranz übernimmt ihn nicht und schreibt dann researchConsents: [], auch neben einer Einwilligung.")
     if totals.get(OTHER_TYPE):
         notes.append(f"Einreichungen mit metaData.submission.type außerhalb des Schemas ({', '.join(SUBMISSION_TYPES)}) "
                      f"stehen unter '{OTHER_TYPE}'.")
@@ -660,9 +722,10 @@ def main(argv=None):
         parser.error("--from must be before --until")
 
     failures = load_failures(args.input)
+    reasons = load_dip_reasons(args.input)
     rows, _ = rdm.load_submissions(args.input)
     result = run(rows, failures, args.start, args.end, args.reference_date, args.min_cell, args.period,
-                 args.follow_up_due_days)
+                 args.follow_up_due_days, reasons)
 
     with open(f"{args.output}.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)

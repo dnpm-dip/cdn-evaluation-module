@@ -741,6 +741,45 @@ class InputOutputTests(unittest.TestCase):
         self.assertEqual(get(result, ts.B_SUBMISSIONS, ts.NOT_CONVERTED, "2025-04", "LE1"), 1)
         self.assertEqual(result["periods"], ["2025-03", "2025-04", ts.WHOLE])
 
+    def test_counts_the_dip_reason_for_a_missing_consent_per_period(self):
+        def row(patient, tan, submitted, reason, consents=None):
+            return {"site": "LE1", "useCase": "RD", "patient": patient, "episodeOfCare": "e1", "tan": tan,
+                    "submittedAt": submitted + "T00:00:00",
+                    "content": datenkranz(tan, submitted=submitted, consents=consents or []),
+                    "reasonResearchConsentMissing": reason}
+        rows = [row("p1", "t1", "2025-03-01", "patient-refusal"),
+                row("p2", "t2", "2025-03-02", "technical-issues"),
+                row("p3", "t3", "2025-04-01", None),
+                row("p4", "t4", "2025-04-02", "something-else"),
+                row("p5", "t5", "2025-04-03", None, consents=[broad_consent()])]
+        with_column = {"tables": [{"name": "datenkranz", "columns": ["site", "useCase", "patient", "episodeOfCare", "tan",
+                                                                     "submittedAt", "content", "reasonResearchConsentMissing"],
+                                   "rows": rows}]}
+        without = {"tables": [{"name": "datenkranz", "rows": [{k: v for k, v in r.items() if k != "reasonResearchConsentMissing"} for r in rows]}]}
+        label = lambda r: f"{ts.CONSENT_MISSING_DIP}: {r}"
+        with tempfile.TemporaryDirectory() as tmp:
+            results = {}
+            for name, data in (("with", with_column), ("without", without)):
+                path = os.path.join(tmp, name + ".json")
+                with open(path, "w") as f:
+                    json.dump(data, f)
+                out = os.path.join(tmp, name)
+                main(path, "--output", out, "--min-cell", "1")
+                with open(out + ".json", encoding="utf-8") as f:
+                    results[name] = json.load(f)
+                with open(out + ".csv", encoding="utf-8-sig") as f:
+                    self.assertNotIn("something-else", f.read())
+        r = results["with"]
+        self.assertEqual(get(r, ts.B_CONSENT, label("Patient lehnt ab"), "2025-03", "LE1"), 1)
+        self.assertEqual(get(r, ts.B_CONSENT, label("technische Gründe"), "2025-03", "LE1"), 1)
+        self.assertEqual(get(r, ts.B_CONSENT, label(ts.DIP_NONE), "2025-04", "LE1"), 1)
+        self.assertEqual(get(r, ts.B_CONSENT, label(ts.DIP_OTHER), "2025-04", "LE1"), 1)
+        self.assertEqual(get(r, ts.B_CONSENT, label(ts.DIP_NOT_EXPORTED), ts.WHOLE, "LE1"), 0)
+        # the case with a transmitted consent isn't counted among those without
+        self.assertEqual(sum(get(r, ts.B_CONSENT, label(x), ts.WHOLE, "LE1")
+                             for x in [l for _, l in ts.DIP_REASONS] + [ts.DIP_OTHER, ts.DIP_NONE]), 4)
+        self.assertEqual(get(results["without"], ts.B_CONSENT, label(ts.DIP_NOT_EXPORTED), ts.WHOLE, "LE1"), 4)
+
     def test_writes_json_and_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "in.json")

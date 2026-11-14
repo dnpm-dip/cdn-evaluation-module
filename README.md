@@ -143,6 +143,9 @@ Three things to know when reading the figures:
   `patient refuses to sign consent`. A second rate counts these cases in its base. For exports of DIP nodes
   the justifications are missing ("ohne Begründung"), as long as the Datenkranz mapping of
   bfarm-schema-dto-model doesn't write `noScopeJustification`; until then both rates are upper bounds.
+  The reason the DIP submission itself states (`metadata.reasonResearchConsentMissing`) is counted in the lines
+  "nicht übermittelt, Grund laut DIP: …" per LE and period, read from the column `reasonResearchConsentMissing`
+  of the export when the export has it (see export-datenkranz).
 - By the period of the initial submission, a recent period holds only the early follow-ups, so its
   follow-up rates are lower and its durations shorter. With `--follow-up-due-days N` the lines
   "fällig: … innerhalb der Frist" compare between periods: cases whose GFK2 is at least N days before

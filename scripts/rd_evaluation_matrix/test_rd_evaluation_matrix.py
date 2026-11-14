@@ -181,6 +181,15 @@ class LeTests(unittest.TestCase):
         result = run([row("a", datenkranz("t1"), site="UKT")], failures=failures)
         self.assertEqual(get(result, "Fälle", "Einreichungen nicht konvertierbar (nicht in den Fällen)", "UKT"), 1)
         self.assertEqual(problems(result, rdm.P_NOT_CONVERTED)[0]["detail"], "conversion failed: x")
+        self.assertEqual(get(result, "Fälle", "davon Episode mit älterem Stand ausgewertet (eine spätere Einreichung nicht konvertierbar)", "UKT"), 0)
+
+    def test_a_failure_of_an_evaluated_episode_is_marked(self):
+        # a later submission of an evaluated episode could not be converted: the case keeps its older state
+        failures = [rdm.Failure("UKT", json.dumps("a"), "t2", "conversion failed: x")]
+        result = run([row("a", datenkranz("t1"), site="UKT")], failures=failures)
+        self.assertEqual(get(result, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "UKT"), 1)
+        self.assertEqual(get(result, "Fälle", "davon Episode mit älterem Stand ausgewertet (eine spätere Einreichung nicht konvertierbar)", "UKT"), 1)
+        self.assertTrue(problems(result, rdm.P_NOT_CONVERTED)[0]["detail"].startswith("Episode mit älterem Stand ausgewertet"))
 
 
 class RowTests(unittest.TestCase):
@@ -255,6 +264,18 @@ class RowTests(unittest.TestCase):
         self.assertEqual([p["tan"] for p in problems(result, rdm.P_GFK1_AFTER_SUBMISSION)], ["t3"])
         self.assertEqual(get(result, "Rückfragen an LE", rdm.P_GFK2_AFTER_SUBMISSION), 2)
 
+    def test_an_impossible_date_of_an_earlier_submission_is_not_hidden_by_a_later_one(self):
+        rows = [
+            # the initial submission reports a board after its own submission date
+            row("a", datenkranz("t1", submitted="2025-01-05", gfk1="2025-01-10", plan_date=None), "2025-01-05T10:00:00"),
+            row("a", datenkranz("t2", type_="followup", submitted="2025-04-01", gfk1="2025-01-10", plan_date="2025-03-01"),
+                "2025-04-01T10:00:00"),
+        ]
+        result = run(rows)
+        self.assertEqual([p["tan"] for p in problems(result, rdm.P_GFK1_AFTER_SUBMISSION)], ["t2"])
+        self.assertIn("Einreichung t1", problems(result, rdm.P_GFK1_AFTER_SUBMISSION)[0]["detail"])
+        self.assertEqual(get(result, "Bearbeitungsdauer medizinisch", "Dauer berechenbar"), 0)
+
     def test_sequencing_and_diagnosis_rates(self):
         result = cases(
             datenkranz("t1", extent="trioGenome", library="wgs", birth="1990-01"),
@@ -268,14 +289,17 @@ class RowTests(unittest.TestCase):
         self.assertEqual([get(result, "WGS-Seq. Art", e) for e in ("Single", "Duo", "Trio")], [0, 1, 2])
         self.assertEqual([p["tan"] for p in problems(result, rdm.P_NO_GENOME)], ["t4"])
         self.assertEqual(get(result, "Indikation", "Keine Indikation zur Genomsequenzierung (metaData.decisionToInclude = false)"), 1)
-        # t3 is open: undiagnosed without GFK2
+        # t3 was not sequenced: counted as a case, but not in the diagnosis status (it would be "offen" forever)
+        self.assertEqual(get(result, "Fälle", "davon nicht sequenziert (keine Indikation oder libraryType none, nicht im Diagnosestatus)"), 1)
         self.assertEqual([get(result, "Diagnosestatus (alle Fälle)", s) for s in
-                          ("Diagnose", "Unklar", "Undiagnostiziert", "offen (Undiagnostiziert, noch keine GFK2)")], [1, 2, 1, 1])
+                          ("Diagnose", "Unklar", "Undiagnostiziert", "offen (Undiagnostiziert, noch keine GFK2)")], [1, 2, 1, 0])
+        self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", "Diagnose", field="base"), 4)
         self.assertEqual((get(result, "Diagnoserate", "Diagnose"), get(result, "Diagnoserate", "Diagnose", field="percent")), (1, 25.0))
         self.assertEqual(get(result, "Diagnoserate", "davon partiell (unter Unklar)"), 1)
         self.assertEqual(get(result, "Diagnoserate nach WGS-Seq. Art", "Trio: Diagnose", field="percent"), 50.0)
         self.assertEqual(get(result, "Diagnosestatus nach Altersgruppe", f"{rdm.ADULTS}: Unklar"), 1)
-        self.assertEqual(get(result, "Diagnosestatus nach Altersgruppe", f"{rdm.CHILDREN}: offen"), 1)
+        # the only child (t3) was not sequenced
+        self.assertEqual(get(result, "Diagnosestatus nach Altersgruppe", f"{rdm.CHILDREN}: offen"), 0)
 
     def test_prior_findings(self):
         result = cases(
@@ -429,6 +453,26 @@ class InputOutputTests(unittest.TestCase):
                     json.dump(data, f)
                 rows, failures = rdm.load_submissions(path)
                 self.assertEqual((len(rows), len(failures), rows[0].site), expected)
+
+    def test_plain_list_keys_include_the_le_and_ignore_field_order(self):
+        plain = [
+            {"case": {"site": "A", "id": 1}, "submittedAt": "2025-03-01T10:00:00", "content": datenkranz("t1", assessment="noGeneticDiagnosis")},
+            {"case": {"id": 1, "site": "A"}, "submittedAt": "2025-04-01T10:00:00",
+             "content": datenkranz("t2", type_="followup", submitted="2025-04-01")},
+            # the same local case id at another LE is another case
+            {"case": {"site": "A", "id": 1}, "submittedAt": "2025-03-02T10:00:00",
+             "content": datenkranz("t3", submitter="260000002", assessment="noGeneticDiagnosis")},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "plain.json")
+            with open(path, "w") as f:
+                json.dump(plain, f)
+            rows, _ = rdm.load_submissions(path)
+        result = run(rows)
+        self.assertEqual(get(result, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)"), 2)
+        self.assertEqual(get(result, "Fälle", "Episoden ohne Erstmeldung (nicht in den Fällen)"), 0)
+        self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", "Diagnose", "260000001"), 1)
+        self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", "Diagnose", "260000002"), 0)
 
     def test_writes_json_and_csvs(self):
         with tempfile.TemporaryDirectory() as tmp:

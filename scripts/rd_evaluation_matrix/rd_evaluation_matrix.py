@@ -220,6 +220,7 @@ P_DIAGNOSIS_WITHOUT_GROUP = "Diagnose ohne Erkrankungsgruppe"
 P_NOT_CONVERTED = "Einreichung nicht konvertierbar"
 P_WITHOUT_INITIAL = "Episode ohne Erstmeldung"
 P_UNREADABLE = "Fall nicht auswertbar"
+STALE = "stale"   # losses: non-convertible submissions of an evaluated episode
 PROBLEMS = (P_GFK1_AFTER_SUBMISSION, P_GFK2_AFTER_SUBMISSION, P_SHORT_MEDICAL, P_NO_GENOME,
             P_PRIOR_AFTER_GFK1, P_DIAGNOSIS_WITHOUT_GROUP, P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)
 
@@ -270,8 +271,13 @@ def load_submissions(path):
         return rows, failures
 
     if isinstance(data, list):
-        return [SubmissionRow(json.dumps(e["case"]), e.get("submittedAt") or "", e["content"], e.get("site"))
-                for e in data], []
+        def key(e):
+            # the LE belongs to the key: the same local case id at two LEs are two cases; sort_keys makes an
+            # object key independent of the order of its fields
+            le = e.get("site") or e["content"].get("metaData", {}).get("submission", {}).get("submitterId")
+            return json.dumps([le, e["case"]], sort_keys=True)
+
+        return [SubmissionRow(key(e), e.get("submittedAt") or "", e["content"], e.get("site")) for e in data], []
 
     raise ValueError(f"{path}: neither a result of export-datenkranz nor a list of submissions")
 
@@ -520,11 +526,18 @@ def evaluate_case(case, reference_date, min_medical_days):
     # a submission can't report a board that took place after its own submission date; the
     # durations of a case with such an impossible date are left out
     impossible = False
-    if gfk1 > submission_date(latest):
-        impossible = True
-        problems.append((P_GFK1_AFTER_SUBMISSION,
-                         f"metaData.molecularBoardDecisionDate {gfk1} nach metaData.submission.date "
-                         f"{submission_date(latest)} ({(gfk1 - submission_date(latest)).days} Tage)"))
+    # each submission against its own date: a later submission must not hide an impossible date of an earlier one
+    for s in case.submissions:
+        try:
+            board, submitted = parse_date(s["metaData"]["molecularBoardDecisionDate"]), submission_date(s)
+        except (KeyError, TypeError, ValueError):
+            continue    # an earlier submission whose dates can't be read doesn't make the case unreadable
+        if board is not None and submitted is not None and board > submitted:
+            impossible = True
+            problems.append((P_GFK1_AFTER_SUBMISSION,
+                             f"metaData.molecularBoardDecisionDate {board} nach metaData.submission.date "
+                             f"{submitted} ({(board - submitted).days} Tage, Einreichung {s['metaData'].get('tanC')})"))
+            break
     if later:
         gfk2 = min(d for d, _ in later)
         first = next(s for d, s in later if d == gfk2)  # submissions are ordered by time
@@ -706,9 +719,15 @@ def matrix_rows(cases, losses, problem_counts, with_groups):
     def count(section, item, pred, of=cases, base_label="Fälle"):
         add(section, item, sum(1 for e in of if pred(e)), len(of), base_label)
 
+    # the diagnosis blocks count only cases that were sequenced: a case without indication or with
+    # libraryType none never gets a GFK2 and would otherwise count as "offen"
+    sequenced = [e for e in cases if not e.no_indication and e.library_type != "none"]
+
     s = "Fälle"
     add(s, "Fallzahl gesamt (Episoden mit Erstmeldung)", total)
+    add(s, "davon nicht sequenziert (keine Indikation oder libraryType none, nicht im Diagnosestatus)", total - len(sequenced))
     add(s, "Einreichungen nicht konvertierbar (nicht in den Fällen)", losses.get(P_NOT_CONVERTED, 0))
+    add(s, "davon Episode mit älterem Stand ausgewertet (eine spätere Einreichung nicht konvertierbar)", losses.get(STALE, 0))
     add(s, "Episoden ohne Erstmeldung (nicht in den Fällen)", losses.get(P_WITHOUT_INITIAL, 0))
     add(s, "Fälle nicht auswertbar (nicht in den Fällen)", losses.get(P_UNREADABLE, 0))
 
@@ -759,9 +778,9 @@ def matrix_rows(cases, losses, problem_counts, with_groups):
     s = "Diagnosestatus (alle Fälle)"
     for status in CASE_STATUSES:
         label = f"{OPEN} (Undiagnostiziert, noch keine GFK2)" if status == OPEN else status
-        count(s, label, lambda e: e.case_status == status)
+        count(s, label, lambda e: e.case_status == status, sequenced, "sequenzierte Fälle")
 
-    closed = [e for e in cases if e.case_status != OPEN]
+    closed = [e for e in sequenced if e.case_status != OPEN]
     s = "Diagnoserate (abgeschlossene Fälle)"
     for status in STATUSES:
         count(s, status, lambda e: e.status == status, closed, "abgeschlossene Fälle")
@@ -776,14 +795,14 @@ def matrix_rows(cases, losses, problem_counts, with_groups):
 
     s = "Diagnosestatus nach Altersgruppe"
     for group in AGE_GROUPS:
-        of_group = [e for e in cases if e.age_group == group]
+        of_group = [e for e in sequenced if e.age_group == group]
         closed_group = [e for e in of_group if e.case_status != OPEN]
         for status in STATUSES:
             count(s, f"{group}: {status}", lambda e: e.status == status, closed_group, f"abgeschlossene Fälle {group}")
         count(s, f"{group}: {OPEN}", lambda e: e.case_status == OPEN, of_group, f"Fälle {group}")
 
     for status in CASE_STATUSES:
-        of_status = [e for e in cases if e.case_status == status]
+        of_status = [e for e in sequenced if e.case_status == status]
         base_label = f"Fälle {status}"
         s = f"Vorbefunde, Status {status} (Mehrfachnennung möglich)"
         for prior_type in PRIOR_TYPES:
@@ -896,8 +915,14 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
             problem(e.le, kind, e.key, e.tan, detail)
     for le, key, tan in without_initial:
         problem(le, P_WITHOUT_INITIAL, key, tan, "nur Folgemeldungen/Ergänzungen/Korrekturen, keine Erstmeldung")
+    evaluated_keys = {e.key for e in evaluated}
+    stale = Counter()
     for f in failures:
-        problem(str(f.site or "?"), P_NOT_CONVERTED, f.case, f.tan, f.error[:300])
+        if f.case in evaluated_keys:
+            # a later submission of an evaluated episode: the case is evaluated with an older state
+            stale[str(f.site or "?")] += 1
+        problem(str(f.site or "?"), P_NOT_CONVERTED, f.case, f.tan,
+                ("Episode mit älterem Stand ausgewertet; " if f.case in evaluated_keys else "") + f.error[:300])
 
     les = sorted({e.le for e in evaluated} | {p["le"] for p in problems})
     # Rückfragen counted in cases (submissions for P_NOT_CONVERTED): a case with two problems of a kind counts once
@@ -907,7 +932,9 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
     losses_by_le = {le: {k: case_problems[le][k] for k in (P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)} for le in les}
 
     def losses(selected):
-        return {k: sum(losses_by_le[le][k] for le in selected) for k in (P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)}
+        out = {k: sum(losses_by_le[le][k] for le in selected) for k in (P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)}
+        out[STALE] = sum(stale[le] for le in selected)
+        return out
 
     def counts(selected):
         return sum((case_problems[le] for le in selected), Counter())

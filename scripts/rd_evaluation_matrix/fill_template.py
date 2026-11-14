@@ -11,7 +11,8 @@ Template layout (sheets "Anzahl" and "Anteil %" with the same rows):
                 E onwards one column per Leistungserbringer (filled in from the result)
   from row 6: a header row per section, then one row per value, identified by the key in column A
 Further sheets: "Rückfragen an LE" (cases to clarify, with case keys: only for the respective LE),
-"Hinweise" (notes).
+"Hinweise" (notes), and, written on filling, "Gründe je Monat": the reasons for a missing broad consent per month
+of the initial submission and LE (rows that depend on the months of the data, so they aren't template rows).
 
 The rows are matched by key, so the template may be restyled and reordered, and rows may be
 removed; rows of the result missing in the template are refused.
@@ -30,6 +31,13 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 COUNTS, PERCENTS, PROBLEMS, NOTES = "Anzahl", "Anteil %", "Rückfragen an LE", "Hinweise"
+REASONS_BY_MONTH = "Gründe je Monat"
+MONTHLY_SECTION = "Broad Consent nicht übermittelt: Grund laut DIP, nach Monat der Erstmeldung"
+
+
+def template_result_rows(result):
+    """The rows of the result that are template rows: all but those by month"""
+    return [r for r in result["rows"] if r["section"] != MONTHLY_SECTION]
 HEADER_ROW, FIRST_ROW = 5, 6
 KEY_COL, LABEL_COL, UNIT_COL, TOTAL_COL = 1, 2, 3, 4
 FIRST_LE_COL = 5
@@ -63,7 +71,7 @@ def new_template(result, path):
             cell.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
 
         row, section = FIRST_ROW, None
-        for r in result["rows"]:
+        for r in template_result_rows(result):
             if r["section"] != section:
                 section = r["section"]
                 if row > FIRST_ROW:
@@ -125,7 +133,7 @@ def template_rows(ws):
 
 def fill_matrix(ws, result, field):
     rows = template_rows(ws)
-    missing = [r["key"] for r in result["rows"] if r["key"] not in rows]
+    missing = [r["key"] for r in template_result_rows(result) if r["key"] not in rows]
     if missing:
         raise SystemExit(f"sheet '{ws.title}': rows of the result missing in the template, e.g. {missing[:3]} "
                          f"({len(missing)} in total); recreate the template with --new-template")
@@ -143,7 +151,7 @@ def fill_matrix(ws, result, field):
             copy_style(ws.cell(HEADER_ROW, col), ws.cell(HEADER_ROW, style_col))
             ws.column_dimensions[get_column_letter(col)].width = ws.column_dimensions[get_column_letter(style_col)].width
         ws.cell(HEADER_ROW, col, result["labels"][entity])
-        for r in result["rows"]:
+        for r in template_result_rows(result):
             row = rows[r["key"]]
             cell = ws.cell(row, col)
             if col > style_col:
@@ -167,6 +175,44 @@ def fill(wb, result):
     ws = wb[NOTES]
     for i, note in enumerate(result["notes"], 2):
         ws.cell(i, 1, note).alignment = Alignment(wrap_text=True, vertical="top")
+
+    fill_by_month(wb, result)
+
+
+def fill_by_month(wb, result):
+    """The reasons for a missing broad consent per month of the initial submission: count (share) per LE"""
+    monthly = [r for r in result["rows"] if r["section"] == MONTHLY_SECTION]
+    if not monthly:
+        return
+    if REASONS_BY_MONTH in wb.sheetnames:
+        wb.remove(wb[REASONS_BY_MONTH])
+    ws = wb.create_sheet(REASONS_BY_MONTH)
+    ws["A1"] = MONTHLY_SECTION
+    ws["A1"].font = Font(bold=True, size=12)
+    ws["A2"] = ("Anzahl der Fälle ohne übermittelten Broad Consent je Grund laut DIP; in Klammern Anteil an diesen Fällen "
+                "des Monats in %." + (f" Zellen mit weniger als {result['min_cell']} Fällen unterdrückt." if result["min_cell"] > 1 else ""))
+    header = ["Monat", "Grund"] + [result["labels"][e] for e in result["entities"]]
+    for col, text in enumerate(header, 1):
+        cell = ws.cell(4, col, text)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal="left" if col <= 2 else "center", wrap_text=True)
+    for i, r in enumerate(monthly, 5):
+        month, reason = r["item"].split(": ", 1)
+        ws.cell(i, 1, month)
+        ws.cell(i, 2, reason)
+        for j, entity in enumerate(result["entities"], 3):
+            v = r["values"][entity]
+            text = "" if v["value"] is None else str(v["value"])
+            if v.get("percent") is not None:
+                text += f" ({str(v['percent']).replace('.', ',')})"
+            ws.cell(i, j, text).alignment = Alignment(horizontal="right")
+    ws.column_dimensions["A"].width = 10
+    ws.column_dimensions["B"].width = 40
+    for j in range(3, len(header) + 1):
+        ws.column_dimensions[get_column_letter(j)].width = 14
+    ws.freeze_panes = "C5"
+    ws.auto_filter.ref = f"A4:{get_column_letter(len(header))}{ws.max_row}"
 
 
 def main(argv=None):
@@ -192,7 +238,8 @@ def main(argv=None):
 
     check = openpyxl.load_workbook(args.output)[COUNTS]
     rows = template_rows(check)
-    wrong = [r["key"] for r in result["rows"] if check.cell(rows[r["key"]], TOTAL_COL).value != r["values"]["Gesamt"]["value"]]
+    wrong = [r["key"] for r in template_result_rows(result)
+             if check.cell(rows[r["key"]], TOTAL_COL).value != r["values"]["Gesamt"]["value"]]
     if wrong:
         raise SystemExit(f"cells not written as expected: {wrong[:5]}")
     print(f"Written: {args.output} ({len(result['rows'])} rows, {len(result['entities']) - 1} LEs, "

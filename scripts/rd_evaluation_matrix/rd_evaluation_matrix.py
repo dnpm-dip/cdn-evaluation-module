@@ -229,12 +229,30 @@ PROBLEMS = (P_GFK1_AFTER_SUBMISSION, P_GFK2_AFTER_SUBMISSION, P_SHORT_MEDICAL, P
 # Input
 # ---------------------------------------------------------------------------------------------
 
+# metadata.reasonResearchConsentMissing of the DIP submission (service-base BroadConsent.ReasonMissing), exported by
+# export-datenkranz in the column of that name beside the Datenkranz, which doesn't carry it
+DIP_REASONS = {
+    "patient-inability":     "Patient nicht einwilligungsfähig",
+    "patient-refusal":       "Patient lehnt ab",
+    "consent-not-returned":  "Einwilligung nicht zurückgegeben",
+    "other-patient-reason":  "anderer patientenbezogener Grund",
+    "technical-issues":      "technische Gründe",
+    "organizational-issues": "organisatorische Gründe",
+}
+REASON_OTHER = "anderer Wert"
+REASON_NONE = "kein Grund angegeben"
+REASON_NOT_EXPORTED = "nicht im Export (Spalte reasonResearchConsentMissing fehlt)"
+REASON_LABELS = tuple(DIP_REASONS.values()) + (REASON_OTHER, REASON_NONE, REASON_NOT_EXPORTED)
+NOT_EXPORTED = object()     # SubmissionRow.reason of an input without the column
+
+
 @dataclass
 class SubmissionRow:
     case: str
     submitted_at: str
     content: dict
     site: str = None
+    reason: object = NOT_EXPORTED   # reasonResearchConsentMissing of the export row, None if empty
 
 
 @dataclass
@@ -258,8 +276,10 @@ def load_submissions(path):
         def key(r):
             return json.dumps([r.get("site"), r.get("patient"), r.get("episodeOfCare")])
 
+        exported = "reasonResearchConsentMissing" in (tables["datenkranz"].get("columns") or [])
         rows = [
-            SubmissionRow(key(r), r.get("submittedAt") or "", r["content"], r.get("site"))
+            SubmissionRow(key(r), r.get("submittedAt") or "", r["content"], r.get("site"),
+                          r.get("reasonResearchConsentMissing") if exported else NOT_EXPORTED)
             for r in tables["datenkranz"]["rows"]
             if r.get("useCase") in (None, "RD")
         ]
@@ -277,7 +297,10 @@ def load_submissions(path):
             le = e.get("site") or e["content"].get("metaData", {}).get("submission", {}).get("submitterId")
             return json.dumps([le, e["case"]], sort_keys=True)
 
-        return [SubmissionRow(key(e), e.get("submittedAt") or "", e["content"], e.get("site")) for e in data], []
+        exported = any("reasonResearchConsentMissing" in e for e in data)
+        return [SubmissionRow(key(e), e.get("submittedAt") or "", e["content"], e.get("site"),
+                              e.get("reasonResearchConsentMissing") if exported else NOT_EXPORTED)
+                for e in data], []
 
     raise ValueError(f"{path}: neither a result of export-datenkranz nor a list of submissions")
 
@@ -325,6 +348,7 @@ class Case:
     key: str
     le: str
     submissions: list  # non-test, ordered by submittedAt
+    reasons: list = None   # SubmissionRow.reason of each submission
 
     @property
     def latest(self):
@@ -366,7 +390,7 @@ def build_cases(rows, start=None, end=None):
     for key, subs in by_key.items():
         # stable sort: equal times keep the order of the input
         subs = sorted(subs, key=lambda r: r.submitted_at)
-        case = Case(key, leistungserbringer(subs[0]), [r.content for r in subs])
+        case = Case(key, leistungserbringer(subs[0]), [r.content for r in subs], [r.reason for r in subs])
         if not any(submission_type(s) == "initial" for s in case.submissions):
             without_initial.append((case.le, key, case.latest["metaData"].get("tanC")))
             continue
@@ -440,6 +464,16 @@ def permits_research_use(research_consents, reference_date):
     return any(decisions.values())
 
 
+def dip_reason(case):
+    """The reason for a missing broad consent the latest submission of the DIP states, as one of REASON_LABELS"""
+    reason = case.reasons[-1] if case.reasons else NOT_EXPORTED
+    if reason is NOT_EXPORTED:
+        return REASON_NOT_EXPORTED
+    if not reason:
+        return REASON_NONE
+    return DIP_REASONS.get(reason, REASON_OTHER)
+
+
 def permits_mv_sequencing(mv_consent):
     """The latest metaData.mvConsent.scope entry of the domain mvSequencing is a permit"""
     scopes = [s for s in (mv_consent or {}).get("scope") or [] if s.get("domain") == "mvSequencing"]
@@ -481,6 +515,9 @@ class Evaluated:
     extent: str
     consent_at_submission: bool
     consent_at_reference: bool
+    consent_transmitted: bool   # a researchConsents entry with a FHIR Consent in scope
+    consent_reason: str         # reason for a missing consent as the DIP states it (REASON_LABELS)
+    initial_month: str          # YYYY-MM of the initial submission
     mv_sequencing_consent: bool
     has_gfk2: bool
     impossible_dates: bool
@@ -633,6 +670,9 @@ def evaluate_case(case, reference_date, min_medical_days):
         extent                 = EXTENTS.get(diagnosis.get("diagnosticExtent"), "unbekannt"),
         consent_at_submission  = permits_research_use(meta.get("researchConsents") or [], submission_date(latest)),
         consent_at_reference   = permits_research_use(meta.get("researchConsents") or [], reference_date),
+        consent_transmitted    = any(isinstance(rc.get("scope"), dict) for rc in meta.get("researchConsents") or []),
+        consent_reason         = dip_reason(case),
+        initial_month          = submission_date(case.initial).strftime("%Y-%m"),
         mv_sequencing_consent  = permits_mv_sequencing(meta.get("mvConsent")),
         has_gfk2               = bool(later),
         impossible_dates       = impossible,
@@ -708,7 +748,7 @@ def quartiles(values):
     return q1, q2, q3
 
 
-def matrix_rows(cases, losses, problem_counts, with_groups):
+def matrix_rows(cases, losses, problem_counts, with_groups, months=()):
     """The rows of the matrix for a set of cases; the same rows for every set"""
     rows = []
     total = len(cases)
@@ -735,6 +775,17 @@ def matrix_rows(cases, losses, problem_counts, with_groups):
     count(s, "Broad Consent gültig zum Datum der letzten Einreichung", lambda e: e.consent_at_submission)
     count(s, "Broad Consent gültig zum Stichtag", lambda e: e.consent_at_reference)
     count(s, "MV-Einwilligung Sequenzierung (mvSequencing: permit)", lambda e: e.mv_sequencing_consent)
+    missing = [e for e in cases if not e.consent_transmitted]
+    s = "Broad Consent nicht übermittelt: Grund laut DIP"
+    count(s, "Fälle ohne übermittelten Broad Consent", lambda e: not e.consent_transmitted)
+    for label in REASON_LABELS:
+        count(s, label, lambda e: e.consent_reason == label, missing, "Fälle ohne übermittelten Broad Consent")
+    s = "Broad Consent nicht übermittelt: Grund laut DIP, nach Monat der Erstmeldung"
+    for month in months:
+        of_month = [e for e in missing if e.initial_month == month]
+        for label in REASON_LABELS[:-1]:
+            count(s, f"{month}: {label}", lambda e: e.consent_reason == label, of_month,
+                  f"Fälle ohne übermittelten Broad Consent, Erstmeldung {month}")
     s = "Broad Consent nach Altersgruppe (zum Datum der letzten Einreichung)"
     for group in AGE_GROUPS:
         count(s, group, lambda e: e.consent_at_submission, [e for e in cases if e.age_group == group], f"Fälle {group}")
@@ -940,9 +991,12 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         return sum((case_problems[le] for le in selected), Counter())
 
     with_groups = heads is not None
-    entities = {TOTAL: matrix_rows(evaluated, losses(les), counts(les), with_groups)}
+    # the reasons by month only where the export has them, else the section would be all zeros
+    reasons_exported = any(e.consent_reason != REASON_NOT_EXPORTED for e in evaluated)
+    months = sorted({e.initial_month for e in evaluated}) if reasons_exported else ()
+    entities = {TOTAL: matrix_rows(evaluated, losses(les), counts(les), with_groups, months)}
     for le in les:
-        entities[le] = matrix_rows([e for e in evaluated if e.le == le], losses([le]), counts([le]), with_groups)
+        entities[le] = matrix_rows([e for e in evaluated if e.le == le], losses([le]), counts([le]), with_groups, months)
 
     if start or end:
         until = date.fromordinal(end.toordinal() - 1) if end else None
@@ -988,6 +1042,13 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         notes.append(f"Fälle mit Erstmeldung vom {start or '…'} bis vor dem {end or '…'}.")
     if heads is None:
         notes.append("Erkrankungsgruppen nicht ausgewertet: keine Orphanet-Linearisierung angegeben (--orphanet).")
+    if not reasons_exported:
+        notes.append("Grund für einen fehlenden Broad Consent: der Export enthält die Spalte reasonResearchConsentMissing nicht "
+                     "(export-datenkranz ab der Fassung mit dieser Spalte); die Zeilen stehen unter 'nicht im Export', "
+                     "die Aufteilung nach Monat entfällt.")
+    else:
+        notes.append("Grund für einen fehlenden Broad Consent: metadata.reasonResearchConsentMissing der letzten DIP-Einreichung "
+                     "(Spalte des Exports); das Mapping in den Datenkranz übernimmt ihn nicht. Nach Monat: Monat der Erstmeldung.")
     if unmapped_heads:
         notes.append("Orphanet-Gruppenköpfe ohne Vorlagengruppe, gezählt unter 'unbekannt: Gruppenkopf': "
                      + ", ".join(sorted(unmapped_heads)) + "; HEAD_GROUP ergänzen.")

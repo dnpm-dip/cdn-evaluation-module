@@ -208,6 +208,42 @@ class RowTests(unittest.TestCase):
         self.assertEqual(get(result, "Einwilligung", "MV-Einwilligung Sequenzierung (mvSequencing: permit)"), 4)
         self.assertEqual(get(result, "Broad Consent nach Altersgruppe", rdm.CHILDREN, field="percent"), 40.0)
 
+    def test_reasons_for_a_missing_consent_per_le_and_month(self):
+        def r(case, tan, submitted, reason, site, consents=()):
+            return rdm.SubmissionRow(json.dumps(case), submitted + "T10:00:00",
+                                     datenkranz(tan, submitted=submitted, consents=consents), site, reason)
+        rows = [
+            r("a", "t1", "2025-03-01", "patient-refusal", "UKT"),
+            r("b", "t2", "2025-03-02", "technical-issues", "UKT"),
+            r("c", "t3", "2025-04-01", None, "UKT"),
+            r("d", "t4", "2025-04-02", "something-else", "UKE"),
+            r("e", "t5", "2025-04-03", None, "UKE", consents=[broad_consent()]),     # transmitted: not counted
+            # the reason of the latest submission counts
+            r("a", "t6", "2025-05-01", "organizational-issues", "UKT"),
+        ]
+        rows[-1].content["metaData"]["submission"]["type"] = "correction"
+        result = run(rows)
+        s = "Broad Consent nicht übermittelt: Grund laut DIP"
+        self.assertEqual(get(result, s, "Fälle ohne übermittelten Broad Consent"), 4)
+        self.assertEqual([get(result, s, l, "UKT") for l in ("organisatorische Gründe", "technische Gründe", "kein Grund angegeben")], [1, 1, 1])
+        self.assertEqual(get(result, s, "Patient lehnt ab", "UKT"), 0)
+        self.assertEqual(get(result, s, "anderer Wert", "UKE"), 1)
+        self.assertEqual(get(result, s, "organisatorische Gründe", field="base"), 4)
+        m = "Broad Consent nicht übermittelt: Grund laut DIP, nach Monat der Erstmeldung"
+        self.assertEqual(get(result, m, "2025-03: organisatorische Gründe", "UKT"), 1)
+        self.assertEqual(get(result, m, "2025-03: technische Gründe", "UKT"), 1)
+        self.assertEqual(get(result, m, "2025-04: kein Grund angegeben", "UKT"), 1)
+        self.assertEqual(get(result, m, "2025-04: anderer Wert", "UKE"), 1)
+        self.assertEqual(get(result, m, "2025-04: kein Grund angegeben", "UKE", field="base"), 1)
+        self.assertNotIn("something-else", json.dumps(result, ensure_ascii=False))
+
+    def test_reasons_without_the_export_column(self):
+        result = cases(datenkranz("t1"), datenkranz("t2", consents=[broad_consent()]))
+        s = "Broad Consent nicht übermittelt: Grund laut DIP"
+        self.assertEqual(get(result, s, rdm.REASON_NOT_EXPORTED), 1)
+        self.assertFalse([r for r in result["rows"] if r["section"].endswith("nach Monat der Erstmeldung")])
+        self.assertTrue(any("reasonResearchConsentMissing nicht" in n for n in result["notes"]))
+
     def test_a_denial_wins_over_later_consents(self):
         self.assertFalse(rdm.permits_research_use(
             [{"scope": broad_consent(kind="deny")}, {"scope": broad_consent()}], REFERENCE))

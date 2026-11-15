@@ -16,7 +16,8 @@ Output (<output> without extension):
   <output>.json          every value, in total and per LE, the cases to clarify with the LEs, notes
   <output>.csv           long table LE | Abschnitt | Kategorie | Einheit | Wert | Bezug | Basis | Anteil
   <output>_rueckfragen.csv  cases to clarify with their LE (contains case keys: only for the LEs)
-Counts below --min-cell (default 5) are suppressed ("<5") in all outputs except the Rückfragen.
+Counts below --min-cell (default 5) are suppressed ("<5") in all outputs except the Rückfragen, and complementary
+cells with the same marker so that no suppressed count is the difference of shown ones (see suppressed_quantities).
 The xlsx is written from the JSON by fill_template.py (needs openpyxl).
 
 Example:
@@ -724,6 +725,8 @@ class Row:
     n: object = None            # count or statistic
     base: int = None            # denominator of the percentage
     support: int = None         # number of values a statistic is computed from
+    members: frozenset = None   # what a count counts (case keys, variant ids), for the complementary suppression
+    of: frozenset = None        # the same of the base
 
     @property
     def key(self):
@@ -753,19 +756,21 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=()):
     rows = []
     total = len(cases)
 
-    def add(section, item, n, base=None, base_label=None):
-        rows.append(Row(section, item, COUNT, base_label, n, base))
+    def add(section, item, n, base=None, base_label=None, members=None, of=None):
+        rows.append(Row(section, item, COUNT, base_label, n, base, members=members, of=of))
 
     def count(section, item, pred, of=cases, base_label="Fälle"):
-        add(section, item, sum(1 for e in of if pred(e)), len(of), base_label)
+        hits = frozenset(e.key for e in of if pred(e))
+        add(section, item, len(hits), len(of), base_label, hits, frozenset(e.key for e in of))
 
     # the diagnosis blocks count only cases that were sequenced: a case without indication or with
     # libraryType none never gets a GFK2 and would otherwise count as "offen"
     sequenced = [e for e in cases if not e.no_indication and e.library_type != "none"]
 
     s = "Fälle"
-    add(s, "Fallzahl gesamt (Episoden mit Erstmeldung)", total)
-    add(s, "davon nicht sequenziert (keine Indikation oder libraryType none, nicht im Diagnosestatus)", total - len(sequenced))
+    add(s, "Fallzahl gesamt (Episoden mit Erstmeldung)", total, members=frozenset(e.key for e in cases))
+    add(s, "davon nicht sequenziert (keine Indikation oder libraryType none, nicht im Diagnosestatus)", total - len(sequenced),
+        members=frozenset(e.key for e in cases) - frozenset(e.key for e in sequenced))
     add(s, "Einreichungen nicht konvertierbar (nicht in den Fällen)", losses.get(P_NOT_CONVERTED, 0))
     add(s, "davon Episode mit älterem Stand ausgewertet (eine spätere Einreichung nicht konvertierbar)", losses.get(STALE, 0))
     add(s, "Episoden ohne Erstmeldung (nicht in den Fällen)", losses.get(P_WITHOUT_INITIAL, 0))
@@ -905,11 +910,13 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=()):
     for name, base_label in CASE_FIELDS:
         applicable = [e for e in cases if e.case_fields[name] is not None]
         count(s, name, lambda e: e.case_fields[name], applicable, base_label)
-    variants = [v for e in cases for v in e.variants]
+    variants = {(e.key, i): v for e in cases for i, v in enumerate(e.variants)}
+    all_variants = frozenset(variants)
     s = "Füllgrad optionaler Felder (Varianten der letzten Einreichung)"
-    add(s, "Varianten gesamt", len(variants))
+    add(s, "Varianten gesamt", len(variants), members=all_variants)
     for name, label in VARIANT_FIELDS:
-        add(s, f"{label} ({name})", sum(1 for v in variants if v[name]), len(variants), "Varianten")
+        filled = frozenset(k for k, v in variants.items() if v[name])
+        add(s, f"{label} ({name})", len(filled), len(variants), "Varianten", filled, all_variants)
 
     s = "Rückfragen an LE (Anzahl, Einzelfälle siehe Rückfragen)"
     for problem in PROBLEMS:
@@ -918,18 +925,118 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=()):
     return rows
 
 
-def suppressed(row, min_cell):
-    """(value, base, percent) of a row, counts 1..min_cell-1 replaced by '<min_cell'"""
+# Small-cell suppression. Primary: counts 1..min_cell-1. Complementary: a suppressed count must not be
+# recoverable as a difference, so in each group of counts with a known sum relation in which exactly one count is
+# suppressed, the smallest other nonzero count is suppressed as well, until no group changes. Groups:
+#   (a) a row across the LE columns and Gesamt (Gesamt = sum of the LEs), for the counts and for the bases;
+#   (b) per column, a partition: disjoint counts that make up a set that is shown too (the base of the rows of a
+#       section, the bases of a section that make up another count, or a count and its complement).
+# A count is the set it counts (case keys, variant ids): the same set shown twice, e.g. the case count and the base
+# "Fälle", is one quantity and suppressed in both places. Lean, not a full audit of all linear relations.
+
+def quantities(entities):
+    """The quantity of each count cell {(entity, row index, "value" | "base"): (entity, set or row id)}, and their sizes"""
+    cells, size = {}, {}
+    for entity, rows in entities.items():
+        for i, r in enumerate(rows):
+            if r.unit != COUNT:
+                continue
+            for field_, n, members, own in (("value", r.n, r.members, ("row", i)), ("base", r.base, r.of, ("base", i))):
+                if n is None:
+                    continue
+                q = (entity, members if members is not None else own)
+                cells[entity, i, field_] = q
+                size[q] = n
+    return cells, size
+
+
+def disjoint(sets):
+    """The nonempty sets in order, each left out if it overlaps one taken before"""
+    taken, union = [], frozenset()
+    for s in dict.fromkeys(sets):
+        if s and not s & union:
+            taken.append(s)
+            union |= s
+    return taken, union
+
+
+def suppression_groups(entities, cells):
+    """The groups (rule, quantities) of the complementary suppression, see above"""
+    groups = {}
+
+    def group(rule, members):
+        members = tuple(dict.fromkeys(members))
+        if len(members) > 1:
+            groups.setdefault(members, rule)
+
+    for i, r in enumerate(entities[TOTAL]):
+        for field_ in ("value", "base"):
+            if (TOTAL, i, field_) in cells:
+                group("a", [cells[e, i, field_] for e in entities])
+
+    for entity, rows in entities.items():
+        known = {q[1]: q for q in cells.values() if q[0] == entity and isinstance(q[1], frozenset)}
+        sections = {}
+        for r in rows:
+            if r.members is not None and r.of is not None:
+                sections.setdefault(r.section, {}).setdefault(r.of, []).append(r.members)
+        for by_base in sections.values():
+            for base, parts in by_base.items():
+                taken, union = disjoint(parts)
+                if union == base:
+                    group("b", [known[s] for s in taken] + [known[base]])
+            taken, union = disjoint(by_base)
+            if len(taken) > 1 and union in known:
+                group("b", [known[s] for s in taken] + [known[union]])
+        sizes = {len(s) for s in known}
+        for whole in known:
+            for part in known:
+                if 0 < len(part) < len(whole) and len(whole) - len(part) in sizes and part < whole:
+                    rest = whole - part
+                    if rest in known:
+                        group("b", [known[whole], known[part], known[rest]])
+    return [(rule, members) for members, rule in groups.items()]
+
+
+def suppressed_quantities(entities, min_cell):
+    """The quantity of each count cell, the sizes, and the quantities to suppress (primary and complementary)"""
+    cells, size = quantities(entities)
+    hidden = {q for q in cells.values() if 0 < size[q] < min_cell}
+    if not hidden:
+        return cells, size, hidden
+    # the case count of all LEs only where the LE columns need it
+    protected = cells.get((TOTAL, 0, "value"))
+    groups = suppression_groups(entities, cells)
+    changed = True
+    while changed:
+        changed = False
+        for rule, members in groups:
+            if sum(q in hidden for q in members) != 1:
+                continue
+            candidates = [q for q in members if q not in hidden and size[q] > 0 and (rule == "a" or q != protected)]
+            if candidates:
+                hidden.add(min(candidates, key=lambda q: (size[q], q[0] == TOTAL)))
+                changed = True
+    return cells, size, hidden
+
+
+def suppressed(row, min_cell, hide_value=False, hide_base=False):
+    """(value, base, percent) of a row, a suppressed count replaced by '<min_cell', its percentage left out"""
     hidden = f"<{min_cell}"
     if row.unit == VALUE:
         return (hidden if row.n is not None and row.support < min_cell else row.n), None, None
     n, base = row.n, row.base
     pct = percent(n, base)
-    if 0 < n < min_cell:
+    if hide_value or 0 < n < min_cell:
         n, pct = hidden, None
-    if base is not None and 0 < base < min_cell:
+    if base is not None and (hide_base or 0 < base < min_cell):
         base, pct = hidden, None
     return n, base, pct
+
+
+def small(n, min_cell):
+    """A count for the notes, suppressed as in the matrix"""
+    return f"<{min_cell}" if 0 < n < min_cell else n
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1006,12 +1113,16 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         period = (f"gesamter Export (Erstmeldungen {min(dates).strftime('%d.%m.%Y')} - {max(dates).strftime('%d.%m.%Y')})"
                   if dates else "gesamter Export")
 
+    cells, size, hidden = suppressed_quantities(entities, min_cell)
+    primary = sum(1 for q in cells.values() if 0 < size[q] < min_cell)
+    complementary = sum(1 for q in cells.values() if q in hidden) - primary
     template_rows = entities[TOTAL]
     result_rows = []
     for i, r in enumerate(template_rows):
         values = {}
         for name, entity_rows in entities.items():
-            n, base, pct = suppressed(entity_rows[i], min_cell)
+            n, base, pct = suppressed(entity_rows[i], min_cell, cells.get((name, i, "value")) in hidden,
+                                      cells.get((name, i, "base")) in hidden)
             values[name] = {"value": n, "base": base, "percent": pct}
         result_rows.append({"key": r.key, "section": r.section, "item": r.item, "unit": r.unit,
                             "base_label": r.base_label, "values": values})
@@ -1019,11 +1130,15 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
     labels = {le: f"{le} ({', '.join(sorted(submitters[le]))})" if le in submitters else le for le in les}
 
     notes = [
-        f"{len(evaluated)} Fälle (Episoden mit Erstmeldung) ausgewertet, Stand je Fall aus der letzten "
-        "Nicht-Test-Einreichung; Spezifikation: docs/rd-evaluation-matrix.txt.",
-        f"{tests} Testeinreichungen verworfen.",
+        f"{result_rows[0]['values'][TOTAL]['value']} Fälle (Episoden mit Erstmeldung) ausgewertet, Stand je Fall aus der "
+        "letzten Nicht-Test-Einreichung; Spezifikation: docs/rd-evaluation-matrix.txt.",
+        f"{small(tests, min_cell)} Testeinreichungen verworfen.",
         (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso Anteile mit Basis unter "
-         f"{min_cell} und Kennzahlen der Bearbeitungsdauer aus weniger als {min_cell} Werten (nicht in den Rückfragen)."
+         f"{min_cell} und Kennzahlen der Bearbeitungsdauer aus weniger als {min_cell} Werten (nicht in den Rückfragen). "
+         f"Ergänzend unterdrückt, ebenfalls als <{min_cell}: in jeder Zeile über die LEs und Gesamt und in jeder "
+         "Aufteilung einer Spalte (Kategorien, die sich zu einer gezeigten Zahl summieren), in der sonst genau eine Zelle "
+         "unterdrückt wäre, die kleinste weitere Zelle über 0, bis keine unterdrückte Zahl als Differenz berechenbar ist "
+         f"({complementary} Zellen zusätzlich zu {primary}); eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr Fälle zählen."
          if min_cell > 1 else "Keine Zellen unterdrückt (--min-cell 1)."),
         "Diagnosestatus 'offen': Undiagnostiziert und noch keine Fallkonferenz nach dem Indikationsboard (GFK2); "
         "die Diagnoserate bezieht sich auf die abgeschlossenen Fälle.",
@@ -1057,6 +1172,7 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         "title": f"AUSWERTUNG {period}",
         "period": period,
         "min_cell": min_cell,
+        "suppressed": {"primary": primary, "complementary": complementary},
         "entities": [TOTAL] + les,
         "labels": {TOTAL: TOTAL, **labels},
         "rows": result_rows,
@@ -1115,7 +1231,7 @@ def main(argv=None):
 
     for note in result["notes"]:
         print(note, file=sys.stderr)
-    print(f"{len(result['problems'])} Rückfragen an LEs, siehe {args.output}_rueckfragen.csv", file=sys.stderr)
+    print(f"{small(len(result['problems']), result['min_cell'])} Rückfragen an LEs, siehe {args.output}_rueckfragen.csv", file=sys.stderr)
     print(f"Written: {args.output}.json, {args.output}.csv, {args.output}_rueckfragen.csv", file=sys.stderr)
 
 

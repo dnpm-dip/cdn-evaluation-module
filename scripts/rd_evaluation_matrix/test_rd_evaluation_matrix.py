@@ -2,6 +2,7 @@
 
 import json
 import os
+import random
 import tempfile
 import unittest
 from datetime import date
@@ -169,7 +170,9 @@ class LeTests(unittest.TestCase):
         result = cases(*[datenkranz(f"t{i}", gender="male" if i < 2 else "female") for i in range(8)], min_cell=5)
         self.assertEqual(get(result, "Geschlecht", "m"), "<5")
         self.assertIsNone(get(result, "Geschlecht", "m", field="percent"))
-        self.assertEqual((get(result, "Geschlecht", "w"), get(result, "Geschlecht", "w", field="percent")), (6, 75.0))
+        # w would give m away as the case count minus w: suppressed as well (complementary); the case count is shown
+        self.assertEqual((get(result, "Geschlecht", "w"), get(result, "Geschlecht", "w", field="percent")), ("<5", None))
+        self.assertEqual(get(result, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)"), 8)
         self.assertEqual(get(result, "Geschlecht", "d"), 0)
         # a duration statistic from 8 values is shown, from 1 value suppressed
         self.assertEqual(get(result, "Bearbeitungsdauer medizinisch", "Median (Tage)"), 31.0)
@@ -527,6 +530,126 @@ class InputOutputTests(unittest.TestCase):
         self.assertIn("260000001;Geschlecht;w;Anzahl;1;Fälle;1;100,0", lines)
         self.assertEqual(len(problem_lines), 2)
         self.assertTrue(problem_lines[1].startswith(f"260000001;{rdm.P_GFK2_AFTER_SUBMISSION};"))
+
+
+def synthetic(seed=7, sizes=(("LE-A", 41), ("LE-B", 13), ("LE-C", 6))):
+    """A random synthetic case set over three LEs, with small cells in most sections"""
+    rnd = random.Random(seed)
+    rows = []
+    for le, size in sizes:
+        for i in range(size):
+            transmitted = rnd.random() < 0.6
+            content = datenkranz(
+                f"{le}-{i}", submitted=f"2025-0{rnd.randint(3, 5)}-0{rnd.randint(1, 9)}",
+                gender=rnd.choice(["female"] * 5 + ["male"] * 4 + ["other", None]),
+                birth=rnd.choice(["1950-01", "1985-06", "2000-03", "2010-09", "2020-02", "2024-12"]),
+                coverage=rnd.choice(["GKV"] * 8 + ["PKV", "BG"]),
+                assessment=rnd.choice(list(rdm.ASSESSMENT_STATUS)),
+                library=rnd.choice(["wgs"] * 8 + ["wgs_lr", "panel", "none"]),
+                extent=rnd.choice(["singleGenome", "duoGenome", "trioGenome", "trioGenome"]),
+                include=rnd.random() < 0.95, plan_date=rnd.choice(["2025-02-10", "2025-02-10", None]),
+                orpha=rnd.choice(["ORPHA:558", "ORPHA:98006", "ORPHA:777", "ORPHA:616874", None]),
+                consents=[broad_consent()] if transmitted else [],
+            )
+            reason = None if transmitted else rnd.choice(list(rdm.DIP_REASONS) + [None])
+            rows.append(rdm.SubmissionRow(json.dumps([le, i]), "2025-06-01T10:00:00", content, le, reason))
+    return rows
+
+
+def partitions(result):
+    """Independently of the implementation: the partitions of a column as (total, parts), cells as (section, item, field)"""
+    def rows_of(section, items):
+        return [(section, item, "value") for item in items]
+
+    cases = ("Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "value")
+    status = "Diagnosestatus (alle Fälle)"
+    status_items = [r["item"] for r in result["rows"] if r["section"] == status]
+    sequenced = (status, status_items[0], "base")
+    rate = "Diagnoserate (abgeschlossene Fälle)"
+    by_age = "Diagnosestatus nach Altersgruppe"
+    reasons = "Broad Consent nicht übermittelt: Grund laut DIP"
+    missing = (reasons, rdm.REASON_LABELS[0], "base")
+    months = sorted({r["item"].split(":")[0] for r in result["rows"] if r["section"] == reasons + ", nach Monat der Erstmeldung"})
+    out = [
+        (cases, rows_of("Geschlecht", ["m", "w", "d", "unbekannt"])),
+        (cases, rows_of("Alter bei Einschluss (GFK1)", rdm.AGE_GROUPS)),
+        (cases, rows_of("Versicherung", ["GKV", "PKV", "andere"])),
+        (cases, rows_of("Sequenzierung (libraryType)", ["WGS", "lrWGS", "Panel", "Exom (WES)", "keine (noch nicht sequenziert)"])),
+        (cases, rows_of("Erkrankungsgruppen gesamt", rdm.DISEASE_GROUPS)),
+        (cases, [("Fälle", "davon nicht sequenziert (keine Indikation oder libraryType none, nicht im Diagnosestatus)", "value"),
+                 sequenced]),
+        (sequenced, rows_of(status, status_items)),
+        ((rate, rdm.DIAGNOSED, "base"), rows_of(rate, rdm.STATUSES)),
+        (missing, [(reasons, "Fälle ohne übermittelten Broad Consent", "value")]),
+        (missing, rows_of(reasons, rdm.REASON_LABELS)),
+        (missing, [(reasons + ", nach Monat der Erstmeldung", f"{m}: {rdm.REASON_LABELS[0]}", "base") for m in months]),
+    ]
+    for s in ("Bearbeitungsdauer medizinisch (GFK1 bis GFK2)", "Bearbeitungsdauer dokumentarisch (GFK2 bis Einreichung beim KDK)"):
+        out.append((cases, rows_of(s, ("Dauer berechenbar", "nicht berechenbar: noch keine GFK2",
+                                       "nicht berechenbar: unmögliches Datum (siehe Rückfragen)"))))
+    for group in rdm.AGE_GROUPS:
+        closed = (by_age, f"{group}: {rdm.DIAGNOSED}", "base")
+        out.append((closed, rows_of(by_age, [f"{group}: {st}" for st in rdm.STATUSES])))
+        out.append(((by_age, f"{group}: {rdm.OPEN}", "base"), [closed, (by_age, f"{group}: {rdm.OPEN}", "value")]))
+    return out
+
+
+class ComplementarySuppressionTests(unittest.TestCase):
+    """No suppressed count can be recovered as a difference of shown counts"""
+
+    def setUp(self):
+        self.rows = synthetic()
+        self.full = run(self.rows, min_cell=1)
+        self.result = run(self.rows, min_cell=5)
+
+    def cell(self, result, entity, section, item, field):
+        matches = [r for r in result["rows"] if r["section"] == section and r["item"] == item]
+        self.assertEqual(len(matches), 1, (section, item))
+        return matches[0]["values"][entity][field]
+
+    def test_no_suppressed_count_is_alone_in_its_row(self):
+        # (a) Gesamt is the sum of the LEs: exactly one suppressed cell of a row would be the difference
+        for r in self.result["rows"]:
+            if r["unit"] != rdm.COUNT:
+                continue
+            for field in ("value", "base"):
+                cells = [v[field] for v in r["values"].values()]
+                self.assertNotEqual(cells.count("<5"), 1, (r["key"], field, cells))
+
+    def test_no_suppressed_count_is_alone_in_a_partition(self):
+        # (b) within a column, the parts of a partition sum to its total
+        for entity in self.result["entities"]:
+            for total, parts in partitions(self.result):
+                if not parts:
+                    continue
+                full = [self.cell(self.full, entity, *c) for c in [total] + parts]
+                self.assertEqual(full[0], sum(full[1:]), (entity, total))
+                shown = [self.cell(self.result, entity, *c) for c in [total] + parts]
+                self.assertNotEqual(shown.count("<5"), 1, (entity, total, parts, shown))
+
+    def test_shown_values_are_true_and_suppressed_ones_were_small_or_complementary(self):
+        primary = complementary = 0
+        for r, f in zip(self.result["rows"], self.full["rows"]):
+            for entity in self.result["entities"]:
+                for field in ("value", "base"):
+                    shown, true = r["values"][entity][field], f["values"][entity][field]
+                    if shown == "<5":
+                        if r["unit"] == rdm.COUNT:
+                            self.assertIsNone(r["values"][entity]["percent"])
+                            if true < 5:
+                                primary += 1
+                            else:
+                                complementary += 1
+                    else:
+                        self.assertEqual(shown, true, (r["key"], entity, field))
+        self.assertGreater(complementary, 0)
+        self.assertEqual(self.result["suppressed"], {"primary": primary, "complementary": complementary})
+        # the case count of all LEs stays
+        self.assertEqual(self.cell(self.result, rdm.TOTAL, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "value"), 60)
+        self.assertTrue(any(f"{complementary} Zellen zusätzlich zu {primary}" in n for n in self.result["notes"]))
+
+    def test_without_suppression_nothing_is_added(self):
+        self.assertEqual(self.full["suppressed"], {"primary": 0, "complementary": 0})
 
 
 if __name__ == "__main__":

@@ -140,7 +140,8 @@ def fill_matrix(ws, result, field):
 
     ws["B1"] = result["title"]
     ws["B2"] = f"Auswertungszeitraum: {result['period']}"
-    ws["B3"] = (f"Zellen mit weniger als {result['min_cell']} Fällen unterdrückt (<{result['min_cell']})."
+    ws["B3"] = (f"Zellen mit weniger als {result['min_cell']} Fällen unterdrückt (<{result['min_cell']}), ergänzend "
+                "weitere, damit keine unterdrückte Zahl als Differenz berechenbar ist."
                 if result["min_cell"] > 1 else "")
 
     # the LE columns take the style of the template's LE column

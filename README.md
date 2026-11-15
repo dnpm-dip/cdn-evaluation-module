@@ -94,7 +94,8 @@ run export-datenkranz --site UKT --usecase RD --output /out
 The RD evaluation matrix (Auswertematrix) is computed from such an export by
 `scripts/rd_evaluation_matrix/rd_evaluation_matrix.py`, in Python (standard library only) and on
 the Datenkranz alone, so that it can be shared with the other KDKs. It reports every value in total
-and per Leistungserbringer (counts below 5 suppressed), and lists the cases to clarify with their LE
+and per Leistungserbringer (counts below 5 suppressed, plus complementary cells so that none can be
+recomputed from sums), and lists the cases to clarify with their LE
 (Rückfragen). Specification: `docs/rd-evaluation-matrix.txt`. Export without `--until`, since later
 follow-ups determine the status of a case, and set the evaluation period in the script instead:
 ```

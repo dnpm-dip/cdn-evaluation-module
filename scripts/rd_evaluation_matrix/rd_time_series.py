@@ -16,6 +16,11 @@ Blocks by the period of the initial submission of a case (the date --from/--unti
   Follow-up                cases with a follow-up, of all cases, of those with GFK2 and (with
                            --follow-up-due-days) of those whose follow-up is due; days from GFK2 to the
                            first follow-up
+  Zeitstrahl: Tage relativ zur GFK1
+                           per milestone (MV-Einwilligung, Symptombeginn, ZSE-Erstkontakt, GFK2,
+                           Erstmeldung beim KDK, Erstes Follow-up) the cases with a date and the quartiles
+                           of date - GFK1 in days; a milestone after GFK1 dated before it is counted as
+                           implausible and left out; the cases without GFK1
 Block by the calendar period of the submission itself (--from/--until select the submissions):
   Einreichungen            submissions by type, those with follow-up content, the submissions the
                            export couldn't convert, the episodes without initial submission; also
@@ -149,6 +154,14 @@ WITHOUT_DATE = "Einreichungen ohne lesbares Datum (in keiner anderen Zeile, nur 
 NOT_CONVERTED = "Einreichungen nicht konvertierbar (nach submittedAt)"
 WITHOUT_INITIAL = "Episoden ohne Erstmeldung (nach ihrer ersten Einreichung)"
 
+# process timeline: milestones in days relative to GFK1 (label, must lie after GFK1)
+B_TIMELINE = "Zeitstrahl: Tage relativ zur GFK1"
+NO_GFK1 = "ohne GFK1: Fälle"
+MILESTONES = (("MV-Einwilligung", False), ("Symptombeginn", False), ("ZSE-Erstkontakt", False), ("GFK2", True),
+              ("Erstmeldung beim KDK", True), ("Erstes Follow-up", True))
+QUARTILES = (("q1", "1. Quartil"), ("median", "Median"), ("q3", "3. Quartil"))
+UNKNOWN_ONSET = "1800-01"   # case.diagnosisRd.symptomOnsetDate: unknown
+
 
 # ---------------------------------------------------------------------------------------------
 # Input
@@ -212,6 +225,18 @@ def readable_date(s):
         return rdm.parse_date(s)
     except (TypeError, ValueError):
         return None
+
+
+def milestone_date(s):
+    """A date of the timeline: an ISO date, a month (YYYY-MM) as its 15th; None if missing, unknown or unreadable"""
+    if not isinstance(s, str) or s.strip() == UNKNOWN_ONSET:
+        return None
+    if len(s.strip()) == 7:
+        try:
+            return date(int(s[:4]), int(s[5:7]), 15)
+        except ValueError:
+            return None
+    return readable_date(s)
 
 
 def readable_submission_date(content):
@@ -324,6 +349,30 @@ def follow_up_dates(case):
     return sorted(dates - {None})
 
 
+def timeline(case, gfk2_date):
+    """The milestones of a case in days from its GFK1 (metaData.molecularBoardDecisionDate), None without a date"""
+    latest = case.latest
+    gfk1 = rdm.parse_date(latest["metaData"]["molecularBoardDecisionDate"])
+    scopes = (latest["metaData"].get("mvConsent") or {}).get("scope") or []
+    consents = [milestone_date(sc.get("date")) for sc in scopes if isinstance(sc, dict) and sc.get("domain") == "mvSequencing"]
+    priors = latest.get("case", {}).get("priorRds") or []
+    contacts = [milestone_date(p.get("zseContactDate")) for p in priors if isinstance(p, dict)]
+    follow_ups = []
+    for s in case.submissions:
+        entries = s.get("followUp")
+        for f in (entries.get("followUpRds") or []) if isinstance(entries, dict) else []:
+            follow_ups.append(milestone_date(f.get("followUpDate")) if isinstance(f, dict) else None)
+    dates = {
+        "MV-Einwilligung": min((d for d in consents if d), default=None),
+        "Symptombeginn": milestone_date(latest["case"]["diagnosisRd"].get("symptomOnsetDate")),
+        "ZSE-Erstkontakt": min((d for d in contacts if d), default=None),
+        "GFK2": gfk2_date,
+        "Erstmeldung beim KDK": rdm.submission_date(case.initial),
+        "Erstes Follow-up": min((d for d in follow_ups if d), default=None),
+    }
+    return {name: (d - gfk1).days if d else None for name, d in dates.items()}
+
+
 @dataclass
 class Fact:
     """A case of the matrix, with what the time series counts in addition"""
@@ -337,6 +386,7 @@ class Fact:
     due: bool                   # GFK2 at least --follow-up-due-days before the reference date
     days: object                # from GFK2 to the first follow-up, None if unknown
     days_from_submission: bool  # ... to the follow-up submission, for lack of a followUpDate
+    timeline: dict = None       # milestone -> days from GFK1, None without a date
 
 
 def fact(case, e, resolution, reference_date, due_days, reasons=None):
@@ -362,6 +412,7 @@ def fact(case, e, resolution, reference_date, due_days, reasons=None):
                 from_submission = not documented
 
     return Fact(
+        timeline             = timeline(case, board[0] if board else None),
         e                    = e,
         period               = period_of(rdm.submission_date(case.initial), resolution),
         consent              = consent_state(consents, rdm.submission_date(case.latest)) if transmitted else None,
@@ -387,10 +438,11 @@ class Line:
     n: int = None               # count
     base: int = None            # denominator of the percentage, or the number of cases the durations are taken from
     days: list = None           # durations: median and quartiles instead of a count
+    stat: str = None            # with days: only this statistic (q1, median, q3) as the value
     part: tuple = None          # (count, cases it is counted in) the base includes: left out, it would follow from the base
 
 
-def case_lines(facts, unreadable, due_days):
+def case_lines(facts, unreadable, due_days, no_gfk1=0):
     """The lines of the blocks by initial submission for a set of cases; the same lines for every set"""
     lines = []
 
@@ -463,6 +515,19 @@ def case_lines(facts, unreadable, due_days):
         count(b, DUE_IN_TIME, lambda f: f.days is not None and f.days <= due_days, due, of_due)
         lines.append(Line(b, DUE_DAYS, of_due, base=len(due), days=sorted(f.days for f in in_time)))
 
+    # process timeline: per milestone the cases with a date and the quartiles of its offset; an offset before
+    # GFK1 of a milestone that must follow it is counted apart and left out. No minimum or maximum: single cases
+    b = B_TIMELINE
+    lines.append(Line(b, NO_GFK1, n=no_gfk1))
+    for name, after in MILESTONES:
+        offsets = [f.timeline[name] for f in facts if f.timeline[name] is not None]
+        valid = sorted(d for d in offsets if not (after and d < 0))
+        lines.append(Line(b, f"{name}: Fälle", "Fälle", len(valid), len(facts)))
+        for stat, label in QUARTILES:
+            lines.append(Line(b, f"{name}: {label} (Tage)", days=valid, stat=stat))
+        if after:
+            lines.append(Line(b, f"{name}: unplausibel (vor GFK1)", "Fälle", sum(1 for d in offsets if d < 0), len(facts)))
+
     return lines
 
 
@@ -488,7 +553,11 @@ def suppressed(line, min_cell, cases=None):
 
     if small(cases) or (line.part and any(small(n) for n in line.part)):
         return values
-    if line.days is None:
+    if line.stat:
+        # a single statistic as the value, from at least min_cell values
+        if len(line.days) >= max(min_cell, 1):
+            values["value"] = rdm.rounded(dict(zip(("q1", "median", "q3"), rdm.quartiles(line.days)))[line.stat])
+    elif line.days is None:
         row = rdm.Row(line.block, line.item, rdm.COUNT, line.base_label, line.n, line.base)
         values["value"], values["base"], values["percent"] = rdm.suppressed(row, min_cell)
         if small(line.base):
@@ -519,7 +588,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
         return not (start and d < start) and not (end and d >= end)
 
     # blocks by the period of the initial submission; the cases are those the matrix can evaluate
-    facts, unreadable, dates = [], Counter(), []
+    facts, unreadable, no_gfk1, dates = [], Counter(), Counter(), []
     for case in cases:
         initial_date = rdm.submission_date(case.initial)
         dates.append(initial_date)
@@ -528,6 +597,8 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
             e = rdm.evaluate_case(case, reference_date, 0)
         except (KeyError, TypeError, ValueError):
             unreadable[(case.le, period_of(initial_date, resolution))] += 1
+            if readable_date((case.latest.get("metaData") or {}).get("molecularBoardDecisionDate")) is None:
+                no_gfk1[(case.le, period_of(initial_date, resolution))] += 1
             continue
         facts.append(fact(case, e, resolution, reference_date, due_days, reasons))
 
@@ -578,13 +649,16 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
     def spread(le, period):
         return [(entity, p) for entity in (rdm.TOTAL, le) for p in (WHOLE, period) if p is not None]
 
-    case_sets, unreadable_counts, event_counts = {}, Counter(), {}
+    case_sets, unreadable_counts, no_gfk1_counts, event_counts = {}, Counter(), Counter(), {}
     for f in facts:
         for key in spread(f.e.le, f.period):
             case_sets.setdefault(key, []).append(f)
     for (le, period), n in unreadable.items():
         for key in spread(le, period):
             unreadable_counts[key] += n
+    for (le, period), n in no_gfk1.items():
+        for key in spread(le, period):
+            no_gfk1_counts[key] += n
     for (le, period, item), n in events.items():
         for key in spread(le, period):
             event_counts.setdefault(key, Counter())[item] += n
@@ -594,8 +668,9 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
         for period in periods + [WHOLE]:
             key = (le, period)
             of = case_sets.get(key, [])
-            lines = [(line, None if line.block == B_CASES else len(of))
-                     for line in case_lines(of, unreadable_counts[key], due_days)]
+            # the cases without GFK1 are not among the cases, as those not readable
+            lines = [(line, None if line.block == B_CASES or line.item == NO_GFK1 else len(of))
+                     for line in case_lines(of, unreadable_counts[key], due_days, no_gfk1_counts[key])]
             lines += [(line, None) for line in submission_lines(event_counts.get(key, {}))]
             for line, group in lines:
                 result_rows.append({"le": le, "period": period, "block": line.block, "item": line.item,
@@ -626,7 +701,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
     notes = [
         f"{len(facts)} Fälle (Episoden mit Erstmeldung) ausgewertet wie in der Auswertematrix (rd_evaluation_matrix.py), "
         f"Stand je Fall aus der letzten Nicht-Test-Einreichung; der Zeitraum '{WHOLE}' entspricht der Matrix.",
-        f"Zeitraum der Blöcke '{B_CASES}', '{B_CONSENT}', '{B_STATUS}', '{B_RATE}' und '{B_FOLLOW_UP}': {unit} der "
+        f"Zeitraum der Blöcke '{B_CASES}', '{B_CONSENT}', '{B_STATUS}', '{B_RATE}', '{B_FOLLOW_UP}' und '{B_TIMELINE}': {unit} der "
         f"Erstmeldung des Falls. Zeitraum des Blocks '{B_SUBMISSIONS}': {unit} der jeweiligen Einreichung "
         "(metaData.submission.date, nicht konvertierbare Einreichungen nach submittedAt); mit --from/--until zählen "
         "dort nur Einreichungen in diesem Zeitraum, während die Matrix alle nicht konvertierbaren Einreichungen und "
@@ -659,6 +734,13 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
            if due_days is not None else
            "Mit --follow-up-due-days N kommen vergleichbare Zeilen hinzu (Fälle mit GFK2 mindestens N Tage vor dem "
            "Stichtag, Follow-ups bis N Tage nach der GFK2)."),
+        f"{B_TIMELINE}: je Meilenstein Datum minus GFK1 (metaData.molecularBoardDecisionDate) in Tagen, Fälle mit "
+        f"Datum sowie 1. Quartil, Median und 3. Quartil als Wert (ab {max(min_cell, 1)} Werten). MV-Einwilligung: frühestes "
+        "mvConsent.scope[mvSequencing].date; Symptombeginn: case.diagnosisRd.symptomOnsetDate (ohne 1800-01); "
+        "ZSE-Erstkontakt: frühestes case.priorRds[].zseContactDate; GFK2 wie im Block Follow-up; Erstmeldung beim KDK: "
+        "Datum der Erstmeldung; Erstes Follow-up: frühestes followUpRds[].followUpDate über alle Einreichungen. "
+        "Monatsangaben (YYYY-MM) zählen als 15. des Monats. GFK2, Erstmeldung und Follow-up vor der GFK1 zählen als "
+        f"unplausibel, nicht in den Quartilen. '{NO_GFK1}': nicht auswertbare Fälle ohne lesbare GFK1.",
         "LE: Standort des Exports, sonst metaData.submission.submitterId. LEs: " + ", ".join(labels[le] for le in les) + ".",
     ]
     if start or end:

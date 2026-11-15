@@ -122,6 +122,16 @@ to) it reports
 - the diagnosis status of all cases and of the closed ones, as the sections of the matrix,
 - the follow-ups: cases with a follow-up submission and with follow-up content, of all cases and of those
   with GFK2; median and quartiles of the days from GFK2 to the first follow-up,
+- the process timeline (block `Zeitstrahl: Tage relativ zur GFK1`): per milestone M (MV-Einwilligung =
+  earliest `mvConsent.scope[].date` of domain `mvSequencing`, Symptombeginn = `case.diagnosisRd.symptomOnsetDate`
+  without `1800-01`, ZSE-Erstkontakt = earliest `case.priorRds[].zseContactDate`, GFK2, Erstmeldung beim KDK =
+  date of the initial submission, Erstes Follow-up = earliest `followUpRds[].followUpDate`) the lines
+  `M: Fälle` (cases with an offset, base: the cases) and `M: 1. Quartil (Tage)`, `M: Median (Tage)`,
+  `M: 3. Quartil (Tage)` (the quartile of date(M) − GFK1 in days as the value, QUARTILE.INC, left empty below
+  `--min-cell` values; no minimum or maximum, they are single cases). For GFK2, Erstmeldung and Erstes
+  Follow-up, which must follow GFK1, `M: unplausibel (vor GFK1)` counts offsets < 0, which are left out of
+  `M: Fälle` and the quartiles. `ohne GFK1: Fälle` counts the cases that can't be evaluated for want of a
+  GFK1 (`metaData.molecularBoardDecisionDate`). Dates given as a month (`YYYY-MM`) count as the 15th,
 
 and by the calendar period of the submissions themselves their number by type, the submissions the export
 couldn't convert and the episodes without initial submission, e.g. to reconcile with the number of

@@ -72,6 +72,11 @@ def follow_up(day):
     return {"followUpDate": day, "vitalStatus": "living"}
 
 
+def quartile(r):
+    """A quartile line of the timeline: a statistic as the value"""
+    return r["block"] == ts.B_TIMELINE and r["item"].endswith("(Tage)")
+
+
 def mixed_rows():
     """Cases of two LEs over four months with consents, all statuses, follow-ups, a test and an episode without initial"""
     a, b = "LE1", "LE2"
@@ -141,6 +146,8 @@ class ReconciliationTests(unittest.TestCase):
         sums, whole = {}, {}
         for r in self.series["rows"]:
             key = (r["le"], r["block"], r["item"])
+            if quartile(r):
+                continue    # quartiles don't add up
             for field in ("value", "base"):
                 if r[field] is not None:
                     target = whole if r["period"] == ts.WHOLE else sums
@@ -149,7 +156,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertGreater(len(whole), 100)
         # and the LEs to the total
         for r in self.series["rows"]:
-            if r["le"] == rdm.TOTAL and r["value"] is not None:
+            if r["le"] == rdm.TOTAL and r["value"] is not None and not quartile(r):
                 parts = [get(self.series, r["block"], r["item"], r["period"], le) for le in self.series["entities"][1:]]
                 self.assertEqual(sum(parts), r["value"], (r["block"], r["item"], r["period"]))
 
@@ -558,6 +565,108 @@ class FollowUpTests(unittest.TestCase):
         self.assertEqual([get(later, b, ts.DUE_DAYS, p, field=f) for p in ("2025-03", "2026-06") for f in ("n", "base")], [1, 2, 0, 0])
 
 
+class TimelineTests(unittest.TestCase):
+    """Zeitstrahl: milestones in days relative to GFK1"""
+
+    T = ts.B_TIMELINE
+
+    @staticmethod
+    def enriched(tan, onset=None, zse=(), consent_dates=None, **kwargs):
+        content = datenkranz(tan, **kwargs)
+        if onset:
+            content["case"]["diagnosisRd"]["symptomOnsetDate"] = onset
+        if zse:
+            content["case"]["priorRds"] = [{"genomicTestType": "none", "zseContactDate": d} for d in zse]
+        if consent_dates:
+            content["metaData"]["mvConsent"]["scope"] = [{"date": d, "domain": domain, "type": "permit"}
+                                                         for d, domain in consent_dates]
+        return content
+
+    def test_offsets_of_every_milestone(self):
+        # GFK1 2025-01-10: consent 2025-01-01, GFK2 2025-02-10, initial 2025-03-01
+        rows = submission_series(
+            "a",
+            self.enriched("t1", onset="2020-06", zse=("2024-03-01", "2023-11-20"),
+                          consent_dates=[("2024-12-01", "reIdentification"), ("2025-01-01", "mvSequencing")]),
+            datenkranz("t2", type_="followup", submitted="2025-09-01", follow_up=follow_up("2025-08-01")))
+        rows[1].content["case"] = rows[0].content["case"]
+        result = run(rows)
+        for name, days in (("MV-Einwilligung", -9), ("Symptombeginn", -1670), ("ZSE-Erstkontakt", -417),
+                           ("GFK2", 31), ("Erstmeldung beim KDK", 50), ("Erstes Follow-up", 203)):
+            self.assertEqual(get(result, self.T, f"{name}: Fälle"), 1, name)
+            self.assertEqual(get(result, self.T, f"{name}: Fälle", field="base"), 1, name)
+            for label in ("1. Quartil", "Median", "3. Quartil"):
+                self.assertEqual(get(result, self.T, f"{name}: {label} (Tage)"), float(days), name)
+        self.assertEqual(get(result, self.T, ts.NO_GFK1), 0)
+
+    def test_row_labels(self):
+        result = cases(datenkranz("t1"))
+        items = [r["item"] for r in result["rows"] if r["block"] == self.T and r["le"] == rdm.TOTAL and r["period"] == ts.WHOLE]
+        expected = [ts.NO_GFK1]
+        for name, after in ts.MILESTONES:
+            expected += [f"{name}: Fälle", f"{name}: 1. Quartil (Tage)", f"{name}: Median (Tage)", f"{name}: 3. Quartil (Tage)"]
+            expected += [f"{name}: unplausibel (vor GFK1)"] if after else []
+        self.assertEqual(items, expected)
+        self.assertFalse([i for i in items if "Minimum" in i or "Maximum" in i])
+
+    def test_quartiles_unknown_onset_and_cases_without_a_date(self):
+        result = cases(*[self.enriched(f"t{i}", onset=f"2024-0{i + 1}") for i in range(5)],
+                       self.enriched("t5", onset="1800-01"), datenkranz("t6"))
+        # onsets 2024-01-15 .. 2024-05-15 before GFK1 2025-01-10: -361, -330, -301, -270, -240
+        self.assertEqual(get(result, self.T, "Symptombeginn: Fälle"), 5)
+        self.assertEqual(get(result, self.T, "Symptombeginn: Fälle", field="base"), 7)
+        self.assertEqual(get(result, self.T, "Symptombeginn: Fälle", field="percent"), 71.4)
+        self.assertEqual(get(result, self.T, "Symptombeginn: 1. Quartil (Tage)"), -330.0)
+        self.assertEqual(get(result, self.T, "Symptombeginn: Median (Tage)"), -301.0)
+        self.assertEqual(get(result, self.T, "Symptombeginn: 3. Quartil (Tage)"), -270.0)
+        for r in result["rows"]:
+            if quartile(r):
+                self.assertEqual((r["base"], r["percent"], r["median"], r["n"]), (None, None, None, None))
+
+    def test_milestone_before_gfk1_is_implausible_and_left_out(self):
+        rows = submission_series("a", datenkranz("t1"),
+                                 datenkranz("t2", type_="followup", submitted="2025-04-01", follow_up=follow_up("2024-12-01")))
+        rows += submission_series("b", datenkranz("t3"),
+                                  datenkranz("t4", type_="followup", submitted="2025-04-01", follow_up=follow_up("2025-02-09")))
+        rows += submission_series("c", datenkranz("t5", submitted="2025-01-05"))      # initial before GFK1
+        result = run(rows)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: Fälle"), 1)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: unplausibel (vor GFK1)"), 1)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: Median (Tage)"), 30.0)
+        self.assertEqual(get(result, self.T, "Erstmeldung beim KDK: unplausibel (vor GFK1)"), 1)
+        self.assertEqual(get(result, self.T, "Erstmeldung beim KDK: Fälle"), 2)
+        # GFK2 is the first board after GFK1, never before
+        self.assertEqual(get(result, self.T, "GFK2: unplausibel (vor GFK1)"), 0)
+
+    def test_cases_without_gfk1(self):
+        broken = datenkranz("t1")
+        del broken["metaData"]["molecularBoardDecisionDate"]
+        result = cases(broken, datenkranz("t2"), min_cell=5)
+        self.assertEqual(get(result, self.T, ts.NO_GFK1), "<5")
+        self.assertEqual(get(cases(broken, datenkranz("t2")), self.T, ts.NO_GFK1), 1)
+        self.assertEqual(get(cases(broken, datenkranz("t2")), ts.B_CASES, ts.UNREADABLE), 1)
+
+    def test_small_cells_hide_count_and_quartiles(self):
+        contents = [self.enriched(f"t{i}", zse=("2024-01-01",) if i < 3 else ()) for i in range(8)]
+        result = cases(*contents, min_cell=5)
+        self.assertEqual(get(result, self.T, "ZSE-Erstkontakt: Fälle"), "<5")
+        for label in ("1. Quartil", "Median", "3. Quartil"):
+            self.assertIsNone(get(result, self.T, f"ZSE-Erstkontakt: {label} (Tage)"))
+        self.assertEqual(get(result, self.T, "GFK2: Fälle"), 8)
+        self.assertEqual(get(result, self.T, "GFK2: Median (Tage)"), 31.0)
+
+    def test_per_le_and_month(self):
+        rows = submission_series("a", datenkranz("t1", submitted="2025-03-01"), site="LE1")
+        rows += submission_series("b", datenkranz("t2", submitted="2025-04-11", gfk1="2025-04-01", plan_date="2025-04-05"),
+                                  site="LE2")
+        result = run(rows)
+        self.assertEqual(get(result, self.T, "Erstmeldung beim KDK: Median (Tage)", period="2025-03"), 50.0)
+        self.assertEqual(get(result, self.T, "Erstmeldung beim KDK: Median (Tage)", period="2025-04", le="LE2"), 10.0)
+        self.assertEqual(get(result, self.T, "Erstmeldung beim KDK: Fälle", period="2025-04", le="LE1"), 0)
+        self.assertIsNone(get(result, self.T, "Erstmeldung beim KDK: Median (Tage)", period="2025-04", le="LE1"))
+        self.assertEqual(get(result, self.T, "GFK2: Median (Tage)", le="LE2"), 4.0)
+
+
 class SubmissionTests(unittest.TestCase):
 
     def test_submissions_by_type_and_calendar_period_per_le(self):
@@ -668,7 +777,7 @@ class SuppressionTests(unittest.TestCase):
         of_le2 = [r for r in result["rows"] if r["le"] == "LE2" and r["period"] in ("2025-03", ts.WHOLE)]
         self.assertEqual(len(of_le2), 2 * len([r for r in result["rows"] if r["le"] == "LE2" and r["period"] == ts.WHOLE]))
         for r in of_le2:
-            if r["block"] not in (ts.B_CASES, ts.B_SUBMISSIONS):
+            if r["block"] not in (ts.B_CASES, ts.B_SUBMISSIONS) and r["item"] != ts.NO_GFK1:
                 self.assertEqual([r[v] for v in values], [None] * 7, r["item"])
         self.assertEqual(get(result, ts.B_CASES, ts.CASES, le="LE2"), "<5")
         self.assertEqual(get(result, ts.B_CASES, ts.UNREADABLE, le="LE2"), 0)
@@ -688,7 +797,8 @@ class SuppressionTests(unittest.TestCase):
         # unsuppressed, every count is given
         plain = run(refusing, min_cell=1)
         self.assertEqual([get(plain, ts.B_CONSENT, ts.CONSENT_RATE_REFUSALS, le="LE1", field=f) for f in ("value", "base")], [2, 8])
-        self.assertFalse([r["item"] for r in plain["rows"] if r["value"] is None and r["n"] is None])
+        # (a quartile of no values is empty)
+        self.assertFalse([r["item"] for r in plain["rows"] if r["value"] is None and r["n"] is None and not quartile(r)])
 
     def test_unsuppressed_with_min_cell_1(self):
         result = run(self.rows(), min_cell=1)

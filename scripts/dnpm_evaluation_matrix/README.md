@@ -116,6 +116,7 @@ Base "Fälle" = all cases of the entity and period unless stated otherwise.
 | Bearbeitungsdauer medizinisch (GFK1 bis GFK2) | computable; no GFK2 yet; impossible date; statistics | GFK1 → GFK2 |
 | Bearbeitungsdauer dokumentarisch (GFK2 bis Einreichung beim KDK) | as above | GFK2 → `submission.date` of the first submission with a plan |
 | Dauer GFK2 bis Beginn einer empfohlenen Therapie | computable; statistics | GFK2 → earliest `therapyStartDate` of an implemented recommendation |
+| Zeitstrahl: Tage relativ zur GFK1 | `ohne GFK1: Fälle`; per milestone `M: Fälle`, `M: 1. Quartil (Tage)`, `M: Median (Tage)`, `M: 3. Quartil (Tage)` and, for milestones after GFK1, `M: unplausibel (vor GFK1)` | below |
 | GFK2 (MTB): Ergebnis (sequenzierte Fälle) | GFK2 documented (of sequenced); of those with GFK2: ≥1 systemic therapy recommendation; ≥1 study recommendation; ≥1 of either; molecularly based (a recommendation with `variants[]`); no target (neither); care-plan flags; otherRecommendations WW/AS/WS/OP/ST/KW/SO | `plan.carePlanOd.*`, `plan.recommendedSystemicTherapies[]`, `plan.recommendedStudies[]` |
 | Empfehlungen je Fall | statistics of therapy and study recommendations per case with GFK2 | as above |
 | GFK2 (MTB): Ergebnis nach Tumorentität | per entity group: GFK2 documented; therapy or study recommendation | |
@@ -127,6 +128,29 @@ Base "Fälle" = all cases of the entity and period unless stated otherwise.
 | Follow-up: Erstmeldung mindestens N Monate vor dem Stichtag (N = 4, 8, 12, 18, 24) | cases; without / with 1, 2, 3, ≥4 followup submissions; deceased | the intervals of the stakeholders' query document |
 | Füllgrad optionaler Felder (Fälle, Vortherapien, Therapieempfehlungen, Follow-up-Therapien, SNV/Indel, CNV) | share of entries with the field filled | the optional fields of OncologyCase, Plan, FollowUp, Molecular (see rows) |
 | Rückfragen an LE | count per problem (cases; non-convertible: submissions) | below |
+
+### Zeitstrahl (process timeline relative to GFK1)
+
+Per milestone M the offset date(M) − GFK1 in days (GFK1 = `metaData.molecularBoardDecisionDate`), aggregated per
+entity and period like every other section: `M: Fälle` counts the cases with an offset (base: the cases of
+the entity and period), the three quartile rows are QUARTILE.INC as in the duration sections, suppressed
+(`<k`) below `--min-cell` values. No mean, minimum or maximum: the extremes are single cases. Dates given as a
+month (`YYYY-MM`) count as the 15th of that month.
+
+| Milestone M | Date | After GFK1 |
+|---|---|---|
+| MV-Einwilligung | earliest `metaData.mvConsent.scope[].date` of domain `mvSequencing` (latest submission) | no (may be negative) |
+| Erstdiagnose | `case.diagnosisOd.mainDiagnosis.date` | no (negative expected) |
+| GFK2 (MTB) | GFK2 as above | yes |
+| Erstmeldung beim KDK | `metaData.submission.date` of the initial submission | yes |
+| Beginn empfohlene Therapie | earliest `therapyStartDate` of an implemented recommendation (as "Dauer GFK2 bis Beginn einer empfohlenen Therapie") | yes |
+| Erstes Follow-up | earliest `followUp.followUpOds[].followUpDate` over all submissions | yes |
+
+For a milestone that must lie after GFK1, an offset < 0 is counted in `M: unplausibel (vor GFK1)`, left out of
+`M: Fälle` and of the quartiles, and asked back ("Meilenstein vor GFK1 (Zeitstrahl)"). `ohne GFK1: Fälle`
+counts the cases without a readable `metaData.molecularBoardDecisionDate`; they can't be evaluated (they are
+also in "Fälle nicht auswertbar") and have no timeline. The count rows take part in the complementary
+suppression; the quartiles of a count suppressed only complementarily stay visible (they rest on ≥ k values).
 
 Entity groups (ICD-10-GM, first match): Kopf-Hals C00-C14, C30-C32; Ösophagus/Magen C15-C16;
 Kolorektal/Anus C18-C21; Leber/Gallenwege C22-C24; Pankreas C25; Lunge C33-C34; Knochen/Weichteile/
@@ -153,6 +177,7 @@ C81-C96, D45-D47; sonstige bösartige (other C); in situ D00-D09; gutartig/unsic
 | decisionToInclude = false, aber sequenziert | not included, libraryType ≠ none |
 | genomicDataCenterId fehlt trotz Sequenzierung | QS part A b |
 | noScopeJustification nicht mehr zulässig (QS 12) | technical/organisational reason in a submission dated from 2026-06-01 |
+| Meilenstein vor GFK1 (Zeitstrahl) | GFK2, initial submission, start of an implemented recommendation or first follow-up before GFK1 (overlaps with "GFK1 nach dem Einreichungsdatum" and "GFK2 vor GFK1") |
 | Einreichung nicht konvertierbar / Episode ohne Erstmeldung / Fall nicht auswertbar | as in the RD script |
 
 ## Mapping table (Datenkranz field → DTO → used for)

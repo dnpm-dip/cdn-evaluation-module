@@ -379,6 +379,93 @@ class ImplementationFollowUpTests(unittest.TestCase):
         self.assertEqual([p["tan"] for p in problems(result, dm.P_DEATH)], ["t4"])
 
 
+class TimelineTests(unittest.TestCase):
+    """Zeitstrahl: milestones in days relative to GFK1"""
+
+    T = dm.TIMELINE
+
+    def test_offsets_of_every_milestone(self):
+        started = {"reference": "r1", "therapyStartDate": "2025-03-12"}
+        result = cases(datenkranz("t1", therapies=[therapy_rec("r1")],
+                                  follow_ups=[follow_up("2025-08-01", therapies=[started]), follow_up("2025-06-01")]))
+        # GFK1 2025-01-10: consent 2025-01-05, diagnosis 2024-10-15, MTB 2025-02-20, initial 2025-03-01
+        for name, days in (("MV-Einwilligung", -5), ("Erstdiagnose", -87), ("GFK2 (MTB)", 41),
+                           ("Erstmeldung beim KDK", 50), ("Beginn empfohlene Therapie", 61), ("Erstes Follow-up", 142)):
+            self.assertEqual(get(result, self.T, f"{name}: Fälle"), 1, name)
+            self.assertEqual(get(result, self.T, f"{name}: Fälle", field="base"), 1, name)
+            for q in ("1. Quartil", "Median", "3. Quartil"):
+                self.assertEqual(get(result, self.T, f"{name}: {q} (Tage)"), float(days), name)
+        self.assertEqual(get(result, self.T, dm.NO_GFK1), 0)
+
+    def test_row_labels(self):
+        result = cases(datenkranz("t1"))
+        items = [r["item"] for r in result["rows"] if r["section"] == self.T]
+        expected = [dm.NO_GFK1]
+        for name, after in dm.MILESTONES:
+            expected += [f"{name}: Fälle", f"{name}: 1. Quartil (Tage)", f"{name}: Median (Tage)", f"{name}: 3. Quartil (Tage)"]
+            expected += [f"{name}: unplausibel (vor GFK1)"] if after else []
+        self.assertEqual(items, expected)
+        self.assertFalse([i for i in items if "Minimum" in i or "Maximum" in i])
+        units = {r["item"]: r["unit"] for r in result["rows"] if r["section"] == self.T}
+        self.assertEqual(units["Erstes Follow-up: Fälle"], dm.COUNT)
+        self.assertEqual(units["Erstes Follow-up: Median (Tage)"], dm.DAYS)
+        self.assertEqual(units["Erstes Follow-up: unplausibel (vor GFK1)"], dm.COUNT)
+
+    def test_quartiles_and_cases_without_a_date(self):
+        result = cases(*[datenkranz(f"t{i}", follow_ups=[follow_up(f"2025-0{i + 2}-10")]) for i in range(5)],
+                       datenkranz("t5"))
+        # follow-ups 2025-02-10 .. 2025-06-10: 31, 59, 90, 120, 151 days after GFK1 2025-01-10
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: Fälle"), 5)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: Fälle", field="base"), 6)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: Median (Tage)"), 90.0)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: 1. Quartil (Tage)"), 59.0)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: 3. Quartil (Tage)"), 120.0)
+
+    def test_milestone_before_gfk1_is_implausible_and_left_out(self):
+        result = cases(datenkranz("t1", follow_ups=[follow_up("2024-12-01")]),
+                       datenkranz("t2", follow_ups=[follow_up("2025-02-09")]),
+                       datenkranz("t3", mv_consent_date="2024-12-01"))
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: Fälle"), 1)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: unplausibel (vor GFK1)"), 1)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: Median (Tage)"), 30.0)
+        # a consent before GFK1 is expected
+        self.assertEqual(get(result, self.T, "MV-Einwilligung: Fälle"), 3)
+        (p,) = problems(result, dm.P_MILESTONE_BEFORE_GFK1)
+        self.assertIn("Erstes Follow-up 2024-12-01", p["detail"])
+        self.assertEqual(get(result, "Rückfragen", dm.P_MILESTONE_BEFORE_GFK1), 1)
+
+    def test_month_dates_count_as_the_15th(self):
+        result = cases(datenkranz("t1", diagnosis_date="2024-10", mv_consent_date="2025-01"))
+        self.assertEqual(get(result, self.T, "Erstdiagnose: Median (Tage)"), -87.0)      # 2024-10-15
+        self.assertEqual(get(result, self.T, "MV-Einwilligung: Median (Tage)"), 5.0)     # 2025-01-15
+
+    def test_cases_without_gfk1(self):
+        broken = datenkranz("t1")
+        del broken["metaData"]["molecularBoardDecisionDate"]
+        result = run([row("a", broken), row("b", datenkranz("t2"))])
+        self.assertEqual(get(result, self.T, dm.NO_GFK1), 1)
+        self.assertEqual(get(result, self.T, "GFK2 (MTB): Fälle"), 1)
+
+    def test_small_cells_hide_count_and_quartiles(self):
+        rows = [row(f"a{i}", datenkranz(f"a{i}", follow_ups=[follow_up()] if i < 3 else None)) for i in range(8)]
+        result = run(rows, min_cell=5)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: Fälle"), "<5")
+        for q in ("1. Quartil", "Median", "3. Quartil"):
+            self.assertEqual(get(result, self.T, f"Erstes Follow-up: {q} (Tage)"), "<5")
+        self.assertEqual(get(result, self.T, "GFK2 (MTB): Fälle"), 8)
+        self.assertEqual(get(result, self.T, "GFK2 (MTB): Median (Tage)"), 41.0)
+
+    def test_per_le_and_month(self):
+        rows = [row("a", datenkranz("t1", submitted="2025-03-01")),
+                row("b", datenkranz("t2", submitted="2025-04-11", gfk1="2025-04-01", mtb="2025-04-05"), site="LE-B")]
+        result = run(rows)
+        self.assertEqual(series(result, self.T, "Erstmeldung beim KDK: Median (Tage)", "2025-03"), 50.0)
+        self.assertEqual(series(result, self.T, "Erstmeldung beim KDK: Median (Tage)", "2025-04", entity="LE-B"), 10.0)
+        self.assertEqual(series(result, self.T, "Erstmeldung beim KDK: Fälle", "2025-04", entity="LE-A"), 0)
+        self.assertIsNone(series(result, self.T, "Erstmeldung beim KDK: Median (Tage)", "2025-04", entity="LE-A"))
+        self.assertEqual(get(result, self.T, "GFK2 (MTB): Median (Tage)", entity="LE-B"), 4.0)
+
+
 class MolecularTests(unittest.TestCase):
 
     def test_variants_and_biomarkers(self):

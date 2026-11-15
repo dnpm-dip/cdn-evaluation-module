@@ -4,7 +4,10 @@ A synthetic export of oncology Datenkranz submissions (format of export-datenkra
 developing dashboards on the output of dnpm_evaluation_matrix.py. All data are random: LEs are named
 LE-A, LE-B, ..., patients p00001, ...; no value stems from real cases. The fields are those the DIP
 mapping (bfarm-schema-dto-model oncology 1.0.7) writes; a few cases carry deliberate errors (impossible
-dates, unconvertible submissions, episodes without initial submission) so the Rückfragen aren't empty.
+dates, unconvertible submissions, episodes without initial submission, a first follow-up dated before GFK1)
+so the Rückfragen aren't empty. The dates follow the care process (diagnosis, MV consent, GFK1, GFK2,
+initial submission; therapy start and follow-ups after GFK2), so the Zeitstrahl relative to GFK1 is
+plausible: consent and diagnosis before GFK1, all other milestones after it.
 
 Example:
   python3 make_synthetic.py --output synthetic-export.json --cases 1500 --les 6 --start 2025-09 --months 14
@@ -176,6 +179,9 @@ def make_case(rnd, i, le, initial_date):
 
     # follow-ups every 3 to 6 months while alive, reported a few weeks later
     started, therapies, fu_date, deceased = [], [], mtb, False
+    # deliberate error in about 1 % of the cases: the first follow-up dated before GFK1 (own generator, so the
+    # other random values don't change)
+    early_follow_up = random.Random(f"early-follow-up-{i}").random() < 0.01
     while not deceased:
         fu_date = fu_date + timedelta(days=rnd.randint(90, 180))
         if rnd.random() < 0.25:
@@ -193,7 +199,8 @@ def make_case(rnd, i, le, initial_date):
         if rnd.random() < 0.1 and not therapies:
             therapies.append({"reference": f"own-{i}", "therapyStartDate": iso(fu_date - timedelta(days=30))})
         deceased = rnd.random() < 0.15
-        fu = {"followUpDate": iso(fu_date), "metachroneDiagnoses": rnd.random() < 0.02,
+        shown_date = gfk1 - timedelta(days=21) if early_follow_up and not any(k == "followup" for k, _, _ in submissions) else fu_date
+        fu = {"followUpDate": iso(shown_date), "metachroneDiagnoses": rnd.random() < 0.02,
               "ecogPerformanceStatusScore": rnd.choice(["0", "1", "2", "3", "unknown"]),
               "vitalStatus": "deceased" if deceased else "living",
               **({"deathDate": iso(fu_date - timedelta(days=10))} if deceased and rnd.random() < 0.9 else {}),

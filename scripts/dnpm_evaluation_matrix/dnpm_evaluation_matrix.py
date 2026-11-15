@@ -199,11 +199,18 @@ P_JUSTIFICATION = "noScopeJustification nicht mehr zulässig (QS 12)"
 P_NOT_CONVERTED = "Einreichung nicht konvertierbar"
 P_WITHOUT_INITIAL = "Episode ohne Erstmeldung"
 P_UNREADABLE = "Fall nicht auswertbar"
+P_MILESTONE_BEFORE_GFK1 = "Meilenstein vor GFK1 (Zeitstrahl)"
 PROBLEMS = (P_GFK1_AFTER_SUBMISSION, P_GFK2_AFTER_SUBMISSION, P_GFK2_BEFORE_GFK1, P_SHORT_MEDICAL, P_DIAGNOSIS_AFTER_GFK1,
             P_BEFORE_BIRTH, P_BEFORE_CONSENT, P_AGE, P_THERAPY_BEFORE_GFK2, P_DEATH, P_STUDY_FLAG, P_TNM, P_INCLUSION,
-            P_NO_GDC, P_JUSTIFICATION, P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)
+            P_NO_GDC, P_JUSTIFICATION, P_MILESTONE_BEFORE_GFK1, P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)
 STALE = "stale"     # losses: non-convertible submissions of an evaluated episode
-LOSSES = (P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE, STALE)
+NO_GFK1 = "ohne GFK1: Fälle"    # losses: cases not readable for want of metaData.molecularBoardDecisionDate
+LOSSES = (P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE, STALE, NO_GFK1)
+
+# Process timeline: milestones in days relative to GFK1 (label, must lie after GFK1)
+TIMELINE = "Zeitstrahl: Tage relativ zur GFK1"
+MILESTONES = (("MV-Einwilligung", False), ("Erstdiagnose", False), ("GFK2 (MTB)", True),
+              ("Erstmeldung beim KDK", True), ("Beginn empfohlene Therapie", True), ("Erstes Follow-up", True))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -295,6 +302,16 @@ def parse_date(s):
         return date.fromisoformat(s[:10])
     except ValueError:
         return None
+
+
+def milestone_date(s):
+    """A date of the timeline: an ISO date or datetime, a month (YYYY-MM) as its 15th; None if missing or unreadable"""
+    if isinstance(s, str) and re.fullmatch(r"\d{4}-\d{2}", s.strip()):
+        try:
+            return date(int(s[:4]), int(s[5:7]), 15)
+        except ValueError:
+            return None
+    return parse_date(s)
 
 
 def required_date(s, name):
@@ -655,6 +672,26 @@ def evaluate_case(case, reference_date, min_medical_days):
         elif not impossible:
             start_days = (starts[0] - gfk2).days
 
+    # process timeline: each milestone in days from GFK1, None if the case has no date for it
+    mv_dates = [milestone_date(sc.get("date")) for sc in items(dig(meta, "mvConsent", "scope"))
+                if isinstance(sc, dict) and sc.get("domain") == "mvSequencing"]
+    initial_row = next(r for r in case.rows if submission_type(r.content) == "initial")
+    therapy_starts = [d for d in (milestone_date(t.get("therapyStartDate")) for t in implemented) if d]
+    fu_dates = [d for d in (milestone_date(f.get("followUpDate")) for _, _, f in follow_ups) if d]
+    milestone_dates = {
+        "MV-Einwilligung": min((d for d in mv_dates if d), default=None),
+        "Erstdiagnose": milestone_date(main.get("date")),
+        "GFK2 (MTB)": gfk2,
+        "Erstmeldung beim KDK": submission_date(initial_row),
+        "Beginn empfohlene Therapie": min(therapy_starts, default=None),
+        "Erstes Follow-up": min(fu_dates, default=None),
+    }
+    timeline = {name: (d - gfk1).days if d else None for name, d in milestone_dates.items()}
+    early_milestones = [f"{name} {milestone_dates[name]}" for name, after in MILESTONES
+                        if after and timeline[name] is not None and timeline[name] < 0]
+    if early_milestones:
+        problems.append((P_MILESTONE_BEFORE_GFK1, ", ".join(early_milestones) + f" vor GFK1 {gfk1}"))
+
     # QS 6: no date before the birth month
     dates = [("metaData.molecularBoardDecisionDate", gfk1), ("mainDiagnosis.date", diagnosis_date), ("plan.carePlanOd.molecularBoardDecisionDate", gfk2)]
     dates += [("followUpDate", d) for d, _, _ in follow_ups] + [("therapyStartDate", d) for d in starts]
@@ -714,7 +751,7 @@ def evaluate_case(case, reference_date, min_medical_days):
         implemented_ids={str(t.get("reference")) for t in implemented},
         unlinked=[t for t in fu_therapies.values() if str(t.get("reference")) not in recommended],
         medical_days=medical_days, documentary_days=documentary_days, diagnosis_days=diagnosis_days,
-        start_days=start_days, impossible=impossible, has_gfk2=gfk2 is not None,
+        start_days=start_days, impossible=impossible, has_gfk2=gfk2 is not None, timeline=timeline,
         problems=problems,
     )
 
@@ -908,6 +945,20 @@ def matrix_rows(cases, subs, losses, problem_counts, reference_date):
             count(s, "nicht berechenbar: noch keine GFK2", lambda e: not e.has_gfk2)
             count(s, "nicht berechenbar: unmögliches Datum (siehe Rückfragen)", lambda e: e.has_gfk2 and e.impossible)
         stats(s, "", [getattr(e, attr) for e in cases if getattr(e, attr) is not None], DAYS)
+
+    # process timeline: per milestone the cases with an offset and its quartiles; offsets before GFK1 of a
+    # milestone that must follow it are counted apart and left out of the quartiles. No minimum or maximum:
+    # they are single cases
+    s = TIMELINE
+    add(s, NO_GFK1, losses[NO_GFK1])
+    for name, after in MILESTONES:
+        offsets = [e.timeline[name] for e in cases if e.timeline[name] is not None]
+        valid = sorted(d for d in offsets if not (after and d < 0))
+        add(s, f"{name}: Fälle", len(valid), len(cases), "Fälle")
+        for label, value in zip(("1. Quartil", "Median", "3. Quartil"), quartiles(valid) if valid else (None,) * 3):
+            rows.append(Row(s, f"{name}: {label} ({DAYS})", DAYS, n=rounded(value), support=len(valid)))
+        if after:
+            add(s, f"{name}: unplausibel (vor GFK1)", sum(1 for d in offsets if d < 0), len(cases), "Fälle")
 
     s = "GFK2 (MTB): Ergebnis (sequenzierte Fälle)"
     count(s, "GFK2 dokumentiert (plan.carePlanOd)", lambda e: e.has_plan, sequenced, seq_label)
@@ -1171,7 +1222,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
         problems.append({"le": le, "problem": kind, "case": case, "tan": tan, "detail": detail,
                          "period": period_of(d, resolution) if d else None})
 
-    evaluated = []
+    evaluated, no_gfk1 = [], []     # no_gfk1: (LE, period) of the cases unreadable for want of GFK1
     for case in cases:
         initial = next(r for r in case.rows if submission_type(r.content) == "initial")
         initial_date = submission_date(initial)
@@ -1183,6 +1234,8 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
             e = evaluate_case(case, reference_date, min_medical_days)
         except Exception as error:     # a case that can't be read is clarified with its LE, the run goes on
             problem(case.le, P_UNREADABLE, case.key, dig(case.latest, "metaData", "tanC"), repr(error)[:300], initial_date)
+            if initial_date and parse_date(dig(case.latest, "metaData", "molecularBoardDecisionDate")) is None:
+                no_gfk1.append((case.le, period_of(initial_date, resolution)))
             continue
         e.initial_date = initial_date
         e.period = period_of(initial_date, resolution)
@@ -1227,6 +1280,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
         counts = Counter(kind for kind, _, _ in distinct)
         losses = {k: counts.get(k, 0) for k in LOSSES}
         losses[STALE] = sum(n for (x_le, x_period), n in stale.items() if ok(x_le, x_period))
+        losses[NO_GFK1] = sum(1 for x_le, x_period in no_gfk1 if ok(x_le, x_period))
         return ([e for e in evaluated if ok(e.le, e.period)], [x for x in subs if ok(x.le, x.period)], losses, counts)
 
     entities = [TOTAL] + les
@@ -1292,6 +1346,13 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
         "lastContactDate: das DIP-Mapping lässt followUp weg, wenn das letzte Follow-up 'lost to follow-up' ist; die "
         "Zeilen zu lastContactDate zählen nur früher verlorene Patienten, deren Kontakt wieder aufgenommen wurde.",
         f"Medizinische Bearbeitungsdauer unter {min_medical_days} Tagen wird als unplausibel kurz zurückgefragt.",
+        f"{TIMELINE}: je Meilenstein Datum minus GFK1 in Tagen, Fälle mit Datum sowie 1. Quartil, Median und 3. Quartil "
+        f"(ab {min_cell} Fällen). MV-Einwilligung: frühestes mvConsent.scope[mvSequencing].date; Erstdiagnose: "
+        "mainDiagnosis.date; GFK2 (MTB) wie oben; Erstmeldung beim KDK: Datum der Erstmeldung; Beginn empfohlene "
+        "Therapie: frühester therapyStartDate einer begonnenen Empfehlung; Erstes Follow-up: frühestes "
+        "followUpOds[].followUpDate über alle Einreichungen. Monatsangaben (YYYY-MM) zählen als 15. des Monats. "
+        "Meilensteine nach der GFK1 mit Datum davor zählen als unplausibel, nicht in den Quartilen (Rückfrage). "
+        f"'{NO_GFK1}': nicht auswertbare Fälle ohne metaData.molecularBoardDecisionDate.",
         "LE: Standort des Exports, sonst metaData.submission.submitterId. LEs: " + ", ".join(labels[le] for le in les) + ".",
     ]
     if start or end:

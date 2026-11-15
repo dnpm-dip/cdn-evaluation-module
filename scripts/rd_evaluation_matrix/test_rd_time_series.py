@@ -850,7 +850,7 @@ class ComplementarySuppressionTests(unittest.TestCase):
         figures, complementary = {}, 0
         for f, r in zip(full["rows"], result["rows"]):
             for field in ("value", "base"):
-                if f[field] is None:
+                if f[field] is None or quartile(r):     # a quartile is a statistic, not a count
                     continue
                 hidden = r[field] in (None, "<5")
                 figures.setdefault((r["le"], r["block"], r["item"], field), []).append(hidden)
@@ -865,6 +865,10 @@ class ComplementarySuppressionTests(unittest.TestCase):
             self.assertNotEqual(sum(hidden), 1, figure)
         # the case count of all LEs over the whole period is shown
         self.assertEqual(get(result, ts.B_CASES, ts.CASES), 72)
+        # the counts of the timeline are part of it, and suppressed over the periods as the others
+        timeline = {k: v for k, v in figures.items() if k[1] == ts.B_TIMELINE and k[3] == "value"}
+        self.assertIn(("LE-B", ts.B_TIMELINE, "GFK2: Fälle", "value"), timeline)
+        self.assertGreater(sum(sum(hidden) for hidden in timeline.values()), 0)
 
 
 class InputOutputTests(unittest.TestCase):

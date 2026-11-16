@@ -534,7 +534,7 @@ class PeriodSuppressionTests(unittest.TestCase):
         self.assertEqual(get(result, "Geschlecht", "m"), "<5")
         self.assertIsNone(get(result, "Geschlecht", "m", field="percent"))
         # w = base - m would reveal m: complementary suppression
-        self.assertEqual(get(result, "Geschlecht", "w"), dm.SECONDARY)
+        self.assertEqual(get(result, "Geschlecht", "w"), "<5")
         self.assertEqual(get(result, "Geschlecht", "d"), 0)          # zero of a large base stays
         # a base below the threshold hides the value, also a zero
         self.assertEqual(get(result, "Diagnose: Kodierung", "germlineDiagnoses angegeben, von bestätigten", field="base"), 0)
@@ -665,7 +665,7 @@ class PropertyTests(unittest.TestCase):
 
 
 def hidden(v):
-    return v["value"] == dm.SECONDARY or (isinstance(v["value"], str) and v["value"].startswith("<"))
+    return isinstance(v["value"], str) and v["value"].startswith("<")
 
 
 def single_suppressed_groups(result):
@@ -726,17 +726,32 @@ class ComplementarySuppressionTests(unittest.TestCase):
         result = run(rows, min_cell=5)
         self.assertEqual(get(result, "Geschlecht", "m", entity="LE-A"), "<5")
         # LE-A w = 8 - m would give m; then Gesamt w - LE-B w would give LE-A w, Gesamt m - LE-B m LE-A m
-        self.assertEqual(get(result, "Geschlecht", "w", entity="LE-A"), dm.SECONDARY)
-        self.assertEqual(get(result, "Geschlecht", "w", entity="LE-B"), dm.SECONDARY)
-        self.assertEqual(get(result, "Geschlecht", "m", entity="LE-B"), dm.SECONDARY)
+        self.assertEqual(get(result, "Geschlecht", "w", entity="LE-A"), "<5")
+        self.assertEqual(get(result, "Geschlecht", "w", entity="LE-B"), "<5")
+        self.assertEqual(get(result, "Geschlecht", "m", entity="LE-B"), "<5")
         self.assertEqual((get(result, "Geschlecht", "m"), get(result, "Geschlecht", "w")), (11, 11))
         self.assertEqual(single_suppressed_groups(result), [])
+
+    def test_complementary_cells_use_the_primary_marker_and_are_counted(self):
+        rows = [row(f"a{i}", datenkranz(f"a{i}", gender="male" if i < 2 else "female")) for i in range(8)]
+        rows += [row(f"b{i}", datenkranz(f"b{i}", gender="male" if i < 9 else "female"), site="LE-B") for i in range(14)]
+        result = run(rows, min_cell=5)
+        values = [v["value"] for r in result["rows"] for v in r["values"].values()]
+        series_values = [v["value"] for r in result["time_series"]["rows"] for le in r["values"].values()
+                         for v in le.values()]
+        self.assertFalse({x for x in values + series_values if isinstance(x, str)} - {"<5"})
+        counts = result["suppressed"]
+        self.assertGreaterEqual(counts["complementary"], 3)       # LE-A w, LE-B w, LE-B m at least
+        self.assertEqual(counts["primary"] + counts["complementary"], values.count("<5"))
+        series_counts = result["time_series"]["suppressed"]
+        self.assertEqual(series_counts["primary"] + series_counts["complementary"], series_values.count("<5"))
+        self.assertIn("kann daher auch 5 oder mehr", " ".join(result["notes"]))
 
     def test_a_category_is_not_derivable_from_the_base(self):
         result = cases(*[datenkranz(f"t{i}", coverage="PKV" if i < 3 else "GKV" if i < 9 else "BG") for i in range(16)],
                        min_cell=5)
         self.assertEqual(get(result, "Versicherung", "PKV"), "<5")
-        self.assertEqual(get(result, "Versicherung", "GKV"), dm.SECONDARY)      # the smallest other nonzero
+        self.assertEqual(get(result, "Versicherung", "GKV"), "<5")      # the smallest other nonzero
         self.assertEqual(get(result, "Versicherung", "andere"), 7)
 
     def test_a_period_is_not_derivable_from_the_whole_period(self):
@@ -745,7 +760,7 @@ class ComplementarySuppressionTests(unittest.TestCase):
         rows += [row(f"o{i}", datenkranz(f"o{i}", submitted="2025-05-05")) for i in range(7)]
         result = run(rows, min_cell=5)
         self.assertEqual(series(result, "Fälle", CASES, "2025-03"), "<5")
-        self.assertEqual(series(result, "Fälle", CASES, "2025-04"), dm.SECONDARY)
+        self.assertEqual(series(result, "Fälle", CASES, "2025-04"), "<5")
         self.assertEqual(series(result, "Fälle", CASES, "2025-05"), 7)
         self.assertEqual(get(result, "Fälle", CASES), 15)
 
@@ -827,7 +842,7 @@ class InputOutputTests(unittest.TestCase):
                 series_lines = f.read().splitlines()
             with open(out + "_rueckfragen.csv", encoding="utf-8-sig") as f:
                 problem_lines = f.read().splitlines()
-        self.assertEqual(set(result), {"title", "period", "min_cell", "reference_date", "cutoff", "entities", "labels",
+        self.assertEqual(set(result), {"title", "period", "min_cell", "suppressed", "reference_date", "cutoff", "entities", "labels",
                                        "rows", "notes", "time_series"})       # no case keys
         self.assertEqual(lines[0], "LE;Abschnitt;Kategorie;Einheit;Wert;Bezug;Basis;Anteil (%)")
         self.assertIn("Gesamt;Geschlecht;w;Anzahl;1;Fälle;1;100,0", lines)

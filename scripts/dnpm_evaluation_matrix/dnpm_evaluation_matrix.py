@@ -29,7 +29,7 @@ Output (<output> without extension):
                               with --rueckfragen-per-le also one <output>_rueckfragen_<LE>.csv per LE
 Counts 1 to --min-cell - 1 (default 5) are suppressed ("<5") in all outputs except the Rückfragen, as
 is every value whose base is that small, and every statistic computed from fewer values; further
-counts are suppressed ("gesperrt") so that none of these can be derived from totals (README.md).
+counts are suppressed with the same marker so that none of these can be derived from totals (README.md).
 
 Example:
   python3 dnpm_evaluation_matrix.py export-datenkranz_2026-11-01_10-00-00.json \\
@@ -1125,7 +1125,6 @@ PARTITIONS = (
     (r"Umsetzung.*", r"Ansprechen:"),
     (r"Follow-up: Erstmeldung mindestens.*", r"(ohne|mit \d)"),
 )
-SECONDARY = "gesperrt"      # suppressed so that a suppressed cell can't be derived
 
 
 def partition_of(row):
@@ -1140,7 +1139,10 @@ def suppress(matrix, entities, periods, min_cell):
     complementary suppression of counts: in every group of cells that add up to a shown or derivable
     total - a row across the LEs and Gesamt, a partition within a column, a row across the periods and
     the whole period - in which exactly one cell is suppressed, the smallest other nonzero cell is
-    suppressed as well (an LE or period before Gesamt or the whole period), until no group changes
+    suppressed as well (an LE or period before Gesamt or the whole period), until no group changes.
+    Complementary cells get the same marker '<min_cell' as primary ones (deliberately indistinguishable).
+    Returns (values, counts): counts = {period kind: {"primary": n, "complementary": n}} for the matrix
+    (WHOLE) and the time series ("series")
     """
     template = matrix[(TOTAL, WHOLE)]
     all_periods = [WHOLE] + periods
@@ -1169,14 +1171,19 @@ def suppress(matrix, entities, periods, min_cell):
                     hidden.add(min(rest, key=lambda k: (k[1] == TOTAL, k[2] == WHOLE, cell(k).n)))
                     changed = True
     values = {}
+    counts = {kind: {"primary": 0, "complementary": 0} for kind in (WHOLE, "series")}
     for i in range(len(template)):
         for le in entities:
             for p in all_periods:
                 n, base, pct = suppressed(cell((i, le, p)), min_cell)
+                kind = counts[WHOLE if p == WHOLE else "series"]
                 if (i, le, p) in hidden - primary:
-                    n, pct = SECONDARY, None
+                    n, pct = f"<{min_cell}", None
+                    kind["complementary"] += 1
+                elif n == f"<{min_cell}":
+                    kind["primary"] += 1
                 values[(i, le, p)] = {"value": n, "base": base, "percent": pct}
-    return values
+    return values, counts
 
 
 def suppressed(row, min_cell):
@@ -1296,7 +1303,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
     periods = periods_between(first, last, resolution) if first and last and first <= last else []
     matrix = {(le, p): evaluate(le, p) for le in entities for p in [WHOLE] + periods}
     template = matrix[(TOTAL, WHOLE)]
-    values = suppress(matrix, entities, periods, min_cell)
+    values, suppressed_counts = suppress(matrix, entities, periods, min_cell)
 
     def described(i, r, cells):
         return {"key": r.key, "section": r.section, "item": r.item, "unit": r.unit, "base_label": r.base_label,
@@ -1327,8 +1334,10 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
         f"{masked(len(tests))} Testeinreichungen nicht in den Fällen (nur im Abschnitt Einreichungen gezählt).",
         (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso jeder Wert mit einer Basis unter "
          f"{min_cell} (auch die 0) und Kennzahlen aus weniger als {min_cell} Werten (nicht in den Rückfragen). "
-         f"'{SECONDARY}': zusätzlich unterdrückt, damit sich keine unterdrückte Zelle aus Gesamt und den übrigen LE, "
-         "aus der Basis und den übrigen Kategorien oder aus dem Gesamtzeitraum und den übrigen Zeiträumen ergibt. "
+         f"Ergänzend unterdrückt, ebenfalls als <{min_cell}, damit sich keine unterdrückte Zelle aus Gesamt und den übrigen LE, "
+         "aus der Basis und den übrigen Kategorien oder aus dem Gesamtzeitraum und den übrigen Zeiträumen ergibt "
+         f"({suppressed_counts[WHOLE]['complementary']} Zellen der Matrix zusätzlich zu {suppressed_counts[WHOLE]['primary']}); "
+         f"eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr Fälle zählen. "
          "Die Tabellen sind für die Datenknoten und den jeweiligen LE bestimmt, nicht zur Veröffentlichung."
          if min_cell > 1 else "Keine Zellen unterdrückt (--min-cell 1): nur für den internen Gebrauch der Datenknoten."),
         "Population: GFK2-Ergebnis, Umsetzung und molekulare Befunde beziehen sich auf die sequenzierten Fälle "
@@ -1369,6 +1378,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
         "title": f"AUSWERTUNG MTB {period}",
         "period": period,
         "min_cell": min_cell,
+        "suppressed": suppressed_counts[WHOLE],
         "reference_date": reference_date.isoformat(),
         "cutoff": cutoff.isoformat() if cutoff else None,
         "entities": entities,
@@ -1377,7 +1387,8 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
         "problems": sorted(({k: v for k, v in p.items() if k != "period"} for p in problems),
                            key=lambda p: (p["le"], PROBLEMS.index(p["problem"]), str(p["case"]))),
         "notes": notes,
-        "time_series": {"resolution": resolution, "periods": periods, "rows": series_rows},
+        "time_series": {"resolution": resolution, "periods": periods, "suppressed": suppressed_counts["series"],
+                        "rows": series_rows},
     }
 
 

@@ -38,18 +38,20 @@ export maps to, and the BfArM KDK schema (MVGenomseq_KDK, main of 2026-08-05).
 
 | File | Content |
 |---|---|
-| `<output>.json` | `title`, `period`, `min_cell`, `reference_date`, `cutoff`, `entities` (`Gesamt` + LEs), `labels`, `rows`, `notes`, `time_series` (no case keys: the Rückfragen are in the CSV files only) |
+| `<output>.json` | `title`, `period`, `min_cell`, `suppressed`, `reference_date`, `cutoff`, `entities` (`Gesamt` + LEs), `labels`, `rows`, `notes`, `time_series` (no case keys: the Rückfragen are in the CSV files only) |
 | `<output>.csv` | LE; Abschnitt; Kategorie; Einheit; Wert; Bezug; Basis; Anteil (%) |
 | `<output>_zeitreihe.csv` | LE; Zeitraum; Abschnitt; Kategorie; Einheit; Wert; Bezug; Basis; Anteil (%) |
 | `<output>_rueckfragen.csv` | LE; Problem; Fall; Einreichung (tanC); Detail (case keys of all LEs: for the KDK; pass each LE its own lines) |
 | `<output>_rueckfragen_<LE>.csv` | the same, one file per LE (`--rueckfragen-per-le`) |
 
 `rows[]`: `{key, section, item, unit, base_label, values: {entity: {value, base, percent}}}` as in the RD
-script. `time_series`: `{resolution, periods: ["2025-09", ...], rows: [{key, section, item, unit,
+script. `time_series`: `{resolution, periods: ["2025-09", ...], suppressed, rows: [{key, section, item, unit,
 base_label, values: {entity: {period: {value, base, percent}}}}]}`, the same rows in the same order.
 `unit` is `Anzahl` for counts (value of base), else the unit of a statistic (`Tage`, `Anzahl je Fall`,
-`mut/Mb`; value only, `base`/`percent` null). A suppressed value is `"<5"` (primary) or `"gesperrt"`
-(complementary), see Suppression. Notes and the title contain no count below `--min-cell` and no exact
+`mut/Mb`; value only, `base`/`percent` null). A suppressed value is `"<5"`: it marks a primary (1–4)
+or a complementary suppression; the two are deliberately indistinguishable, see Suppression.
+`suppressed: {primary, complementary}` counts the suppressed cells of the matrix (top level) and of the
+time series (`time_series.suppressed`), as in the RD matrix. Notes and the title contain no count below `--min-cell` and no exact
 date (the title gives the months of the first and last initial submission, or the `--from`/`--until` period).
 
 ## Conventions
@@ -78,7 +80,7 @@ date (the title gives the months of the first and last initial submission, or th
   "Identifier der recommendedSystemicTherapies oder recommendedStudies").
 - **Suppression** (`--min-cell` k, default 5): counts 1..k-1 → `<k`; every count whose base is 1..k-1 → `<k`
   (also a 0, it would describe each of these cases); statistics from fewer than k values → `<k`. Not
-  suppressed in the Rückfragen. Complementary suppression (`"gesperrt"`), so that no suppressed count can be
+  suppressed in the Rückfragen. Complementary suppression (also `"<k"`, so a `"<k"` cell may hold k or more), so that no suppressed count can be
   derived: counts form groups that add up to a shown total, (a) a row across the LE columns and Gesamt,
   (b) a partition within a column (the categories of e.g. Geschlecht, ECOG, Tumorentität, evidence level,
   `PARTITIONS` in the script) and its base, (c) a row across the periods of the time series and the whole

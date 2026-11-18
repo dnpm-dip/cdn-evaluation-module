@@ -50,6 +50,13 @@ object ExportDatenkranz extends Statistic
     }
   }
 
+  /**
+   * The reason a broad consent is missing, as the DIP submission states it: the mappings don't carry it
+   * into the Datenkranz (no researchConsents[].noScopeJustification), so it is exported beside it
+   */
+  private def reasonResearchConsentMissing(submission: SubmissionDocument): Option[String] =
+    (submission.json \ "metadata" \ "reasonResearchConsentMissing").asOpt[String]
+
   override def aggregate(cases: Iterator[Case], params: Params): Result = {
     // the failures are few and small, so they are collected while the converted submissions are
     // streamed, and written after them
@@ -64,7 +71,8 @@ object ExportDatenkranz extends Statistic
             datenkranz(c, submission) match {
               case Right(content) =>
                 converted += 1
-                Some(Table.row(c.site, c.useCase.toString, c.patient, c.episodeOfCare, s.tan, s.submittedAt, content))
+                Some(Table.row(c.site, c.useCase.toString, c.patient, c.episodeOfCare, s.tan, s.submittedAt, content,
+                  reasonResearchConsentMissing(submission)))
               case Left(error) =>
                 failures += Table.row(c.site, c.useCase.toString, c.patient, c.episodeOfCare, s.tan, s.submittedAt, error)
                 None
@@ -77,7 +85,7 @@ object ExportDatenkranz extends Statistic
       tables = Seq(
         Table(
           name    = "datenkranz",
-          columns = Seq("site", "useCase", "patient", "episodeOfCare", "tan", "submittedAt", "content"),
+          columns = Seq("site", "useCase", "patient", "episodeOfCare", "tan", "submittedAt", "content", "reasonResearchConsentMissing"),
           rows    = rows
         ),
         Table(
@@ -89,6 +97,8 @@ object ExportDatenkranz extends Statistic
       notes = Seq(
         s"$converted submissions converted, ${failures.size} couldn't be read or converted, see \"failures\".",
         "\"content\" is the submission in the BfArM Datenkranz schema, as the mappings produce it; it isn't validated against the schema.",
+        "\"reasonResearchConsentMissing\" is the reason for a missing broad consent as the DIP submission states it " +
+          "(metadata.reasonResearchConsentMissing), null if none is given; the mappings don't carry it into the Datenkranz.",
         "The submitter and data node IDs come from the mappings' config, set with the environment variable " +
           "CCDN_BFARM_MAPPINGS_CONFIG_FILE, else its defaults; submissions of sites not contained there fail.",
         "Test submissions are contained, see their type in the metadata.",

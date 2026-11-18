@@ -42,10 +42,13 @@ Output (<output> without extension):
   <output>.json  the same lines, with the periods, the LEs and notes
 Counts below --min-cell (default 5) are suppressed ("<5"), percentages are left out if their count
 or base is suppressed, medians and quartiles if computed from fewer values, and every count within
-a group of fewer cases, also a zero. Neither output contains case keys or TANs. The cells per LE and
-period are small all the same, and part of the suppressed ones follow from the totals and the other
-cells: the tables, suppressed or not (--min-cell 1), are meant for the data nodes and the LE
-concerned, not for publication.
+a group of fewer cases, also a zero. Complementary suppression over the periods: where a figure of
+an LE would have exactly one suppressed period, the smallest other nonzero period (or the whole
+period) is suppressed too, with the same marker, so no suppressed cell is the whole period minus the
+others. Neither output contains case keys or TANs. The cells per LE and period are small all the
+same, and suppressed ones can still follow from the Gesamt column and the other LEs or from the
+other categories: the tables, suppressed or not (--min-cell 1), are meant for the data nodes and the
+LE concerned, not for publication.
 plot_time_series.py draws the curves from the CSV.
 
 Example:
@@ -573,6 +576,55 @@ def suppressed(line, min_cell, cases=None):
     return values
 
 
+def suppress_complementary(rows, lines, min_cell, due_days):
+    """
+    Complementary suppression over the periods: the whole period is the sum of the others, so in each
+    figure of an LE (count or base) in which exactly one period is suppressed, also the period (or the
+    whole period) with the smallest other nonzero count is, until no figure changes. A base that is
+    also a count of the same LE and period (the cases, the transmitted consents, ...) is the same
+    figure. A zero is left out only in a group of few cases; next to zeros only, the whole period is
+    suppressed instead. In place, with the marker '<min_cell'; a percentage beside it is left out.
+    """
+    hidden_marker = f"<{min_cell}"
+    same = {"Fälle": (B_CASES, CASES), "Fälle ohne übermittelten Broad Consent": (B_CONSENT, CONSENT_MISSING),
+            "Fälle mit übermitteltem Broad Consent": (B_CONSENT, CONSENT_TRANSMITTED),
+            WITH_GFK2: (B_FOLLOW_UP, WITH_GFK2)}
+    if due_days is not None:
+        same[f"Fälle mit GFK2 mindestens {due_days} Tage vor dem Stichtag"] = (B_FOLLOW_UP, DUE)
+
+    cells, size, hidden = [], {}, set()     # cells: (row, field, figure); a figure is (LE, (block, item) or base label)
+    for r, line in zip(rows, lines):
+        for field_, n, figure in (("value", line.n if line.days is None else None, (line.block, line.item)),
+                                  ("base", line.base, same.get(line.base_label, ("base", line.base_label)))):
+            if n is None:
+                continue
+            q = (r["le"], r["period"], figure)
+            cells.append((r, field_, q))
+            size[q] = n
+            if r[field_] is None or r[field_] == hidden_marker:
+                hidden.add(q)
+
+    figures = {}
+    for _, _, q in cells:
+        figures.setdefault((q[0], q[2]), {})[q] = None
+    changed = True
+    while changed:
+        changed = False
+        for members in figures.values():
+            if sum(q in hidden for q in members) != 1:
+                continue
+            shown = [q for q in members if q not in hidden]
+            # a zero left out (a group of few cases) next to only zeros: the whole period, which says they are all zero
+            candidates = [q for q in shown if size[q] > 0] or [q for q in shown if q[1] == WHOLE]
+            if candidates:
+                hidden.add(min(candidates, key=lambda q: (size[q], q[1] == WHOLE)))
+                changed = True
+
+    for r, field_, q in cells:
+        if q in hidden and r[field_] is not None and r[field_] != hidden_marker:
+            r[field_], r["percent"] = hidden_marker, None
+
+
 # ---------------------------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------------------------
@@ -663,7 +715,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
         for key in spread(le, period):
             event_counts.setdefault(key, Counter())[item] += n
 
-    result_rows = []
+    result_rows, evaluated_lines = [], []
     for le in [rdm.TOTAL] + les:
         for period in periods + [WHOLE]:
             key = (le, period)
@@ -675,6 +727,9 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
             for line, group in lines:
                 result_rows.append({"le": le, "period": period, "block": line.block, "item": line.item,
                                     "base_label": line.base_label, **suppressed(line, min_cell, group)})
+                evaluated_lines.append(line)
+    if min_cell > 1:
+        suppress_complementary(result_rows, evaluated_lines, min_cell, due_days)
 
     # the evaluated period, named as in the matrix
     if start or end:
@@ -699,7 +754,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
                               + ("" if end else ", dem Datum der letzten Einreichung"))
 
     notes = [
-        f"{len(facts)} Fälle (Episoden mit Erstmeldung) ausgewertet wie in der Auswertematrix (rd_evaluation_matrix.py), "
+        f"{f'<{min_cell}' if 0 < len(facts) < min_cell else len(facts)} Fälle (Episoden mit Erstmeldung) ausgewertet wie in der Auswertematrix (rd_evaluation_matrix.py), "
         f"Stand je Fall aus der letzten Nicht-Test-Einreichung; der Zeitraum '{WHOLE}' entspricht der Matrix.",
         f"Zeitraum der Blöcke '{B_CASES}', '{B_CONSENT}', '{B_STATUS}', '{B_RATE}', '{B_FOLLOW_UP}' und '{B_TIMELINE}': {unit} der "
         f"Erstmeldung des Falls. Zeitraum des Blocks '{B_SUBMISSIONS}': {unit} der jeweiligen Einreichung "
@@ -708,9 +763,12 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
         "alle Episoden ohne Erstmeldung des Exports zählt.",
         (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso Anteile mit unterdrücktem Wert "
          f"oder Nenner sowie Median und Quartile aus weniger als {min_cell} Werten. Zählwerte innerhalb von 1 bis "
-         f"{min_cell - 1} Fällen bleiben leer, auch die Null (die Matrix weist sie aus). Weitergabesicher ist die "
-         "Tabelle damit nicht: ein Teil der unterdrückten Zellen folgt aus den Summen und den übrigen Zellen. Sie ist "
-         "für die Datenknoten und den jeweiligen LE bestimmt."
+         f"{min_cell - 1} Fällen bleiben leer, auch die Null (die Matrix weist sie aus). Ergänzend unterdrückt, ebenfalls "
+         f"als <{min_cell}: wäre in einer Kennzahl eines LE genau ein Zeitraum unterdrückt, auch der Zeitraum (oder "
+         f"'{WHOLE}') mit der kleinsten weiteren Zahl über 0, damit kein unterdrückter Wert als '{WHOLE}' minus die "
+         f"übrigen Zeiträume berechenbar ist; eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr zählen. "
+         "Weitergabesicher ist die Tabelle damit nicht: ein Teil der unterdrückten Zellen folgt aus Gesamt und den "
+         "übrigen LEs oder aus den übrigen Kategorien. Sie ist für die Datenknoten und den jeweiligen LE bestimmt."
          if min_cell > 1 else
          "Keine Zellen unterdrückt (--min-cell 1): nur für den internen Gebrauch der Datenknoten."),
         "Broad Consent bewertet zum Datum der letzten Einreichung. Übermittelt: mindestens ein Eintrag in "

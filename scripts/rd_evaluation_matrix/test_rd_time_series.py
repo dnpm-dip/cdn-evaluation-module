@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import random
 import tempfile
 import unittest
 from datetime import date
@@ -820,6 +821,54 @@ class SuppressionTests(unittest.TestCase):
                     text = f.read()
                 self.assertNotIn("TAN-", text)
                 self.assertNotIn("case-", text)
+
+
+def synthetic_series(seed=11, sizes=(("LE-A", 48), ("LE-B", 17), ("LE-C", 7))):
+    """A random synthetic case set over three LEs and six months"""
+    rnd = random.Random(seed)
+    rows = []
+    for le, size in sizes:
+        for i in range(size):
+            submitted = f"2025-0{rnd.randint(1, 6)}-{rnd.randint(10, 28)}"
+            content = datenkranz(
+                f"{le}-{i}", submitted=submitted, gfk1="2024-12-01", plan_date=rnd.choice(["2024-12-20", None]),
+                gender=rnd.choice(["female", "male", "male", "other"]), coverage=rnd.choice(["GKV"] * 6 + ["PKV"]),
+                assessment=rnd.choice(list(rdm.ASSESSMENT_STATUS)), library=rnd.choice(["wgs"] * 6 + ["panel"]),
+                consents=[broad_consent(kind=rnd.choice(["permit", "permit", "deny"]))] if rnd.random() < 0.7 else [],
+            )
+            rows.append(row(f"{le}-{i}", content, submitted + "T10:00:00", le))
+    return rows
+
+
+class ComplementarySuppressionTests(unittest.TestCase):
+    """No suppressed count of a period is the whole period minus the other periods"""
+
+    def test_no_period_is_alone_suppressed(self):
+        rows = synthetic_series()
+        full, result = run(rows, min_cell=1, due_days=30), run(rows, min_cell=5, due_days=30)
+        self.assertEqual(len(full["rows"]), len(result["rows"]))
+        figures, complementary = {}, 0
+        for f, r in zip(full["rows"], result["rows"]):
+            for field in ("value", "base"):
+                if f[field] is None or quartile(r):     # a quartile is a statistic, not a count
+                    continue
+                hidden = r[field] in (None, "<5")
+                figures.setdefault((r["le"], r["block"], r["item"], field), []).append(hidden)
+                if hidden:
+                    complementary += f[field] >= 5
+                    self.assertIsNone(r["percent"])
+                else:
+                    self.assertEqual(r[field], f[field], (r["le"], r["period"], r["item"], field))
+        self.assertGreater(complementary, 0)
+        for figure, hidden in figures.items():
+            self.assertEqual(len(hidden), len(result["periods"]), figure)
+            self.assertNotEqual(sum(hidden), 1, figure)
+        # the case count of all LEs over the whole period is shown
+        self.assertEqual(get(result, ts.B_CASES, ts.CASES), 72)
+        # the counts of the timeline are part of it, and suppressed over the periods as the others
+        timeline = {k: v for k, v in figures.items() if k[1] == ts.B_TIMELINE and k[3] == "value"}
+        self.assertIn(("LE-B", ts.B_TIMELINE, "GFK2: Fälle", "value"), timeline)
+        self.assertGreater(sum(sum(hidden) for hidden in timeline.values()), 0)
 
 
 class InputOutputTests(unittest.TestCase):

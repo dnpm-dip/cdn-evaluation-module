@@ -97,7 +97,7 @@ lazy val dependencies =
     // published POMs declare base 1.0.0, although they were built against the base of their release
     val bfarm_base     = "de.dnpm"           %% "dnpm-bfarm-model-base"         % "1.0.6"
     val bfarm_onco     = "de.dnpm"           %% "dnpm-bfarm-model-oncology"     % "1.0.7"
-    val bfarm_rd       = "de.dnpm"           %% "dnpm-bfarm-model-rare-disease" % "1.0.6"
+    val bfarm_rd       = "de.dnpm"           %% "dnpm-bfarm-model-rare-disease" % "1.0.7"
     val mongodb_driver = "org.mongodb" % "mongodb-driver-sync" % "5.3.0"
     // Compile-only: resolves JSR-305 annotations used by the MongoDB driver (e.g. com.mongodb.lang.Nullable), which results in a compiler warning
     val jsr305         = "com.google.code.findbugs" % "jsr305" % "3.0.2" % Provided

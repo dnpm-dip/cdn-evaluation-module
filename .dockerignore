@@ -1,0 +1,16 @@
+# Only what the Dockerfile copies; above all no backups, exports or evaluation results
+*
+!dnpm-ccdn-evaluation.jar
+!entrypoint.sh
+!version.txt
+!scripts
+
+# The scripts as run on PROD, without tests, caches and data
+scripts/**/__pycache__
+scripts/**/test_*.py
+scripts/**/prodExtrakt
+scripts/**/*.xlsx
+scripts/**/*.json
+scripts/**/*.csv
+scripts/**/*.pdf
+!scripts/rd_evaluation_matrix/Auswertmatrix_Template.xlsx

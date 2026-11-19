@@ -39,6 +39,7 @@ written row by row, so the notes and the numbers of the collection follow them.
 run <statistic> [options]   Runs a statistic on the backups
 list                        Lists the available statistics and their parameters
 help                        Shows all options
+extract-scripts [DIR]       Copies the Python scripts (see below) onto the host (Docker image only)
 ```
 
 Filters on the unencrypted fields (combined with AND; lists comma-separated or the option repeated):
@@ -181,6 +182,21 @@ python3 scripts/data_quality_mvh/data_quality_mvh.py /out/export-datenkranz_<tim
   --from 2026-01-01 --until 2027-01-01 --output datenqualitaet.csv
 ```
 Tests: `python3 -m unittest discover -s scripts/data_quality_mvh`.
+
+### Running the scripts on the host
+
+The Python scripts under `scripts/` evaluate the exports outside of the container. The Docker image
+ships them (without tests and data), so that on PROD they can be unpacked into a host directory
+and run there manually, in the version matching the module that wrote the export:
+```
+docker run --rm -v "$PWD/scripts:/scripts" ghcr.io/dnpm-dip/cdn-evaluation-module:<version> extract-scripts
+python3 scripts/rd_evaluation_matrix/rd_evaluation_matrix.py export-datenkranz_<time>.json ...
+```
+The directory must be mounted; create it beforehand (`mkdir scripts`), otherwise Docker creates
+it owned by root. Files of the same name are
+overwritten, others like results are kept; the copies get the owner of the directory, and
+`VERSION.txt` records the module version they come from. The scripts need Python 3 on the host,
+`fill_template.py` openpyxl and `plot_time_series.py` matplotlib.
 
 Large submissions are decrypted in memory; for more heap, set `JAVA_OPTS=-Xmx4g` in the container.
 `export` and `export-datenkranz` stream the documents into the output case by case, so only one

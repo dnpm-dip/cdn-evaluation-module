@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!-- Takes precedence over logback.xml in the tests -->
+<configuration>
+
+  <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+    <target>System.err</target>
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="STDERR"/>
+  </root>
+
+  <logger name="org.mongodb.driver" level="WARN" />
+
+  <!--
+    The DataCollector tests feed it undecryptable and invalid documents on purpose and check
+    the summary counts instead; the resulting "Leaving out ..." / "Skipping case ..." errors are expected
+  -->
+  <logger name="de.dnpm.ccdn.evaluation.collect.Collection" level="OFF" />
+
+</configuration>

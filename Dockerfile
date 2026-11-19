@@ -1,6 +1,8 @@
 FROM amazoncorretto:21
 
-COPY ./dnpm-ccdn-evaluation.jar /opt/
+COPY ./dnpm-ccdn-evaluation.jar ./version.txt /opt/
+# Extracted onto the host by "extract-scripts", see entrypoint.sh
+COPY ./scripts /opt/scripts
 COPY --chmod=755 entrypoint.sh /
 
 LABEL org.opencontainers.image.licenses=MIT

@@ -32,6 +32,8 @@ object CommandLine
        |  run <statistic> [options]   Runs a statistic on the backups
        |  list                        Lists the available statistics and their parameters
        |  help                        Shows this help
+       |  extract-scripts [DIR]       (Docker image only) Copies the Python evaluation scripts into DIR,
+       |                              a mounted host directory, default /scripts
        |
        |Filters (combined with AND; lists are comma-separated or the option repeated):
        |  --site CODE[,CODE...]       Site code(s), e.g. UKT,UKFR

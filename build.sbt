@@ -50,6 +50,10 @@ lazy val evaluation = project
       dependencies.mongodb_driver,
       dependencies.jsr305
     ),
+    // The HGNC gene set of the test generators is loaded from (and fetched weekly into) dnpm.dip.data.dir;
+    // without it, it logs an error with stack trace and falls back to its pre-packaged copy
+    Test / fork := true,
+    Test / javaOptions += s"-Ddnpm.dip.data.dir=${(Test / target).value / "dip-data"}",
     assembly / assemblyJarName := "dnpm-ccdn-evaluation.jar",
     assembly / mainClass       := Some("de.dnpm.ccdn.evaluation.EvaluationApp"),
     // Also copies the jar into the project root, where the Dockerfile expects it

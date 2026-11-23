@@ -140,9 +140,7 @@ def fill_matrix(ws, result, field):
 
     ws["B1"] = result["title"]
     ws["B2"] = f"Auswertungszeitraum: {result['period']}"
-    ws["B3"] = (f"Zellen mit weniger als {result['min_cell']} Fällen unterdrückt (<{result['min_cell']}), ergänzend "
-                "weitere, damit keine unterdrückte Zahl als Differenz berechenbar ist."
-                if result["min_cell"] > 1 else "")
+    ws["B3"] = suppression_line(result)
 
     # the LE columns take the style of the template's LE column
     style_col = FIRST_LE_COL
@@ -160,6 +158,19 @@ def fill_matrix(ws, result, field):
             cell.value = r["values"][entity][field]
     if len(result["entities"]) == 1:   # no LE: drop the placeholder
         ws.cell(HEADER_ROW, FIRST_LE_COL).value = None
+
+
+def suppression_line(result):
+    """The line on the suppressed cells above the matrix; the oncology JSON has no suppress_scope (all rows)"""
+    if result["min_cell"] <= 1:
+        return ""
+    k = result["min_cell"]
+    if result.get("suppress_scope", "all") == "diagnoses":
+        return (f"Nur Diagnosezeilen (Diagnosestatus, Diagnoserate, Vorbefunde nach Status, Orphacode, Erkrankungsgruppen): "
+                f"Zellen mit weniger als {k} Fällen unterdrückt (<{k}), ergänzend weitere, damit keine unterdrückte Zahl als "
+                "Differenz berechenbar ist. Alle anderen Zahlen exakt (siehe Hinweise).")
+    return (f"Zellen mit weniger als {k} Fällen unterdrückt (<{k}), ergänzend "
+            "weitere, damit keine unterdrückte Zahl als Differenz berechenbar ist.")
 
 
 def fill(wb, result):
@@ -191,7 +202,8 @@ def fill_by_month(wb, result):
     ws["A1"] = MONTHLY_SECTION
     ws["A1"].font = Font(bold=True, size=12)
     ws["A2"] = ("Anzahl der Fälle ohne übermittelten Broad Consent je Grund laut DIP; in Klammern Anteil an diesen Fällen "
-                "des Monats in %." + (f" Zellen mit weniger als {result['min_cell']} Fällen unterdrückt." if result["min_cell"] > 1 else ""))
+                "des Monats in %." + (f" Zellen mit weniger als {result['min_cell']} Fällen unterdrückt."
+                                     if result["min_cell"] > 1 and result.get("suppress_scope", "all") == "all" else ""))
     header = ["Monat", "Grund"] + [result["labels"][e] for e in result["entities"]]
     for col, text in enumerate(header, 1):
         cell = ws.cell(4, col, text)

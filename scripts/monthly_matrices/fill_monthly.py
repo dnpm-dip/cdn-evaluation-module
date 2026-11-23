@@ -3,19 +3,20 @@
 # dependencies = ["openpyxl"]
 # ///
 """
-Write one Auswertematrix (xlsx) per month from the results of monthly_matrices.py, by
-fill_template.py of rd_evaluation_matrix: <dir>/rd/rd_<YYYY-MM>.json -> rd_<YYYY-MM>.xlsx and
-<dir>/dnpm/dnpm_<YYYY-MM>.json -> dnpm_<YYYY-MM>.xlsx (next to the JSON, or into --output-dir).
+Write one Auswertematrix (xlsx) per quarter or month from the results of monthly_matrices.py, by
+fill_template.py of rd_evaluation_matrix: <dir>/rd/rd_<period>.json -> rd_<period>.xlsx and
+<dir>/dnpm/dnpm_<period>.json -> dnpm_<period>.xlsx (<period> = YYYY-Qn or YYYY-MM; next to the JSON, or
+into --output-dir).
 
 Templates: RD by default rd_evaluation_matrix/Auswertmatrix_Template.xlsx. For oncology there is none
 in the repository: if --dnpm-template doesn't exist, it is created from the rows of the first month
-(fill_template.py --new-template; the rows are the same for every month) and can be restyled for
+(fill_template.py --new-template; the rows are the same for every period) and can be restyled for
 later runs. The oncology JSON contains no Rückfragen (they contain case keys), so its sheet
-"Rückfragen an LE" stays empty: see dnpm_<YYYY-MM>_rueckfragen.csv.
+"Rückfragen an LE" stays empty: see dnpm_<period>_rueckfragen.csv.
 
 Example:
-  uv run fill_monthly.py monthly
-  uv run fill_monthly.py monthly --dnpm-template Auswertmatrix_MTB_Template.xlsx --output-dir xlsx
+  uv run fill_monthly.py quarterly
+  uv run fill_monthly.py quarterly --dnpm-template Auswertmatrix_MTB_Template.xlsx --output-dir xlsx
 """
 
 import argparse
@@ -35,8 +36,8 @@ DEFAULT_DNPM_TEMPLATE = "Auswertmatrix_MTB_Template.xlsx"
 
 
 def results(directory, kind):
-    """The monthly result JSONs of a kind, by month"""
-    pattern = re.compile(rf"{kind}_\d{{4}}-\d{{2}}\.json$")
+    """The result JSONs of a kind per quarter or month, by period"""
+    pattern = re.compile(rf"{kind}_\d{{4}}-(\d{{2}}|Q[1-4])\.json$")
     return sorted(p for p in glob.glob(os.path.join(directory, kind, f"{kind}_*.json"))
                   if pattern.search(os.path.basename(p)))
 
@@ -75,7 +76,7 @@ def main(argv=None):
                 fill_template.main([paths[0], template, "--new-template"])
             fill_all(paths, template, args.output_dir)
     if not found:
-        parser.error(f"no monthly results in {args.dir} (expected {RD}/{RD}_YYYY-MM.json or {DNPM}/{DNPM}_YYYY-MM.json)")
+        parser.error(f"no monthly results in {args.dir} (expected {RD}/{RD}_YYYY-Qn.json, {RD}/{RD}_YYYY-MM.json or the same under {DNPM}/)")
 
 
 if __name__ == "__main__":

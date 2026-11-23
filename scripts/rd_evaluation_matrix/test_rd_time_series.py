@@ -50,10 +50,10 @@ def cases(*contents, **kwargs):
 
 
 def main(*args):
-    """Runs the script, returns the notes it prints"""
+    """Runs the script (by month unless --period is given; the default is quarter), returns the notes it prints"""
     notes = io.StringIO()
     with contextlib.redirect_stderr(notes):
-        ts.main(list(args))
+        ts.main(list(args) if "--period" in args else ["--period", ts.MONTH, *args])
     return notes.getvalue()
 
 

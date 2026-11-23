@@ -866,7 +866,7 @@ def main(argv=None):
                              "(default: today)")
     parser.add_argument("--min-cell", type=int, default=5,
                         help="counts below are suppressed, 1 disables (default: %(default)s)")
-    parser.add_argument("--period", choices=(MONTH, QUARTER), default=MONTH, help="resolution (default: %(default)s)")
+    parser.add_argument("--period", choices=(MONTH, QUARTER), default=QUARTER, help="resolution (default: %(default)s)")
     parser.add_argument("--follow-up-due-days", type=int,
                         help="also report the follow-ups of the cases whose GFK2 is at least this many days before "
                              "the reference date, and those within as many days after the GFK2 (default: not reported)")

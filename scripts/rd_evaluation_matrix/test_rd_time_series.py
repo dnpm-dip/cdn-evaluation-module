@@ -4,17 +4,20 @@ Tests of rd_time_series.py and plot_time_series.py: python3 -m unittest discover
 """
 
 import contextlib
+import importlib.util
 import io
 import json
 import os
 import random
+import subprocess
 import tempfile
 import unittest
 from datetime import date
+from types import SimpleNamespace
 
 import rd_evaluation_matrix as rdm
 import rd_time_series as ts
-from test_rd_evaluation_matrix import REFERENCE, broad_consent, datenkranz, row
+from test_rd_evaluation_matrix import REFERENCE, broad_consent, datenkranz, row, synthetic
 
 try:
     import plot_time_series as plots
@@ -26,8 +29,9 @@ PATDAT_STORE_AND_USE = "2.16.840.1.113883.3.1937.777.24.5.3.1"
 REFUSES = "patient refuses to sign consent"
 
 
-def run(rows, start=None, end=None, failures=(), min_cell=1, resolution=ts.MONTH, due_days=None):
-    return ts.run(rows, list(failures), start, end, REFERENCE, min_cell, resolution, due_days)
+def run(rows, start=None, end=None, failures=(), min_cell=1, resolution=ts.MONTH, due_days=None, scope=rdm.SUPPRESS_ALL):
+    """The time series; suppression in all blocks unless scope says otherwise (the tests of the rules of the suppression)"""
+    return ts.run(rows, list(failures), start, end, REFERENCE, min_cell, resolution, due_days, suppress_scope=scope)
 
 
 def get(result, block, item, period=ts.WHOLE, le=rdm.TOTAL, field="value"):
@@ -1002,6 +1006,92 @@ class InputOutputTests(unittest.TestCase):
                       incomplete(resolution=ts.QUARTER)[0])
         self.assertEqual(incomplete(start=date(2025, 10, 1), end=date(2026, 12, 1)), [])
         self.assertEqual(incomplete(start=date(2025, 10, 1), end=date(2027, 1, 1), resolution=ts.QUARTER), [])
+
+
+PREVIOUS = "647f21b"    # the last commit before --suppress-scope: its output equals that of --suppress-scope all
+
+
+class DiagnosisScopeTests(unittest.TestCase):
+    """--suppress-scope diagnoses: only the diagnosis blocks are suppressed, all other numbers are exact"""
+
+    def test_the_diagnosis_blocks_are_those_of_the_matrix(self):
+        self.assertTrue(ts.is_diagnosis_line(ts.Line(ts.B_STATUS, rdm.DIAGNOSED)))
+        self.assertTrue(ts.is_diagnosis_line(ts.Line(ts.B_RATE, rdm.DIAGNOSED)))
+        self.assertFalse(ts.is_diagnosis_line(ts.Line(ts.B_SEX, "m")))
+        result = run(synthetic(), min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
+        self.assertEqual({r["block"] for r in result["rows"] if ts.is_diagnosis_line(SimpleNamespace(
+            block=r["block"], item=r["item"]))}, {ts.B_STATUS, ts.B_RATE})
+        self.assertEqual(result["suppress_scope"], rdm.SUPPRESS_DIAGNOSES)
+
+    def test_non_diagnosis_cells_exact_and_no_period_follows_from_the_others(self):
+        for rows in (synthetic(), synthetic(seed=14, sizes=(("LE-A", 6), ("LE-B", 3)))):
+            full = run(rows, resolution=ts.QUARTER)
+            result = run(rows, min_cell=5, resolution=ts.QUARTER, scope=rdm.SUPPRESS_DIAGNOSES)
+            hidden = 0
+            fields = ("value", "base", "percent", "median", "q1", "q3", "n")
+            for r, f in zip(result["rows"], full["rows"]):
+                diagnosis = r["block"] in (ts.B_STATUS, ts.B_RATE)
+                if not diagnosis or r["base_label"] in rdm.EXACT_DIAGNOSIS_BASES:
+                    self.assertEqual(r["base"], f["base"], (r["block"], r["item"]))
+                if diagnosis:
+                    hidden += sum(r[x] in ("<5", None) and f[x] is not None for x in ("value", "base"))
+                else:
+                    self.assertEqual({x: r[x] for x in fields}, {x: f[x] for x in fields}, (r["block"], r["item"]))
+            self.assertGreater(hidden, 0)
+            # per LE and diagnosis figure, never exactly one period suppressed
+            figures = {}
+            for r, f in zip(result["rows"], full["rows"]):
+                if r["block"] in (ts.B_STATUS, ts.B_RATE) and f["value"] is not None:
+                    figures.setdefault((r["le"], r["block"], r["item"]), []).append(r["value"] in ("<5", None))
+            self.assertEqual([k for k, v in figures.items() if sum(v) == 1], [])
+
+    def test_small_counts_outside_the_diagnosis_blocks_are_shown(self):
+        result = cases(*[datenkranz(f"t{i}", gender="male" if i < 2 else "female",
+                                    assessment="noGeneticDiagnosis" if i < 2 else "confirmedGeneticDiagnosis")
+                         for i in range(7)], min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
+        self.assertEqual(get(result, ts.B_SEX, "m"), 2)
+        self.assertEqual(get(result, ts.B_STATUS, rdm.UNDIAGNOSED), "<5")
+        self.assertEqual(get(result, ts.B_STATUS, rdm.UNDIAGNOSED, field="base"), 7)
+        self.assertTrue(result["notes"][0].startswith("7 Fälle"))
+        few = cases(datenkranz("t1"), datenkranz("t2"), min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
+        self.assertEqual(get(few, ts.B_CASES, ts.CASES), 2)
+        self.assertIsNone(get(few, ts.B_STATUS, rdm.DIAGNOSED))       # a count within 2 cases is left out
+        self.assertEqual(get(few, ts.B_STATUS, rdm.DIAGNOSED, field="base"), 2)
+        with self.assertRaises(ValueError):
+            run([], scope="none")
+
+    def test_scope_all_is_unchanged(self):
+        # the previous version of the script (before --suppress-scope), from the git history
+        here = os.path.dirname(os.path.abspath(__file__))
+        try:
+            source = subprocess.run(["git", "show", f"{PREVIOUS}:scripts/rd_evaluation_matrix/rd_time_series.py"],
+                                    cwd=here, capture_output=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest(f"commit {PREVIOUS} not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "previous_series.py"), "wb") as f:
+                f.write(source)
+            spec = importlib.util.spec_from_file_location("previous_series", os.path.join(tmp, "previous_series.py"))
+            previous = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(previous)
+            for rows in (synthetic(), synthetic(seed=14, sizes=(("LE-A", 6), ("LE-B", 3)))):
+                path = os.path.join(tmp, "in.json")
+                with open(path, "w") as f:
+                    json.dump([{"case": r.case, "site": r.site, "submittedAt": r.submitted_at, "content": r.content}
+                               for r in rows], f)
+                outputs = []
+                for name, script, scope in (("new", ts, ["--suppress-scope", "all"]), ("old", previous, [])):
+                    out = os.path.join(tmp, name)
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        script.main([path, "--output", out, "--reference-date", "2026-11-01", "--period", "quarter",
+                                     "--follow-up-due-days", "180", *scope])
+                    with open(out + ".json", encoding="utf-8") as f:
+                        result = json.load(f)
+                    with open(out + ".csv", "rb") as f:
+                        outputs.append((result, f.read()))
+                (new, new_csv), (old, old_csv) = outputs
+                self.assertEqual(new_csv, old_csv)
+                self.assertEqual(new, {**old, "suppress_scope": "all"})
 
 
 @unittest.skipIf(plots is None, "plot_time_series.py needs matplotlib")

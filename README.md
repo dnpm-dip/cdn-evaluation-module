@@ -130,9 +130,9 @@ against an exact total (e.g. the status partition sums to the exactly shown sequ
 other parts of such a partition are zeros, a zero is suppressed instead (preferably one whose row has a nonzero
 Gesamt; a zero alone in a row of zeros takes the zero of Gesamt along), so that a suppressed count isn't the exact
 total minus shown zeros. A diagnosis cell's quantity is kept apart from an exact cell that happens to
-count the same cases. `--suppress-scope all` suppresses every row as before. Showing the small non-diagnosis
-counts per LE (sex, age group, insurance, consent, durations of single cases, …) is a data-protection decision
-of the data owners.
+count the same cases. `--suppress-scope all` suppresses every row as before. The data owners decided that
+showing the small non-diagnosis counts per LE (sex, age group, insurance, consent, durations of single cases, …)
+is acceptable; `--suppress-scope all` remains as the opt-out.
 
 Time series of the matrix's key figures, per quarter (default) or month (`--period`), in total and per Leistungserbringer, are
 computed from the same export by `scripts/rd_evaluation_matrix/rd_time_series.py`, also standard library
@@ -190,7 +190,9 @@ Three things to know when reading the figures:
   cases, also a zero; the plots show such periods as gaps. Neither output contains case keys or TANs. The
   cells per LE and month are small all the same, and part of the suppressed ones follow from the totals and
   the other cells: the tables, suppressed or not (`--min-cell 1`), are meant for the data nodes and the LE
-  concerned, not for publication.
+  concerned, not for publication. `--suppress-scope diagnoses` (default) applies this only to the blocks
+  `Diagnosestatus (alle Fälle)` and `Diagnoserate (abgeschlossene Fälle)` (the diagnosis rows of the matrix,
+  their base "Fälle" exact), every other figure is exact; `--suppress-scope all` to every block.
 
 The tests run with those of the matrix (`python3 -m unittest discover -s scripts/rd_evaluation_matrix`);
 those of the plots are skipped without matplotlib.
@@ -212,8 +214,8 @@ evaluation per period of initial submission, one xlsx each, Q4/2025 = Erstmeldun
 on PROD) reads the export once and writes the results of both scripts per period into `<dir>/rd/rd_<period>.json`
 and `<dir>/dnpm/dnpm_<period>.json` (`<period>` = `YYYY-Qn` or `YYYY-MM`). The first period is that of the
 earliest initial submission in the export, so there are no empty leading periods; `--from`/`--until`
-(`YYYY-MM` or `YYYY-Qn`) narrow the range. The RD matrices take `--suppress-scope` (default `diagnoses`, see
-above); the oncology matrices always suppress all rows. `--reference-date` is the same for all periods. `scripts/monthly_matrices/fill_monthly.py` (openpyxl, outside of PROD) writes an xlsx next
+(`YYYY-MM` or `YYYY-Qn`) narrow the range. `--suppress-scope` (default `diagnoses`, see above and
+`scripts/dnpm_evaluation_matrix/README.md`) applies to both. `--reference-date` is the same for all periods. `scripts/monthly_matrices/fill_monthly.py` (openpyxl, outside of PROD) writes an xlsx next
 to each result by `fill_template.py`. For oncology, a template is created from the rows on the first run
 (`<dir>/Auswertmatrix_MTB_Template.xlsx`, or `--dnpm-template`); its sheet "Rückfragen an LE" stays empty,
 since the oncology JSON contains no case keys (see `dnpm_<period>_rueckfragen.csv`).

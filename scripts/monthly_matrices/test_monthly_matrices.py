@@ -11,8 +11,10 @@ from io import StringIO
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "rd_evaluation_matrix"))
+sys.path.insert(0, os.path.join(HERE, "..", "dnpm_evaluation_matrix"))
 
 import monthly_matrices as mm               # noqa: E402
+import test_dnpm_evaluation_matrix as dnt   # noqa: E402  (synthetic oncology submissions)
 import test_rd_evaluation_matrix as rdt     # noqa: E402  (synthetic Datenkranz submissions)
 
 
@@ -95,6 +97,21 @@ class RunTests(unittest.TestCase):
         # all rows: the case count of the only LE is suppressed, and Gesamt with it (it is that LE's count)
         self.assertEqual(results["rd_2026-Q2"]["rows"][0]["values"]["Gesamt"]["value"], "<5")
         self.assertEqual(self.run_rd(["2026-05-01"])["rd_2026-Q2"]["rows"][0]["values"]["Gesamt"]["value"], 1)
+
+    def test_the_oncology_matrices_take_the_scope(self):
+        for args, scope, n in (((), "diagnoses", 3), (("--suppress-scope", "all"), "all", "<5")):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "export.json")
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump([{"case": f"c{i}", "submittedAt": "2025-11-03T10:00:00", "site": "LE-A",
+                                "content": dnt.datenkranz(f"t{i}", submitted="2025-11-03")} for i in range(3)], f)
+                out = os.path.join(tmp, "out")
+                with redirect_stderr(StringIO()):
+                    mm.main([path, "--matrix", "dnpm", "--reference-date", "2026-11-01", "--output-dir", out, *args])
+                with open(os.path.join(out, "dnpm", "dnpm_2025-Q4.json"), encoding="utf-8") as f:
+                    result = json.load(f)
+            self.assertEqual(result["suppress_scope"], scope)
+            self.assertEqual(result["rows"][0]["values"]["Gesamt"]["value"], n)
 
 
 if __name__ == "__main__":

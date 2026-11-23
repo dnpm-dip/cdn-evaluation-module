@@ -161,14 +161,13 @@ def fill_matrix(ws, result, field):
 
 
 def suppression_line(result):
-    """The line on the suppressed cells above the matrix; the oncology JSON has no suppress_scope (all rows)"""
+    """The line on the suppressed cells above the matrix (RD and oncology; a JSON without suppress_scope: all rows)"""
     if result["min_cell"] <= 1:
         return ""
     k = result["min_cell"]
     if result.get("suppress_scope", "all") == "diagnoses":
-        return (f"Nur Diagnosezeilen (Diagnosestatus, Diagnoserate, Vorbefunde nach Status, Orphacode, Erkrankungsgruppen): "
-                f"Zellen mit weniger als {k} Fällen unterdrückt (<{k}), ergänzend weitere, damit keine unterdrückte Zahl als "
-                "Differenz berechenbar ist. Alle anderen Zahlen exakt (siehe Hinweise).")
+        return (f"Nur Diagnosezeilen (Abschnitte siehe Hinweise): Zellen mit weniger als {k} Fällen unterdrückt (<{k}), "
+                "ergänzend weitere, damit keine unterdrückte Zahl als Differenz berechenbar ist. Alle anderen Zahlen exakt.")
     return (f"Zellen mit weniger als {k} Fällen unterdrückt (<{k}), ergänzend "
             "weitere, damit keine unterdrückte Zahl als Differenz berechenbar ist.")
 

@@ -18,7 +18,8 @@ python3 make_synthetic.py --output synthetic-export.json                # synthe
 Options: `--from`/`--until` (cases by the date of their initial submission, submissions and Rückfragen by
 their own date), `--cutoff` (data as of a date: later submissions are ignored, so a new export doesn't
 change old periods), `--reference-date` (consent validity, due follow-ups; default `--cutoff`, else today; must
-not be after `--cutoff`), `--resolution month|quarter`, `--min-cell` (default 5, 1 disables),
+not be after `--cutoff`), `--resolution month|quarter`, `--min-cell` (default 5, 1 disables), `--suppress-scope diagnoses|all`
+(default `diagnoses`, see Suppression),
 `--min-medical-days` (default 14), `--delimiter`, `--output`, `--rueckfragen-per-le` (also one
 `<output>_rueckfragen_<LE>.csv` per LE, to hand each LE only its own cases).
 
@@ -89,6 +90,20 @@ date (the title gives the months of the first and last initial submission, or th
   changes. Limits: bases and the counts of overlapping rows (e.g. a category's count reappearing as the
   base of another section) are not part of the groups, and statistics (median etc.) are not additive, so
   the tables are still for the KDK and the LE concerned, not for publication.
+- **Suppression scope** (`--suppress-scope`, default `diagnoses`): with `diagnoses` only the diagnosis rows are
+  suppressed, every other count and statistic (also the time series, the notes and durations of single cases)
+  is exact, also below k. The diagnosis rows (`DIAGNOSIS_SECTIONS`, `is_diagnosis_row()` in the script) are
+  the sections `Tumorentität (Hauptdiagnose ICD-10-GM, gruppiert)`, `Tumorentität (sequenzierte Fälle)`,
+  `Diagnose: Kodierung` (ICD-O-3 behaviour, topography, germline diagnosis) and
+  `GFK2 (MTB): Ergebnis nach Tumorentität (sequenzierte Fälle)`. Not diagnosis rows: stage, grading, ECOG,
+  `davon hereditär`, molecular findings, fill rates. The rules above apply within the diagnosis rows,
+  plus, since the other rows are now exact: `DIAGNOSIS_PARTITIONS` (the behaviour codes with the cases
+  with one; the per-entity rows "GFK2 dokumentiert" and "Therapie- oder Studienempfehlung", whose sums are
+  shown exactly in `GFK2 (MTB): Ergebnis`) are groups too; where the other cells of a group with one
+  suppressed cell are zeros, a zero (with a nonzero base) is suppressed, so `<k` can also be 0; and a
+  base that is the count of another diagnosis row (`DIAGNOSIS_BASES`, e.g. `sequenzierte Fälle <entity>`)
+  is suppressed where that count is. `--suppress-scope all` suppresses every row; its output equals that of
+  the script before the option (only the JSON field `suppress_scope` is new).
 - Robustness: `null` where a list or object is expected is read as empty; a case that still can't be read
   (no `metaData.molecularBoardDecisionDate`, no `birthDate`, no `case.diagnosisOd`, no dated initial)
   becomes a Rückfrage "Fall nicht auswertbar" instead of aborting the run. Each submission's dates are

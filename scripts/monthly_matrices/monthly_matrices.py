@@ -14,9 +14,8 @@ The export is read once, the periods are evaluated one after the other, each wri
 respective script writes it (<period> = YYYY-Qn or YYYY-MM):
   <output-dir>/rd/rd_<period>.json, .csv, _rueckfragen.csv
   <output-dir>/dnpm/dnpm_<period>.json, .csv, _zeitreihe.csv, _rueckfragen.csv
-RD: small counts are suppressed only in the diagnosis rows (--suppress-scope diagnoses, the default of
-rd_evaluation_matrix.py), --suppress-scope all suppresses every row. The oncology matrix always suppresses
-every row (its own suppression, no scope).
+Small counts are suppressed only in the diagnosis rows (--suppress-scope diagnoses, the default of both
+scripts; their DIAGNOSIS_SECTIONS), --suppress-scope all suppresses every row.
 The Rückfragen contain case keys: only for the respective LEs. The RD JSON contains them as well
 (as written by rd_evaluation_matrix.py), the oncology JSON doesn't.
 
@@ -141,7 +140,7 @@ def run_dnpm(path, args):
     for start in periods_:
         output = os.path.join(out_dir, f"{DNPM}_{label(start, args.period)}")
         result = dnpm.run(rows, failures, start, next_period(start, args.period), reference_date, args.min_cell,
-                          args.min_medical_days, resolution, args.cutoff)
+                          args.min_medical_days, resolution, args.cutoff, args.suppress_scope)
         # as dnpm_evaluation_matrix.main writes it
         with open(f"{output}.json", "w", encoding="utf-8") as f:     # without the case keys of the Rückfragen
             json.dump({k: v for k, v in result.items() if k != "problems"}, f, ensure_ascii=False, indent=1)
@@ -177,7 +176,7 @@ def main(argv=None):
                         help="oncology: data as of this date, later submissions are ignored")
     parser.add_argument("--min-cell", type=int, default=5, help="counts below are suppressed, 1 disables (default: %(default)s)")
     parser.add_argument("--suppress-scope", choices=rd.SUPPRESS_SCOPES, default=rd.SUPPRESS_DIAGNOSES,
-                        help="RD: suppress only the diagnosis rows or all rows (default: %(default)s); oncology: all rows")
+                        help="suppress small counts only in the diagnosis rows or in all rows (default: %(default)s)")
     parser.add_argument("--min-medical-days", type=int, default=14,
                         help="shorter GFK1-GFK2 durations are listed for clarification (default: %(default)s)")
     parser.add_argument("--delimiter", default=";", help="CSV delimiter (default: %(default)s)")

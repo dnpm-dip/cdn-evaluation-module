@@ -49,6 +49,9 @@ others. Neither output contains case keys or TANs. The cells per LE and period a
 same, and suppressed ones can still follow from the Gesamt column and the other LEs or from the
 other categories: the tables, suppressed or not (--min-cell 1), are meant for the data nodes and the
 LE concerned, not for publication.
+--suppress-scope diagnoses (default) applies all of this only to the diagnosis blocks (Diagnosestatus,
+Diagnoserate: rdm.DIAGNOSIS_SECTIONS, their base "Fälle" exact as in the matrix) and shows every other
+count, percentage and statistic exactly; --suppress-scope all to every block.
 plot_time_series.py draws the curves from the CSV.
 
 Example:
@@ -64,6 +67,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import rd_evaluation_matrix as rdm
 
@@ -629,11 +633,21 @@ def suppress_complementary(rows, lines, min_cell, due_days):
 # Main
 # ---------------------------------------------------------------------------------------------
 
-def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH, due_days=None, reasons=None):
+def is_diagnosis_line(line):
+    """A line of the diagnosis blocks, the sections of the matrix that are its diagnosis rows (rdm.is_diagnosis_row)"""
+    return rdm.is_diagnosis_row(SimpleNamespace(section=line.block, item=line.item))
+
+
+def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH, due_days=None, reasons=None,
+        suppress_scope=rdm.SUPPRESS_DIAGNOSES):
     """
     The time series of the submissions (rdm.SubmissionRow) and the failures of the export, given
-    as (site, submittedAt); reasons as load_dip_reasons returns them (None: not in the export)
+    as (site, submittedAt); reasons as load_dip_reasons returns them (None: not in the export).
+    suppress_scope rdm.SUPPRESS_DIAGNOSES: only the diagnosis lines are suppressed, all others are exact
     """
+    if suppress_scope not in rdm.SUPPRESS_SCOPES:
+        raise ValueError(f"suppress_scope must be one of {rdm.SUPPRESS_SCOPES}: {suppress_scope}")
+    every = suppress_scope == rdm.SUPPRESS_ALL
     cases, _, without_initial, submitters = rdm.build_cases(rows, start, end)
 
     def in_range(d):
@@ -725,8 +739,14 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
                      for line in case_lines(of, unreadable_counts[key], due_days, no_gfk1_counts[key])]
             lines += [(line, None) for line in submission_lines(event_counts.get(key, {}))]
             for line, group in lines:
+                if every or is_diagnosis_line(line):
+                    values = suppressed(line, min_cell, group)
+                    if not every and line.base_label in rdm.EXACT_DIAGNOSIS_BASES:
+                        values["base"] = line.base      # shown as the count of another line
+                else:
+                    values = suppressed(line, 1)        # exact: nothing is below a min_cell of 1
                 result_rows.append({"le": le, "period": period, "block": line.block, "item": line.item,
-                                    "base_label": line.base_label, **suppressed(line, min_cell, group)})
+                                    "base_label": line.base_label, **values})
                 evaluated_lines.append(line)
     if min_cell > 1:
         suppress_complementary(result_rows, evaluated_lines, min_cell, due_days)
@@ -754,7 +774,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
                               + ("" if end else ", dem Datum der letzten Einreichung"))
 
     notes = [
-        f"{f'<{min_cell}' if 0 < len(facts) < min_cell else len(facts)} Fälle (Episoden mit Erstmeldung) ausgewertet wie in der Auswertematrix (rd_evaluation_matrix.py), "
+        f"{f'<{min_cell}' if every and 0 < len(facts) < min_cell else len(facts)} Fälle (Episoden mit Erstmeldung) ausgewertet wie in der Auswertematrix (rd_evaluation_matrix.py), "
         f"Stand je Fall aus der letzten Nicht-Test-Einreichung; der Zeitraum '{WHOLE}' entspricht der Matrix.",
         f"Zeitraum der Blöcke '{B_CASES}', '{B_CONSENT}', '{B_STATUS}', '{B_RATE}', '{B_FOLLOW_UP}' und '{B_TIMELINE}': {unit} der "
         f"Erstmeldung des Falls. Zeitraum des Blocks '{B_SUBMISSIONS}': {unit} der jeweiligen Einreichung "
@@ -769,6 +789,16 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
          f"übrigen Zeiträume berechenbar ist; eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr zählen. "
          "Weitergabesicher ist die Tabelle damit nicht: ein Teil der unterdrückten Zellen folgt aus Gesamt und den "
          "übrigen LEs oder aus den übrigen Kategorien. Sie ist für die Datenknoten und den jeweiligen LE bestimmt."
+         if min_cell > 1 and every else
+         (f"Unterdrückt werden nur die Blöcke '{B_STATUS}' und '{B_RATE}' (die Diagnosezeilen der Matrix): dort sind "
+          f"Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso Anteile mit unterdrücktem Wert oder "
+          f"Nenner; Zählwerte innerhalb von 1 bis {min_cell - 1} Fällen bleiben leer, auch die Null. Ergänzend "
+          f"unterdrückt, ebenfalls als <{min_cell}: wäre in einer Kennzahl eines LE genau ein Zeitraum unterdrückt, auch "
+          f"der Zeitraum (oder '{WHOLE}') mit der kleinsten weiteren Zahl über 0; eine Zelle <{min_cell} kann daher auch "
+          f"{min_cell} oder mehr zählen. Alle anderen Zahlen, Anteile, Mediane und Quartile sind exakt angegeben, auch "
+          f"unter {min_cell}. Weitergabesicher ist die Tabelle damit nicht: ein Teil der unterdrückten Zellen folgt aus "
+          "Gesamt und den übrigen LEs oder aus den übrigen Kategorien. Sie ist für die Datenknoten und den jeweiligen LE "
+          "bestimmt.")
          if min_cell > 1 else
          "Keine Zellen unterdrückt (--min-cell 1): nur für den internen Gebrauch der Datenknoten."),
         "Broad Consent bewertet zum Datum der letzten Einreichung. Übermittelt: mindestens ein Eintrag in "
@@ -793,7 +823,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
            "Mit --follow-up-due-days N kommen vergleichbare Zeilen hinzu (Fälle mit GFK2 mindestens N Tage vor dem "
            "Stichtag, Follow-ups bis N Tage nach der GFK2)."),
         f"{B_TIMELINE}: je Meilenstein Datum minus GFK1 (metaData.molecularBoardDecisionDate) in Tagen, Fälle mit "
-        f"Datum sowie 1. Quartil, Median und 3. Quartil als Wert (ab {max(min_cell, 1)} Werten). MV-Einwilligung: frühestes "
+        f"Datum sowie 1. Quartil, Median und 3. Quartil als Wert (ab {max(min_cell, 1) if every else 1} Werten). MV-Einwilligung: frühestes "
         "mvConsent.scope[mvSequencing].date; Symptombeginn: case.diagnosisRd.symptomOnsetDate (ohne 1800-01); "
         "ZSE-Erstkontakt: frühestes case.priorRds[].zseContactDate; GFK2 wie im Block Follow-up; Erstmeldung beim KDK: "
         "Datum der Erstmeldung; Erstes Follow-up: frühestes followUpRds[].followUpDate über alle Einreichungen. "
@@ -830,6 +860,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
         "resolution": resolution,
         "periods": periods + [WHOLE],
         "min_cell": min_cell,
+        "suppress_scope": suppress_scope,
         "follow_up_due_days": due_days,
         "reference_date": reference_date.isoformat(),
         "entities": [rdm.TOTAL] + les,
@@ -866,6 +897,9 @@ def main(argv=None):
                              "(default: today)")
     parser.add_argument("--min-cell", type=int, default=5,
                         help="counts below are suppressed, 1 disables (default: %(default)s)")
+    parser.add_argument("--suppress-scope", choices=rdm.SUPPRESS_SCOPES, default=rdm.SUPPRESS_DIAGNOSES,
+                        help="suppress small counts only in the diagnosis blocks (rdm.DIAGNOSIS_SECTIONS), all other "
+                             "numbers exact, or in all blocks (default: %(default)s)")
     parser.add_argument("--period", choices=(MONTH, QUARTER), default=QUARTER, help="resolution (default: %(default)s)")
     parser.add_argument("--follow-up-due-days", type=int,
                         help="also report the follow-ups of the cases whose GFK2 is at least this many days before "
@@ -880,7 +914,7 @@ def main(argv=None):
     reasons = load_dip_reasons(args.input)
     rows, _ = rdm.load_submissions(args.input)
     result = run(rows, failures, args.start, args.end, args.reference_date, args.min_cell, args.period,
-                 args.follow_up_due_days, reasons)
+                 args.follow_up_due_days, reasons, args.suppress_scope)
 
     with open(f"{args.output}.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)

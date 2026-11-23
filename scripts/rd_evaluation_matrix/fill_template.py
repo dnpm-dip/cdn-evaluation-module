@@ -169,7 +169,7 @@ def fill(wb, result):
     ws = wb[PROBLEMS]
     if ws.max_row > 1:
         raise SystemExit(f"sheet '{PROBLEMS}' isn't empty, not a blank template")
-    for p in result["problems"]:
+    for p in result.get("problems", []):   # not contained in the oncology JSON
         ws.append([result["labels"].get(p["le"], p["le"]), p["problem"], p["case"], p["tan"], p["detail"]])
     ws.auto_filter.ref = f"A1:E{max(ws.max_row, 1)}"
 
@@ -244,7 +244,7 @@ def main(argv=None):
     if wrong:
         raise SystemExit(f"cells not written as expected: {wrong[:5]}")
     print(f"Written: {args.output} ({len(result['rows'])} rows, {len(result['entities']) - 1} LEs, "
-          f"{len(result['problems'])} Rückfragen, {len(result['notes'])} notes)")
+          f"{len(result.get('problems', []))} Rückfragen, {len(result['notes'])} notes)")
 
 
 if __name__ == "__main__":

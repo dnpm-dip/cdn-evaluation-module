@@ -183,6 +183,20 @@ python3 scripts/data_quality_mvh/data_quality_mvh.py /out/export-datenkranz_<tim
 ```
 Tests: `python3 -m unittest discover -s scripts/data_quality_mvh`.
 
+The RD and oncology matrices per month (one evaluation per month of initial submission, one xlsx
+each) are computed in two steps. `scripts/monthly_matrices/monthly_matrices.py` (standard library only,
+on PROD) reads the export once and writes the results of both scripts per month into `<dir>/rd/` and
+`<dir>/dnpm/`; `scripts/monthly_matrices/fill_monthly.py` (openpyxl, outside of PROD) writes an xlsx next
+to each result by `fill_template.py`. For oncology, a template is created from the rows on the first run
+(`<dir>/Auswertmatrix_MTB_Template.xlsx`, or `--dnpm-template`); its sheet "Rückfragen an LE" stays empty,
+since the oncology JSON contains no case keys (see `dnpm_<YYYY-MM>_rueckfragen.csv`).
+```
+python3 scripts/monthly_matrices/monthly_matrices.py /out/export-datenkranz_<time>.json \
+  --from 2025-07 --until 2026-11 --orphanet en_product7.xml --reference-date 2026-11-01 --output-dir monthly
+uv run scripts/monthly_matrices/fill_monthly.py monthly
+```
+`--until` is the month after the last one; `--matrix rd|dnpm` restricts to one of them.
+
 ### Running the scripts on the host
 
 The Python scripts under `scripts/` evaluate the exports outside of the container. The Docker image
@@ -192,6 +206,13 @@ and run there manually, in the version matching the module that wrote the export
 docker run --rm -v "$PWD/scripts:/scripts" ghcr.io/dnpm-dip/cdn-evaluation-module:<version> extract-scripts
 python3 scripts/rd_evaluation_matrix/rd_evaluation_matrix.py export-datenkranz_<time>.json ...
 ```
+If the module is a service of the deployment's Compose file, use the service name instead; this
+takes the image version the deployment pins:
+```
+docker compose run --rm -v "$PWD/scripts:/scripts" <service> extract-scripts
+```
+Both start a new container from the image rather than naming a running one: the directory is
+mounted when a container is created, which a running container can't do afterwards.
 The directory must be mounted; create it beforehand (`mkdir scripts`), otherwise Docker creates
 it owned by root. Files of the same name are
 overwritten, others like results are kept; the copies get the owner of the directory, and

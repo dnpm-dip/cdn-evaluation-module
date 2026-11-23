@@ -12,3 +12,6 @@ target/
 .vscode/
 .DS_Store
 __pycache__/
+docs/
+*.xlsx
+scripts/rd_evaluation_matrix/prodExtrakt

@@ -13,4 +13,3 @@ scripts/**/*.xlsx
 scripts/**/*.json
 scripts/**/*.csv
 scripts/**/*.pdf
-!scripts/rd_evaluation_matrix/Auswertmatrix_Template.xlsx

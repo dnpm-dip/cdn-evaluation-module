@@ -98,6 +98,27 @@ class RunTests(unittest.TestCase):
         self.assertEqual(results["rd_2026-Q2"]["rows"][0]["values"]["Gesamt"]["value"], "<5")
         self.assertEqual(self.run_rd(["2026-05-01"])["rd_2026-Q2"]["rows"][0]["values"]["Gesamt"]["value"], 1)
 
+    def test_follow_up_rows_and_interval(self):
+        prefix = "Stand am Stichtag (Intervall "
+        for args, months in (((), 12), (("--follow-up-months", "6"), 6)):
+            result = self.run_rd(["2025-11-30"], *args)["rd_2025-Q4"]
+            items = [r["item"] for r in result["rows"] if r["section"] == "Follow-up (Fälle mit GFK2)"]
+            self.assertIn(f"{prefix}{months} Monate): fällig, überfällig (kein Follow-up im Intervall vor dem Stichtag)", items)
+        result = self.run_dnpm_default()
+        self.assertTrue(any(r["section"].startswith("Follow-up nach SOP-Intervall") for r in result["rows"]))
+
+    def run_dnpm_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "export.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump([{"case": "c0", "submittedAt": "2025-11-03T10:00:00", "site": "LE-A",
+                            "content": dnt.datenkranz("t0", submitted="2025-11-03")}], f)
+            out = os.path.join(tmp, "out")
+            with redirect_stderr(StringIO()):
+                mm.main([path, "--matrix", "dnpm", "--reference-date", "2026-11-01", "--output-dir", out])
+            with open(os.path.join(out, "dnpm", "dnpm_2025-Q4.json"), encoding="utf-8") as f:
+                return json.load(f)
+
     def test_the_oncology_matrices_take_the_scope(self):
         for args, scope, n in (((), "diagnoses", 3), (("--suppress-scope", "all"), "all", "<5")):
             with tempfile.TemporaryDirectory() as tmp:

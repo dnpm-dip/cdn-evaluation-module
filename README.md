@@ -134,6 +134,24 @@ count the same cases. `--suppress-scope all` suppresses every row as before. The
 showing the small non-diagnosis counts per LE (sex, age group, insurance, consent, durations of single cases, …)
 is acceptable; `--suppress-scope all` remains as the opt-out.
 
+Follow-up (sections `Follow-up (Fälle mit GFK2)`, `Dauer GFK2 bis erstes Follow-up`,
+`Follow-up: Pflichtfelder (Follow-up-Einträge aller Einreichungen)`, not diagnosis rows, so exact), the same
+schedule logic as the follow-up SOP metrics of the oncology matrix, with one interval for RD
+(`--follow-up-months`, default 12), all at `--reference-date`. The follow-ups are those of all submissions
+(`followUp.followUpRds[]`), each once.
+- Base: the cases with GFK2. `mit Follow-up`: at least one follow-up entry.
+- `Stand am Stichtag`, a partition of the base: `verstorben` (`vitalStatus` deceased in a follow-up, no further
+  follow-up due); `noch nicht fällig` (GFK2 less than one interval before the reference date); `fällig, aktuell`
+  (a `followUpDate` in the interval before the reference date); `fällig, überfällig` (none). `Follow-up aktuell,
+  von fälligen` = current / (current + overdue).
+- `Dauer GFK2 bis erstes Follow-up`: days from GFK2 to the earliest `followUpDate` on or after GFK2; count,
+  mean, median, quartiles (QUARTILE.INC), minimum, maximum.
+- Mandatory fields per follow-up entry: `followUpDate` readable, `vitalStatus` living or deceased,
+  `diagnosisEstablished` given; `deathDate` of the entries with `vitalStatus` deceased.
+
+The RD time series keeps its own follow-up block (`--follow-up-due-days`, "fällig: … innerhalb der Frist"); the
+quarterly matrices (`monthly_matrices.py --follow-up-months`) contain the sections above per period.
+
 Time series of the matrix's key figures, per quarter (default) or month (`--period`), in total and per Leistungserbringer, are
 computed from the same export by `scripts/rd_evaluation_matrix/rd_time_series.py`, also standard library
 only. It uses the functions of `rd_evaluation_matrix.py`, so that cases, LEs, the status of a case and the
@@ -215,7 +233,7 @@ on PROD) reads the export once and writes the results of both scripts per period
 and `<dir>/dnpm/dnpm_<period>.json` (`<period>` = `YYYY-Qn` or `YYYY-MM`). The first period is that of the
 earliest initial submission in the export, so there are no empty leading periods; `--from`/`--until`
 (`YYYY-MM` or `YYYY-Qn`) narrow the range. `--suppress-scope` (default `diagnoses`, see above and
-`scripts/dnpm_evaluation_matrix/README.md`) applies to both. `--reference-date` is the same for all periods. `scripts/monthly_matrices/fill_monthly.py` (openpyxl, outside of PROD) writes an xlsx next
+`scripts/dnpm_evaluation_matrix/README.md`) applies to both, `--follow-up-months` to the RD matrices. `--reference-date` is the same for all periods. `scripts/monthly_matrices/fill_monthly.py` (openpyxl, outside of PROD) writes an xlsx next
 to each result by `fill_template.py`. For oncology, a template is created from the rows on the first run
 (`<dir>/Auswertmatrix_MTB_Template.xlsx`, or `--dnpm-template`); its sheet "Rückfragen an LE" stays empty,
 since the oncology JSON contains no case keys (see `dnpm_<period>_rueckfragen.csv`).

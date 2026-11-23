@@ -21,6 +21,8 @@ shown unless it is the count of a single LE), and complementary
 cells with the same marker so that no suppressed count is the difference of shown ones (see suppressed_quantities).
 --suppress-scope diagnoses (default) suppresses only the diagnosis rows (DIAGNOSIS_SECTIONS, DIAGNOSIS_ITEMS) and
 shows every other count, share and duration exactly; --suppress-scope all suppresses every row.
+Follow-up (FU_SECTIONS): cases with GFK2 due, current or overdue at --reference-date with the interval
+--follow-up-months (default 12), days from GFK2 to the first follow-up, mandatory fields of the follow-ups.
 The xlsx is written from the JSON by fill_template.py (needs openpyxl).
 
 Example:
@@ -214,6 +216,19 @@ CASE_FIELDS = (
     ("followUp.diseaseProgression",     "Fälle mit Follow-up"),
     ("followUp.deathDate",              "Fälle mit Follow-up, verstorben"),
 )
+
+# Follow-up after GFK2, as the follow-up schedule of the oncology matrix (dnpm_evaluation_matrix.py): due one interval
+# after GFK2, current with a followUpDate in the interval before the reference date (--follow-up-months)
+FU_MONTHS = 12
+FU_DECEASED, FU_NOT_DUE, FU_CURRENT, FU_OVERDUE = (
+    "verstorben (kein Follow-up mehr fällig)", "noch nicht fällig (GFK2 weniger als ein Intervall vor dem Stichtag)",
+    "fällig, aktuell (Follow-up im Intervall vor dem Stichtag)", "fällig, überfällig (kein Follow-up im Intervall vor dem Stichtag)")
+FU_STATES = (FU_DECEASED, FU_NOT_DUE, FU_CURRENT, FU_OVERDUE)
+FU_SECTION = "Follow-up (Fälle mit GFK2)"
+FU_DAYS_SECTION = "Dauer GFK2 bis erstes Follow-up"
+FU_FIELDS_SECTION = "Follow-up: Pflichtfelder (Follow-up-Einträge aller Einreichungen)"
+FU_SECTIONS = (FU_SECTION, FU_DAYS_SECTION, FU_FIELDS_SECTION)
+FU_NOTE = "Follow-up (Abschnitte Follow-up (Fälle mit GFK2) und folgende):"
 
 # Problems to clarify with the LE, one entry per case (or submission)
 P_GFK1_AFTER_SUBMISSION = "GFK1 nach dem Einreichungsdatum"
@@ -577,9 +592,40 @@ class Evaluated:
     variants: list              # per variant: field -> filled
     problems: list = field(default_factory=list)   # (problem, detail)
     group: object = None        # disease group, with a linearisation
+    fu_entries: list = field(default_factory=list)  # the followUpRds of all submissions, each once
+    first_fu_days: object = None    # days from GFK2 to the first followUpDate from GFK2 on, None if none
+    fu_state: object = None     # FU_STATES at the reference date, None without GFK2
 
 
-def evaluate_case(case, reference_date, min_medical_days):
+def add_months(d, months):
+    """The same day months later (earlier if negative), the last of the month if that has fewer days"""
+    y, m = divmod(d.year * 12 + d.month - 1 + months, 12)
+    for day in (d.day, 30, 29, 28):
+        try:
+            return date(y, m + 1, day)
+        except ValueError:
+            continue
+
+
+def readable(s):
+    """A date, None if missing or unreadable"""
+    try:
+        return parse_date(s) if isinstance(s, str) else None
+    except ValueError:
+        return None
+
+
+def follow_up_state(gfk2, fu_dates, deceased, reference_date, months=FU_MONTHS):
+    """The follow-up state of a case with GFK2 at the reference date (FU_STATES)"""
+    if deceased:
+        return FU_DECEASED
+    if add_months(gfk2, months) > reference_date:
+        return FU_NOT_DUE
+    current = any(d <= reference_date and add_months(d, months) > reference_date for d in fu_dates)
+    return FU_CURRENT if current else FU_OVERDUE
+
+
+def evaluate_case(case, reference_date, min_medical_days, follow_up_months=FU_MONTHS):
     latest = case.latest
     meta = latest["metaData"]
     diagnosis = latest["case"]["diagnosisRd"]
@@ -687,6 +733,12 @@ def evaluate_case(case, reference_date, min_medical_days):
             follow_up.get("deathDate") is not None if follow_up and follow_up.get("vitalStatus") == "deceased" else None
         ),
     }
+    # the follow-ups of all submissions (a node may send only the latest one with each), each once
+    fu_entries = list({json.dumps(f, sort_keys=True): f for s in case.submissions
+                       for f in ((s.get("followUp") or {}).get("followUpRds") or []) if isinstance(f, dict)}.values())
+    fu_dates = sorted({d for d in (readable(f.get("followUpDate")) for f in fu_entries) if d})
+    gfk2 = min(d for d, _ in later) if later else None
+    deceased = any(f.get("vitalStatus") == "deceased" for f in fu_entries)
     molecular = latest.get("molecular") or {}
     variants = [
         {name: v.get(name) not in (None, "", []) for name, _ in VARIANT_FIELDS}
@@ -731,6 +783,9 @@ def evaluate_case(case, reference_date, min_medical_days):
         case_fields            = case_fields,
         variants               = variants,
         problems               = problems,
+        fu_entries             = fu_entries,
+        first_fu_days          = next(((d - gfk2).days for d in fu_dates if d >= gfk2), None) if gfk2 else None,
+        fu_state               = follow_up_state(gfk2, fu_dates, deceased, reference_date, follow_up_months) if gfk2 else None,
     )
 
 
@@ -790,7 +845,7 @@ def quartiles(values):
     return q1, q2, q3
 
 
-def matrix_rows(cases, losses, problem_counts, with_groups, months=()):
+def matrix_rows(cases, losses, problem_counts, with_groups, months=(), follow_up_months=FU_MONTHS):
     """The rows of the matrix for a set of cases; the same rows for every set"""
     rows = []
     total = len(cases)
@@ -942,6 +997,36 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=()):
                 count(s, group, lambda e: e.group == group, block, f"Fälle ({s})")
                 for status in CASE_STATUSES:
                     count(s, f"{group}: {status}", lambda e: e.case_status == status, of_group, f"Fälle {group}")
+
+    with_gfk2 = [e for e in cases if e.fu_state is not None]
+    s = FU_SECTION
+    count(s, "mit Follow-up (followUpRds, alle Einreichungen)", lambda e: bool(e.fu_entries), with_gfk2, "Fälle mit GFK2")
+    for state in FU_STATES:
+        count(s, f"Stand am Stichtag (Intervall {follow_up_months} Monate): {state}", lambda e: e.fu_state == state,
+              with_gfk2, "Fälle mit GFK2")
+    count(s, "Follow-up aktuell, von fälligen", lambda e: e.fu_state == FU_CURRENT,
+          [e for e in with_gfk2 if e.fu_state in (FU_CURRENT, FU_OVERDUE)], "Fälle mit fälligem Follow-up")
+    s = FU_DAYS_SECTION
+    count(s, "Dauer berechenbar (Follow-up ab GFK2)", lambda e: e.first_fu_days is not None, with_gfk2, "Fälle mit GFK2")
+    days = sorted(e.first_fu_days for e in with_gfk2 if e.first_fu_days is not None)
+    q1, median, q3 = quartiles(days) if days else (None, None, None)
+    for item, value in (("Mittelwert", statistics.mean(days) if days else None), ("Median", median),
+                        ("1. Quartil", q1), ("3. Quartil", q3),
+                        ("Minimum", min(days, default=None)), ("Maximum", max(days, default=None))):
+        rows.append(Row(s, f"{item} (Tage)", VALUE, n=rounded(value), support=len(days)))
+    s = FU_FIELDS_SECTION
+    entries = {(e.key, i): f for e in cases for i, f in enumerate(e.fu_entries)}
+    all_entries = frozenset(entries)
+    add(s, "Follow-up-Einträge gesamt", len(entries), members=all_entries)
+
+    def entry_count(item, pred, of=all_entries, base_label="Follow-up-Einträge"):
+        hits = frozenset(k for k in of if pred(entries[k]))
+        add(s, item, len(hits), len(of), base_label, hits, frozenset(of))
+    entry_count("followUpDate lesbar", lambda f: readable(f.get("followUpDate")) is not None)
+    entry_count("vitalStatus living oder deceased", lambda f: f.get("vitalStatus") in ("living", "deceased"))
+    entry_count("diagnosisEstablished angegeben (true/false)", lambda f: isinstance(f.get("diagnosisEstablished"), bool))
+    entry_count("deathDate, von Einträgen mit vitalStatus deceased", lambda f: bool(f.get("deathDate")),
+                frozenset(k for k, f in entries.items() if f.get("vitalStatus") == "deceased"), "Einträge verstorben")
 
     s = "Füllgrad optionaler Felder (Fälle)"
     for name, base_label in CASE_FIELDS:
@@ -1177,7 +1262,7 @@ def small(n, min_cell):
 # ---------------------------------------------------------------------------------------------
 
 def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medical_days=14,
-        suppress_scope=SUPPRESS_DIAGNOSES):
+        suppress_scope=SUPPRESS_DIAGNOSES, follow_up_months=FU_MONTHS):
     if suppress_scope not in SUPPRESS_SCOPES:
         raise ValueError(f"suppress_scope must be one of {SUPPRESS_SCOPES}: {suppress_scope}")
     cases, tests, without_initial, submitters = build_cases(rows, start, end)
@@ -1190,7 +1275,7 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
     evaluated = []
     for case in cases:
         try:
-            evaluated.append(evaluate_case(case, reference_date, min_medical_days))
+            evaluated.append(evaluate_case(case, reference_date, min_medical_days, follow_up_months))
         except (KeyError, TypeError, ValueError) as error:
             problem(case.le, P_UNREADABLE, case.key, case.latest.get("metaData", {}).get("tanC"), repr(error))
 
@@ -1237,9 +1322,10 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
     # the reasons by month only where the export has them, else the section would be all zeros
     reasons_exported = any(e.consent_reason != REASON_NOT_EXPORTED for e in evaluated)
     months = sorted({e.initial_month for e in evaluated}) if reasons_exported else ()
-    entities = {TOTAL: matrix_rows(evaluated, losses(les), counts(les), with_groups, months)}
+    entities = {TOTAL: matrix_rows(evaluated, losses(les), counts(les), with_groups, months, follow_up_months)}
     for le in les:
-        entities[le] = matrix_rows([e for e in evaluated if e.le == le], losses([le]), counts([le]), with_groups, months)
+        entities[le] = matrix_rows([e for e in evaluated if e.le == le], losses([le]), counts([le]), with_groups, months,
+                                   follow_up_months)
 
     if start or end:
         until = date.fromordinal(end.toordinal() - 1) if end else None
@@ -1284,6 +1370,9 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         "Vorbefunde: jeder Vortest in case.priorRds zählt (je Art und Jahr einmal je Fall). Das DIP übermittelt "
         "höchstens einen Vorbefund je Fall (den letzten Befund vor dem Indikationsboard) und immer mit Datum.",
         f"Medizinische Bearbeitungsdauer unter {min_medical_days} Tagen wird als unplausibel kurz zurückgefragt.",
+        FU_NOTE + f" Stichtag {reference_date.isoformat()}, Intervall {follow_up_months} Monate (--follow-up-months): fällig ab "
+        "einem Intervall nach der GFK2, aktuell mit einem followUpDate im Intervall vor dem Stichtag, sonst überfällig; "
+        "Verstorbene (vitalStatus deceased) sind nicht mehr fällig. Follow-ups aller Einreichungen, jedes einmal.",
         f"LE: Standort des Exports, sonst metaData.submission.submitterId. LEs: " + ", ".join(labels[le] for le in les) + ".",
     ]
     if start or end:
@@ -1353,6 +1442,9 @@ def main(argv=None):
                              "exact, or in all rows (default: %(default)s)")
     parser.add_argument("--min-medical-days", type=int, default=14,
                         help="shorter GFK1-GFK2 durations are listed for clarification (default: %(default)s)")
+    parser.add_argument("--follow-up-months", type=int, default=FU_MONTHS,
+                        help="follow-up interval: due one interval after GFK2, current with a follow-up in the interval "
+                             "before the reference date (default: %(default)s)")
     parser.add_argument("--delimiter", default=";", help="CSV delimiter (default: %(default)s, for Excel with German locale)")
     parser.add_argument("--output", default="rd-evaluation-matrix", help="output path without extension (default: %(default)s)")
     args = parser.parse_args(argv)
@@ -1360,7 +1452,7 @@ def main(argv=None):
     rows, failures = load_submissions(args.input)
     heads = load_linearisation(args.orphanet) if args.orphanet else None
     result = run(rows, failures, heads, args.start, args.end, args.reference_date, args.min_cell, args.min_medical_days,
-                 args.suppress_scope)
+                 args.suppress_scope, args.follow_up_months)
 
     with open(f"{args.output}.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)

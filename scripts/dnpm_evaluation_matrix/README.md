@@ -92,17 +92,24 @@ date (the title gives the months of the first and last initial submission, or th
   the tables are still for the KDK and the LE concerned, not for publication.
 - **Suppression scope** (`--suppress-scope`, default `diagnoses`): with `diagnoses` only the diagnosis rows are
   suppressed, every other count and statistic (also the time series, the notes and durations of single cases)
-  is exact, also below k. The diagnosis rows (`DIAGNOSIS_SECTIONS`, `is_diagnosis_row()` in the script) are
-  the sections `Tumorentität (Hauptdiagnose ICD-10-GM, gruppiert)`, `Tumorentität (sequenzierte Fälle)`,
-  `Diagnose: Kodierung` (ICD-O-3 behaviour, topography, germline diagnosis) and
-  `GFK2 (MTB): Ergebnis nach Tumorentität (sequenzierte Fälle)`. Not diagnosis rows: stage, grading, ECOG,
-  `davon hereditär`, molecular findings, fill rates. The rules above apply within the diagnosis rows,
-  plus, since the other rows are now exact: `DIAGNOSIS_PARTITIONS` (the behaviour codes with the cases
-  with one; the per-entity rows "GFK2 dokumentiert" and "Therapie- oder Studienempfehlung", whose sums are
-  shown exactly in `GFK2 (MTB): Ergebnis`) are groups too; where the other cells of a group with one
-  suppressed cell are zeros, a zero (with a nonzero base) is suppressed, so `<k` can also be 0; and a
-  base that is the count of another diagnosis row (`DIAGNOSIS_BASES`, e.g. `sequenzierte Fälle <entity>`)
-  is suppressed where that count is. `--suppress-scope all` suppresses every row; its output equals that of
+  is exact, also below k. The diagnosis rows (`DIAGNOSIS_SECTIONS`, `DIAGNOSIS_ITEMS`, `is_diagnosis_row()` in
+  the script) are the sections `Tumorentität (Hauptdiagnose ICD-10-GM, gruppiert)`, `Tumorentität (sequenzierte
+  Fälle)`, `Diagnose: Kodierung` (ICD-O-3 behaviour, topography, germline diagnosis),
+  `GFK2 (MTB): Ergebnis nach Tumorentität (sequenzierte Fälle)`, `Tumorstadium (M-Kategorie aus
+  tnmClassifications)` and `Grading (Differenzierungsgrad)`, and the rows `Fälle | davon hereditär (diseaseType
+  hereditary)`, `Molekulare Befunde (sequenzierte Fälle) | Keimbahnvariante berichtet (genomicSource germline)`
+  and, since they are the cases minus a diagnosis category, the fill rates `case.diagnosisOd.grading`,
+  `case.diagnosisOd.tnmClassifications` and `TNM oder additionalClassification` of `Füllgrad optionaler Felder
+  (Fälle)`. Not diagnosis rows: ECOG, the other molecular findings and fill rates, follow-up. The rules above
+  apply within the diagnosis rows, plus, since the other rows are now exact: `DIAGNOSIS_PARTITIONS` (the
+  behaviour codes with the cases with one; the per-entity rows "GFK2 dokumentiert" and "Therapie- oder
+  Studienempfehlung", whose sums are shown exactly in `GFK2 (MTB): Ergebnis`) and `DIAGNOSIS_KEY_PARTITIONS`
+  (fill rate of grading + grading `nicht angegeben`, fill rate of TNM + `kein TNM`, each = the exact cases) are
+  groups too; the stage and grading categories are partitions of the exact cases; where the other cells of a
+  group with one suppressed cell are zeros, a zero (with a nonzero base) is suppressed, so `<k` can also be 0;
+  rows that are equal when another count is 0 (`DIAGNOSIS_LINKED`: `TNM oder additionalClassification` and the
+  TNM fill rate) are suppressed together; and a base that is the count of another diagnosis row
+  (`DIAGNOSIS_BASES`, e.g. `sequenzierte Fälle <entity>`) is suppressed where that count is. `--suppress-scope all` suppresses every row; its output equals that of
   the script before the option (only the JSON field `suppress_scope` is new).
 - Robustness: `null` where a list or object is expected is read as empty; a case that still can't be read
   (no `metaData.molecularBoardDecisionDate`, no `birthDate`, no `case.diagnosisOd`, no dated initial)
@@ -143,8 +150,36 @@ Base "Fälle" = all cases of the entity and period unless stated otherwise.
 | Molekulare Befunde | molecular transmitted; ≥1 SNV/indel; ≥1 CNV; germline variant reported; TMB given; TMB ≥ 10 mut/Mb; HRD status given; HRD high; statistics of SNV and CNV per case and of TMB | `molecular.smallVariants[]`, `copyNumberVariants[]`, `genomicSource`, `complexBiomarkers[].tmb/hrdHigh` (max TMB if several) |
 | Follow-up und Vitalstatus | with followup submission; with follow-up content; deceased; lastContactDate; metachronous tumours | `followUpOds[].vitalStatus/lastContactDate/metachroneDiagnoses` |
 | Follow-up: Erstmeldung mindestens N Monate vor dem Stichtag (N = 4, 8, 12, 18, 24) | cases; without / with 1, 2, 3, ≥4 followup submissions; deceased | the intervals of the stakeholders' query document |
+| Follow-up nach SOP-Intervall (sequenzierte Fälle mit GFK2), … je Kategorie | follow-up category 1/2/3; state at the reference date (deceased, not yet due, current, overdue), in total and per category; current of due; category 2 beyond 24 months; no contact for 12 months (lost to follow-up) | see *Follow-up after the MTB* below |
+| Dauer GFK2 bis erstes Follow-up | computable; only follow-ups before GFK2; mean, median, Q1, Q3, min, max in days | GFK2 → earliest `followUpDate` on or after GFK2 |
+| Follow-up: Pflichtfelder nach SOP | per follow-up entry: `followUpDate` readable, `vitalStatus` living/deceased, ECOG 0-5; per follow-up therapy: `therapyStartDate` readable, `substances`; `therapyResponseDate` of therapies with a response | `followUpOds[]`, `followUpOds[].therapies[]` |
+| Follow-up: Ansprechen, Allgemeinzustand und Vitalstatus | response documented of started recommendations begun ≥ 8 weeks before the reference date; ECOG 0-5 in the latest follow-up; vital status of the latest follow-up (deceased, living, not given, no follow-up) | `therapyResponse`, `ecogPerformanceStatusScore`, `vitalStatus` |
 | Füllgrad optionaler Felder (Fälle, Vortherapien, Therapieempfehlungen, Follow-up-Therapien, SNV/Indel, CNV) | share of entries with the field filled | the optional fields of OncologyCase, Plan, FollowUp, Molecular (see rows) |
 | Rückfragen an LE | count per problem (cases; non-convertible: submissions) | below |
+
+### Follow-up after the MTB (follow-up SOP of the network)
+
+The follow-up schedule and mandatory fields as defined by the network's MTB follow-up SOP, as far as the
+Datenkranz carries them. Base: the sequenced cases with a GFK2 date (`with_mtb` with
+`plan.carePlanOd.molecularBoardDecisionDate`); all at `--reference-date`; follow-ups of all submissions, each once
+(`followUpOds[]` deduplicated). Not diagnosis rows: exact with `--suppress-scope diagnoses`.
+
+| Term | Definition |
+|---|---|
+| Kategorie 1 | an implemented recommendation (a follow-up therapy whose `reference` is a recommendation, as in *Umsetzung*); interval 3 months |
+| Kategorie 2 | a therapy or study recommendation, none started; interval 3 months, from 24 months after GFK2 on 12 months (the SOP limits the follow-up of recommendations not started to two years; the case is then followed up for vital status like category 3) |
+| Kategorie 3 | no therapy or study recommendation (no target); interval 12 months |
+| verstorben | `vitalStatus` deceased in any follow-up: no further follow-up due |
+| noch nicht fällig | GFK2 less than one interval before the reference date |
+| fällig, aktuell | due, and a `followUpDate` in the interval before the reference date (after reference − interval, up to the reference date) |
+| fällig, überfällig | due, and no such `followUpDate` |
+| Follow-up aktuell, von fälligen | current / (current + overdue): the share of due follow-ups that are up to date |
+| lost to follow-up | not deceased, GFK2 ≥ 12 months before the reference date, and no `followUpDate` or `lastContactDate` in the 12 months before it ("no contact for a year"). `followUpDate` is the date of the documentation, used as the date of contact |
+| Ansprechen dokumentiert | `therapyResponse` given, of the started recommendations whose `therapyStartDate` is ≥ 8 weeks before the reference date (first staging 6-8 weeks after the start) |
+| Pflichtfelder | the fields the SOP's documentation guide marks as mandatory for a follow-up and that the DTO has: follow-up date, vital status, ECOG, therapy start, substance, response date of a response (`deathDate` of the deceased in *Füllgrad*) |
+
+The time series and the quarterly matrices contain these rows like every other section; by the period of the
+initial submission, a recent period has more cases not yet due.
 
 ### Zeitstrahl (process timeline relative to GFK1)
 
@@ -234,6 +269,11 @@ C81-C96, D45-D47; sonstige bösartige (other C); in situ D00-D09; gutartig/unsic
 | UICC stage group, lines of therapy | not in the schema: stage only as TNM components (M category derived heuristically), prior therapies as a list (counted, not lines) |
 | Operations recommended (`interventionRecommended`, `suitableInterventions`) | DIP writes false / nothing ("Not in MTB-KDS") |
 | `preventiveMeasures`, `hpoTerms`, `phenotypes`, `diagnosticAssessment` (hereditary), `therapyResponseSource`, `priorDiagnostics[].simpleVariants` | in the BfArM schema, not in the DTOs (or always empty) |
+| Follow-up SOP: cost coverage (application, approval) | no field in the Datenkranz (KDK schema / DTO); category 1 of the SOP is therefore approximated by "a recommendation started" |
+| Follow-up SOP: therapy status (not done, on-going, stopped, completed), dose density, partial/complete implementation | `FollowUp.Therapy` has only start, end, termination reason, substances, response; the DIP maps only therapies with a period |
+| Follow-up SOP: reason a recommended therapy was not started, actual study enrolment | not in the DTO (see above) |
+| Follow-up SOP: staging dates and the first response 6-8 weeks after the start, assessment method (RECIST/RANO), radiological validation | the DIP writes only the latest response per therapy (`therapyResponseDate`, `therapyResponse`), no method or validation flag |
+| Follow-up SOP: ECOG at each follow-up, non-MTB therapies after the MTB in detail | the Datenkranz holds one follow-up per submission (the DIP writes the latest), so only the ECOG of the follow-ups transmitted; non-MTB therapies only as "Therapie ohne Bezug zu einer Empfehlung" |
 | Lost to follow-up | DIP sends no `followUp` at all when the latest follow-up is "lost to follow-up"; `lastContactDate` is filled only from an earlier such follow-up. The rows on `lastContactDate` are therefore labelled "früher lost to follow-up, Kontakt wieder aufgenommen": they see only patients lost earlier whose follow-up resumed, not those currently lost |
 | `noScopeJustification` | the DIP mapping never fills it (`researchConsents: []` when a reason is given); the reason comes from the export column `reasonResearchConsentMissing` |
 | Which parameters corrections change (stakeholder wish) | possible by diffing consecutive submissions, not implemented |

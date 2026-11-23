@@ -432,6 +432,46 @@ class RowTests(unittest.TestCase):
         self.assertEqual((get(result, s, "followUp.deathDate"), get(result, s, "followUp.deathDate", field="base")), (0, 1))
 
 
+class FollowUpTests(unittest.TestCase):
+    """Follow-up after GFK2 at the reference date (2026-10-30), interval --follow-up-months"""
+
+    def test_state_days_and_mandatory_fields(self):
+        def fu(d, vital="living", **extra):
+            return {"followUpDate": d, "diagnosisEstablished": False, "vitalStatus": vital, **extra}
+        rows = [
+            # GFK2 2025-02-10, follow-up 2 months before the reference: current
+            row("a", datenkranz("a1")), row("a", datenkranz("a2", type_="followup", submitted="2026-09-01",
+                                                            follow_up=fu("2026-08-30")), "2026-09-01T10:00:00"),
+            # follow-up 15 months before: overdue (an earlier follow-up of another submission counts once)
+            row("b", datenkranz("b1", follow_up=fu("2025-07-01"))),
+            # GFK2 2 months before the reference: not due
+            row("c", datenkranz("c1", gfk1="2026-07-01", plan_date="2026-08-30", submitted="2026-09-01")),
+            # deceased, without deathDate and diagnosisEstablished
+            row("d", datenkranz("d1", follow_up={"followUpDate": "2025-12-01", "vitalStatus": "deceased"})),
+            # no GFK2: not in the follow-up rows
+            row("e", datenkranz("e1", plan_date=None, assessment="undiagnosed")),
+        ]
+        result = run(rows)
+        s = rdm.FU_SECTION
+        state = [get(result, s, f"Stand am Stichtag (Intervall 12 Monate): {st}") for st in rdm.FU_STATES]
+        self.assertEqual(state, [1, 1, 1, 1])
+        self.assertEqual(get(result, s, "mit Follow-up (followUpRds, alle Einreichungen)"), 3)
+        self.assertEqual(get(result, s, "mit Follow-up (followUpRds, alle Einreichungen)", field="base"), 4)
+        self.assertEqual(get(result, s, "Follow-up aktuell, von fälligen", field="percent"), 50.0)
+        s = rdm.FU_DAYS_SECTION
+        self.assertEqual(get(result, s, "Dauer berechenbar (Follow-up ab GFK2)"), 3)
+        self.assertEqual(get(result, s, "Minimum (Tage)"), 141.0)             # 2025-02-10 to 2025-07-01
+        s = rdm.FU_FIELDS_SECTION
+        self.assertEqual(get(result, s, "Follow-up-Einträge gesamt"), 3)
+        self.assertEqual(get(result, s, "diagnosisEstablished angegeben (true/false)"), 2)
+        self.assertEqual(get(result, s, "deathDate, von Einträgen mit vitalStatus deceased"), 0)
+        self.assertEqual(get(result, s, "deathDate, von Einträgen mit vitalStatus deceased", field="base"), 1)
+        # with an interval of 24 months no case is due yet; the rows are exact in the diagnosis scope
+        longer = rdm.run(rows, [], HEADS, None, None, REFERENCE, min_cell=5, follow_up_months=24)
+        self.assertEqual(get(longer, rdm.FU_SECTION, f"Stand am Stichtag (Intervall 24 Monate): {rdm.FU_NOT_DUE}"), 3)
+        self.assertTrue(any(n.startswith(rdm.FU_NOTE) for n in longer["notes"]))
+
+
 class DiseaseGroupTests(unittest.TestCase):
 
     def test_groups_per_block_add_up_to_the_case_count(self):

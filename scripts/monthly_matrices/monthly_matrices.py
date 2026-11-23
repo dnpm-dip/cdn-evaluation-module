@@ -120,7 +120,7 @@ def run_rd(path, args):
     for start in periods_:
         output = os.path.join(out_dir, f"{RD}_{label(start, args.period)}")
         result = rd.run(rows, failures, heads, start, next_period(start, args.period), args.reference_date, args.min_cell,
-                        args.min_medical_days, args.suppress_scope)
+                        args.min_medical_days, args.suppress_scope, args.follow_up_months)
         # as rd_evaluation_matrix.main writes it
         with open(f"{output}.json", "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
@@ -179,6 +179,9 @@ def main(argv=None):
                         help="suppress small counts only in the diagnosis rows or in all rows (default: %(default)s)")
     parser.add_argument("--min-medical-days", type=int, default=14,
                         help="shorter GFK1-GFK2 durations are listed for clarification (default: %(default)s)")
+    parser.add_argument("--follow-up-months", type=int, default=rd.FU_MONTHS,
+                        help="RD: follow-up interval after GFK2 (oncology: the intervals of the follow-up SOP) "
+                             "(default: %(default)s)")
     parser.add_argument("--delimiter", default=";", help="CSV delimiter (default: %(default)s)")
     parser.add_argument("--output-dir", default="monthly", help="default: %(default)s")
     args = parser.parse_args(argv)

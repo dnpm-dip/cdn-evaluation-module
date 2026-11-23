@@ -179,6 +179,19 @@ class LeTests(unittest.TestCase):
         few = cases(datenkranz("t1"), min_cell=5)
         self.assertEqual(get(few, "Bearbeitungsdauer medizinisch", "Median (Tage)"), "<5")
 
+    def test_gesamt_is_not_suppressed_unless_it_is_a_single_les_count(self):
+        rows = ([row(f"a{i}", datenkranz(f"a{i}", gender="male" if i < 2 else "female"), site="A") for i in range(8)]
+                + [row(f"b{i}", datenkranz(f"b{i}", gender="male" if i < 1 else "female"), site="B") for i in range(8)])
+        result = run(rows, min_cell=5)
+        # m: 2 + 1, small in both LEs, shown in Gesamt; so is w (13), which no longer protects m in Gesamt
+        self.assertEqual([get(result, "Geschlecht", "m", e) for e in (rdm.TOTAL, "A", "B")], [3, "<5", "<5"])
+        self.assertEqual([get(result, "Geschlecht", "w", e) for e in (rdm.TOTAL, "A", "B")], [13, "<5", "<5"])
+        self.assertEqual(get(result, "Geschlecht", "m", field="percent"), 18.8)
+        # a count of LE A alone (the other LE 0): Gesamt would give it away, so it is suppressed as well
+        single = run(rows[:8] + [row(f"b{i}", datenkranz(f"b{i}", gender="female"), site="B") for i in range(8)],
+                     min_cell=5)
+        self.assertEqual([get(single, "Geschlecht", "m", e) for e in (rdm.TOTAL, "A", "B")], ["<5", "<5", 0])
+
     def test_losses_per_le(self):
         failures = [rdm.Failure("UKT", '["UKT", "p9", "e1"]', "t9", "conversion failed: x")]
         result = run([row("a", datenkranz("t1"), site="UKT")], failures=failures)

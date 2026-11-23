@@ -16,7 +16,8 @@ Output (<output> without extension):
   <output>.json          every value, in total and per LE, the cases to clarify with the LEs, notes
   <output>.csv           long table LE | Abschnitt | Kategorie | Einheit | Wert | Bezug | Basis | Anteil
   <output>_rueckfragen.csv  cases to clarify with their LE (contains case keys: only for the LEs)
-Counts below --min-cell (default 5) are suppressed ("<5") in all outputs except the Rückfragen, and complementary
+Counts of an LE below --min-cell (default 5) are suppressed ("<5") in all outputs except the Rückfragen (Gesamt is
+shown unless it is the count of a single LE), and complementary
 cells with the same marker so that no suppressed count is the difference of shown ones (see suppressed_quantities).
 The xlsx is written from the JSON by fill_template.py (needs openpyxl).
 
@@ -925,9 +926,11 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=()):
     return rows
 
 
-# Small-cell suppression. Primary: counts 1..min_cell-1. Complementary: a suppressed count must not be
+# Small-cell suppression, to protect the cases of a single LE: Gesamt (the sum over all LEs) isn't suppressed itself.
+# Primary: counts 1..min_cell-1 of an LE. Complementary: a suppressed count must not be
 # recoverable as a difference, so in each group of counts with a known sum relation in which exactly one count is
-# suppressed, the smallest other nonzero count is suppressed as well, until no group changes. Groups:
+# suppressed, the smallest other nonzero count of an LE is suppressed as well, until no group changes; a Gesamt cell
+# only where no LE cell is left (a row with a single nonzero LE: Gesamt is that LE's count). Groups:
 #   (a) a row across the LE columns and Gesamt (Gesamt = sum of the LEs), for the counts and for the bases;
 #   (b) per column, a partition: disjoint counts that make up a set that is shown too (the base of the rows of a
 #       section, the bases of a section that make up another count, or a count and its complement).
@@ -1001,7 +1004,7 @@ def suppression_groups(entities, cells):
 def suppressed_quantities(entities, min_cell):
     """The quantity of each count cell, the sizes, and the quantities to suppress (primary and complementary)"""
     cells, size = quantities(entities)
-    hidden = {q for q in cells.values() if 0 < size[q] < min_cell}
+    hidden = {q for q in cells.values() if q[0] != TOTAL and 0 < size[q] < min_cell}
     if not hidden:
         return cells, size, hidden
     # the case count of all LEs only where the LE columns need it
@@ -1015,23 +1018,43 @@ def suppressed_quantities(entities, min_cell):
                 continue
             candidates = [q for q in members if q not in hidden and size[q] > 0 and (rule == "a" or q != protected)]
             if candidates:
-                hidden.add(min(candidates, key=lambda q: (size[q], q[0] == TOTAL)))
+                of_les = [q for q in candidates if q[0] != TOTAL]
+                hidden.add(min(of_les or candidates, key=lambda q: size[q]))
                 changed = True
     return cells, size, hidden
 
 
-def suppressed(row, min_cell, hide_value=False, hide_base=False):
-    """(value, base, percent) of a row, a suppressed count replaced by '<min_cell', its percentage left out"""
+def suppressed(row, min_cell, hide_value=None, hide_base=None):
+    """(value, base, percent) of a row, a suppressed count or statistic replaced by '<min_cell', its percentage left
+    out. What to hide is decided by the caller (suppressed_quantities, hidden_statistic); None: by size alone
+    (a count 1..min_cell-1, a statistic from fewer values), as rd_time_series uses it"""
     hidden = f"<{min_cell}"
     if row.unit == VALUE:
-        return (hidden if row.n is not None and row.support < min_cell else row.n), None, None
+        if hide_value is None:
+            hide_value = row.n is not None and row.support < min_cell
+        return (hidden if row.n is not None and hide_value else row.n), None, None
     n, base = row.n, row.base
+    if hide_value is None:
+        hide_value = 0 < n < min_cell
+    if hide_base is None:
+        hide_base = base is not None and 0 < base < min_cell
     pct = percent(n, base)
-    if hide_value or 0 < n < min_cell:
+    if hide_value:
         n, pct = hidden, None
-    if base is not None and (hide_base or 0 < base < min_cell):
+    if base is not None and hide_base:
         base, pct = hidden, None
     return n, base, pct
+
+
+def hidden_statistic(entities, name, i, min_cell):
+    """A statistic from fewer than min_cell values is hidden for an LE, and for Gesamt only if its values all come
+    from one LE (it would be that LE's)"""
+    row = entities[name][i]
+    if row.n is None or row.support >= min_cell:
+        return False
+    if name != TOTAL:
+        return True
+    return sum(1 for e, rows in entities.items() if e != TOTAL and rows[i].support) <= 1
 
 
 def small(n, min_cell):
@@ -1114,15 +1137,16 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
                   if dates else "gesamter Export")
 
     cells, size, hidden = suppressed_quantities(entities, min_cell)
-    primary = sum(1 for q in cells.values() if 0 < size[q] < min_cell)
+    primary = sum(1 for q in cells.values() if q in hidden and 0 < size[q] < min_cell)
     complementary = sum(1 for q in cells.values() if q in hidden) - primary
     template_rows = entities[TOTAL]
     result_rows = []
     for i, r in enumerate(template_rows):
         values = {}
         for name, entity_rows in entities.items():
-            n, base, pct = suppressed(entity_rows[i], min_cell, cells.get((name, i, "value")) in hidden,
-                                      cells.get((name, i, "base")) in hidden)
+            hide_value = (hidden_statistic(entities, name, i, min_cell) if r.unit == VALUE
+                          else cells.get((name, i, "value")) in hidden)
+            n, base, pct = suppressed(entity_rows[i], min_cell, hide_value, cells.get((name, i, "base")) in hidden)
             values[name] = {"value": n, "base": base, "percent": pct}
         result_rows.append({"key": r.key, "section": r.section, "item": r.item, "unit": r.unit,
                             "base_label": r.base_label, "values": values})
@@ -1132,12 +1156,14 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
     notes = [
         f"{result_rows[0]['values'][TOTAL]['value']} Fälle (Episoden mit Erstmeldung) ausgewertet, Stand je Fall aus der "
         "letzten Nicht-Test-Einreichung; Spezifikation: docs/rd-evaluation-matrix.txt.",
-        f"{small(tests, min_cell)} Testeinreichungen verworfen.",
-        (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso Anteile mit Basis unter "
-         f"{min_cell} und Kennzahlen der Bearbeitungsdauer aus weniger als {min_cell} Werten (nicht in den Rückfragen). "
+        f"{tests} Testeinreichungen verworfen.",
+        (f"In den Spalten der LEs sind Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso Anteile "
+         f"mit Basis unter {min_cell} und Kennzahlen der Bearbeitungsdauer aus weniger als {min_cell} Werten (nicht in "
+         "den Rückfragen); Gesamt (Summe über alle LEs) wird gezeigt. "
          f"Ergänzend unterdrückt, ebenfalls als <{min_cell}: in jeder Zeile über die LEs und Gesamt und in jeder "
          "Aufteilung einer Spalte (Kategorien, die sich zu einer gezeigten Zahl summieren), in der sonst genau eine Zelle "
-         "unterdrückt wäre, die kleinste weitere Zelle über 0, bis keine unterdrückte Zahl als Differenz berechenbar ist "
+         "unterdrückt wäre, die kleinste weitere Zelle einer LE über 0, bis keine unterdrückte Zahl als Differenz "
+         "berechenbar ist; Gesamt nur, wenn die Zahl allein von einer LE stammt "
          f"({complementary} Zellen zusätzlich zu {primary}); eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr Fälle zählen."
          if min_cell > 1 else "Keine Zellen unterdrückt (--min-cell 1)."),
         "Diagnosestatus 'offen': Undiagnostiziert und noch keine Fallkonferenz nach dem Indikationsboard (GFK2); "

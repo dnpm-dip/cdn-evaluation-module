@@ -1,0 +1,1767 @@
+<title>{{TITEL}}</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Asap:wght@500;600;700&family=Nunito:wght@400;600;700&display=swap">
+<style>
+/* Aufbau: dunkle Leiste (Marke, Navigation), Kontextzeile (Zeitraum, Datenstand), darunter Liste links und Detailansicht rechts.
+   Gestaltung flach im DNPM-Farbschema: Haarlinien statt Karten, keine Schatten, kein Verlauf, Radius 0–2 px.
+   Farbskalen: DNPM-Farbschema, Kontrast nach WCAG geprüft. */
+:root {
+  --bg: #FAFAFA; --surface: #FAFAFA; --surface-2: #F1F1F3; --surface-3: #E9EAEC; --field: #FFFFFF;
+  --line: #DADCDF; --line-strong: #C9CCD0; --rule: #2B2F36;
+  --fg: #1A1D21; --fg-2: #3B3F45; --muted: #5C6067;
+  --accent: #2B2F36; --accent-fg: #FAFAFA; --accent-soft: #ECEDEF; --coral: #F65552; --coral-ink: #BC3734; --fokus: #BC3734;
+  --leiste: #2B2F36; --leiste-fg: #FAFAFA; --leiste-muted: #AEB2B5; --leiste-line: #4C5159;
+  /* Status (Diagnosestatus) */
+  --st-diag: #F65552; --st-unklar: #C7B1BD; --st-undiag: #5C6067; --st-offen: #E3E4E6;
+  --on-diag: #1A1D21; --on-unklar: #1A1D21; --on-undiag: #FAFAFA; --on-offen: #1A1D21;
+  /* Kategorien in fester Reihenfolge; Nachbarn unterscheiden sich in der Helligkeit */
+  --s1: #2B2F36; --s2: #F65552; --s3: #3F7A93; --s4: #C7B1BD; --s5: #A3302E; --s6: #D9A54A; --s7: #8A8D92; --s8: #E3E4E6;
+  --on-s1: #FAFAFA; --on-s2: #1A1D21; --on-s3: #FAFAFA; --on-s4: #1A1D21; --on-s5: #FAFAFA; --on-s6: #1A1D21; --on-s7: #1A1D21; --on-s8: #1A1D21;
+  /* Balken, Bezugsstrich, Vergleichspunkt, Hantel */
+  --bar: #6E727A; --ref: #1A1D21; --dot: #F65552;
+  --db-neu: #2B2F36; --db-alt: #2B2F36; --db-auf: #6E727A; --db-ab: #F65552; --db-ln: #C9CCD0;
+  --warn: #BC3734; --warn-soft: #FDEDEC; --ok: #2B2F36; --fehler: #B0302D; --fehler-soft: #FBE7E6;
+  --seq: #2B2F36; --seq-lo: #F1F1F3; --seq-hi: #8A8D92; --heat-k: .42%;
+  --hatch: #9EA2A7; --mark: #EADFE5;
+  --font: "Nunito", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-h: "Asap", "Nunito", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1E232A; --surface: #1E232A; --surface-2: #262C34; --surface-3: #2F363F; --field: #171B21;
+    --line: #3A4049; --line-strong: #4C5159; --rule: #C9CDD3;
+    --fg: #ECEFF4; --fg-2: #C9CDD3; --muted: #A3A9B1;
+    --accent: #ECEFF4; --accent-fg: #1E232A; --accent-soft: #2F363F; --coral: #F65552; --coral-ink: #FF7A77; --fokus: #F65552;
+    --leiste: #2B2F36; --leiste-fg: #ECEFF4; --leiste-muted: #AEB2B5; --leiste-line: #4C5159;
+    --st-diag: #F65552; --st-unklar: #C7B1BD; --st-undiag: #6B7079; --st-offen: #3A4049;
+    --on-diag: #1A1D21; --on-unklar: #1A1D21; --on-undiag: #FAFAFA; --on-offen: #ECEFF4;
+    --s1: #D3D6DB; --s2: #F65552; --s3: #37748D; --s4: #C7B1BD; --s5: #B8403D; --s6: #D9A54A; --s7: #868B93; --s8: #3A4049;
+    --on-s1: #1A1D21; --on-s2: #1A1D21; --on-s3: #FAFAFA; --on-s4: #1A1D21; --on-s5: #FAFAFA; --on-s6: #1A1D21; --on-s7: #1A1D21; --on-s8: #ECEFF4;
+    --bar: #9AA0A8; --ref: #ECEFF4; --dot: #F65552;
+    --db-neu: #ECEFF4; --db-alt: #ECEFF4; --db-auf: #9AA0A8; --db-ab: #F65552; --db-ln: #4C5159;
+    --warn: #FF7A77; --warn-soft: #3A2526; --ok: #ECEFF4; --fehler: #FF8A87; --fehler-soft: #3D2324;
+    --seq: #8A9098; --seq-lo: #262C34; --seq-hi: #5C6067; --heat-k: .5%;
+    --hatch: #7E838B; --mark: #4A3A44;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1E232A; --surface: #1E232A; --surface-2: #262C34; --surface-3: #2F363F; --field: #171B21;
+  --line: #3A4049; --line-strong: #4C5159; --rule: #C9CDD3;
+  --fg: #ECEFF4; --fg-2: #C9CDD3; --muted: #A3A9B1;
+  --accent: #ECEFF4; --accent-fg: #1E232A; --accent-soft: #2F363F; --coral: #F65552; --coral-ink: #FF7A77; --fokus: #F65552;
+  --leiste: #2B2F36; --leiste-fg: #ECEFF4; --leiste-muted: #AEB2B5; --leiste-line: #4C5159;
+  --st-diag: #F65552; --st-unklar: #C7B1BD; --st-undiag: #6B7079; --st-offen: #3A4049;
+  --on-diag: #1A1D21; --on-unklar: #1A1D21; --on-undiag: #FAFAFA; --on-offen: #ECEFF4;
+  --s1: #D3D6DB; --s2: #F65552; --s3: #37748D; --s4: #C7B1BD; --s5: #B8403D; --s6: #D9A54A; --s7: #868B93; --s8: #3A4049;
+  --on-s1: #1A1D21; --on-s2: #1A1D21; --on-s3: #FAFAFA; --on-s4: #1A1D21; --on-s5: #FAFAFA; --on-s6: #1A1D21; --on-s7: #1A1D21; --on-s8: #ECEFF4;
+  --bar: #9AA0A8; --ref: #ECEFF4; --dot: #F65552;
+  --db-neu: #ECEFF4; --db-alt: #ECEFF4; --db-auf: #9AA0A8; --db-ab: #F65552; --db-ln: #4C5159;
+  --warn: #FF7A77; --warn-soft: #3A2526; --ok: #ECEFF4; --fehler: #FF8A87; --fehler-soft: #3D2324;
+  --seq: #8A9098; --seq-lo: #262C34; --seq-hi: #5C6067; --heat-k: .5%;
+  --hatch: #7E838B; --mark: #4A3A44;
+  color-scheme: dark;
+}
+html { background: var(--bg); }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+* { box-sizing: border-box; }
+.wrap { max-width: 1440px; margin: 0 auto; padding-block: 0 48px;
+  padding-left: max(40px, env(safe-area-inset-left, 0px)); padding-right: max(40px, env(safe-area-inset-right, 0px)); }
+h1, h2, h3, h4, p { margin: 0; }
+h1, h2, h3, h4 { font-family: var(--font-h); font-weight: 600; letter-spacing: -0.1px; }
+h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.2px; }
+h2 { font-size: 18px; line-height: 1.3; text-wrap: balance; }
+h3 { font-size: 14px; }
+a { color: var(--accent); text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); text-underline-offset: 3px; }
+a:hover { color: var(--coral-ink); text-decoration-color: currentColor; }
+:focus-visible { outline: 2px solid var(--fokus); outline-offset: 2px; border-radius: 0; }
+.muted { color: var(--muted); } .klein { font-size: 12px; } .num { font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.stapel-v { display: flex; flex-direction: column; gap: 32px; min-width: 0; }
+.reihe { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.zwischen { justify-content: space-between; }
+
+/* Leiste oben: Marke, Navigation; darunter Kontext */
+.leiste { background: var(--leiste); color: var(--leiste-fg); border-bottom: 1px solid var(--leiste-line); }
+.leiste-in { max-width: 1440px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: stretch; gap: 0 32px; min-height: 64px;
+  padding-left: max(40px, env(safe-area-inset-left, 0px)); padding-right: max(40px, env(safe-area-inset-right, 0px)); }
+.marke-titel { display: flex; align-items: center; gap: 10px; color: var(--leiste-fg); text-decoration: none; }
+.marke-titel::before { content: ""; width: 10px; height: 10px; background: var(--coral); flex: none; }
+.marke-titel:hover { color: var(--leiste-fg); }
+.nav { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0 4px; flex: 1 1 auto; min-width: 0; }
+.nav a { display: flex; align-items: center; padding: 0 14px; text-decoration: none; color: var(--leiste-muted); border-bottom: 3px solid transparent; border-top: 3px solid transparent; font-weight: 600; font-size: 14px; }
+.nav a:hover { color: var(--leiste-fg); }
+.nav a[aria-current="page"] { color: var(--leiste-fg); border-bottom-color: var(--coral); }
+.nav a:focus-visible { outline-color: var(--coral); outline-offset: -4px; }
+.nav .werkzeuge { margin-left: auto; display: flex; flex-wrap: wrap; align-items: stretch; }
+.nav .werkzeuge a { font-weight: 400; font-size: 13px; padding: 0 10px; }
+.kontext { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; justify-content: space-between; padding: 12px 0; min-height: 57px; border-bottom: 1px solid var(--line); }
+#stand { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+#ansicht { margin-top: 32px; min-width: 0; }
+.fuss { margin-top: 48px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12px; max-width: 110ch; }
+
+/* Schalter und Knöpfe */
+.schalter { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; font-size: 12px; color: var(--muted); }
+.schalter:empty { display: none; }
+.schalter .gruppe { display: inline-flex; align-items: center; gap: 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 0; overflow: hidden; background: var(--field); }
+.seg button, .seg a { border: 0; background: transparent; color: var(--fg); font: inherit; font-size: 13px; line-height: 20px; padding: 5px 12px; cursor: pointer; border-left: 1px solid var(--line-strong); text-decoration: none; font-variant-numeric: tabular-nums; }
+.seg > :first-child { border-left: 0; }
+.seg button:hover, .seg a:hover { background: var(--surface-2); color: var(--fg); }
+.seg [aria-pressed="true"], .seg [aria-current="page"] { background: var(--accent); color: var(--accent-fg); font-weight: 700; }
+.seg [aria-pressed="true"]:hover, .seg [aria-current="page"]:hover { background: var(--accent); color: var(--accent-fg); }
+.seg button:disabled { color: var(--muted); cursor: default; }
+.seg button:disabled[aria-pressed="true"] { color: var(--accent-fg); }
+.seg :focus-visible { outline-offset: -3px; }
+.btn { border: 1px solid var(--line-strong); background: var(--field); color: var(--fg); font: inherit; font-size: 13px; line-height: 20px; padding: 5px 12px; border-radius: 0; cursor: pointer; }
+.btn:hover { border-color: var(--accent); }
+.btn.haupt { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 700; }
+.btn.klein { padding: 3px 10px; font-size: 12px; line-height: 18px; }
+.btn[disabled] { opacity: .55; cursor: default; }
+.btn.link { border: 0; background: none; color: var(--accent); padding: 0; text-decoration: underline; }
+input[type="search"], input[type="text"], select, textarea { font: inherit; color: var(--fg); background: var(--field); border: 1px solid var(--line-strong); border-radius: 0; padding: 7px 10px; max-width: 100%; }
+input[type="search"]:focus, input[type="text"]:focus, select:focus, textarea:focus { border-color: var(--accent); }
+textarea { width: 100%; resize: vertical; }
+label.feld { display: inline-flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+
+/* Reiter Stand | Verlauf */
+.reiter { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--line); font-size: 14px; font-weight: 600; margin-top: 16px; }
+.reiter a { padding: 8px 16px; text-decoration: none; color: var(--muted); border-bottom: 3px solid transparent; margin-bottom: -1px; }
+.reiter a:first-child { padding-left: 0; }
+.reiter a:hover { color: var(--fg); }
+.reiter a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--rule); }
+
+/* Liste links und Detail */
+.raster { display: grid; grid-template-columns: minmax(232px, 288px) minmax(0, 1fr); gap: 40px; align-items: start; }
+.seite { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 12px; padding-right: 24px; border-right: 1px solid var(--line); }
+.liste { position: relative; max-height: calc(100vh - 180px); overflow-y: auto; margin-left: -10px; padding-left: 10px; scrollbar-width: thin; }
+.liste details { border-top: 1px solid var(--line); }
+.liste details:first-child { border-top: 0; }
+.liste details > summary { cursor: pointer; padding: 8px 4px 8px 0; font-weight: 600; font-size: 13px; line-height: 1.35; list-style-position: inside; }
+.liste details > summary::marker { color: var(--muted); font-size: 10px; }
+.liste details[open] > summary { padding-bottom: 4px; }
+.liste details[open] { padding-bottom: 8px; }
+.liste details > summary small, .liste a small { font-weight: 400; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.liste a.z { display: flex; justify-content: space-between; gap: 8px; padding: 4px 8px 4px 18px; margin-left: -10px; text-decoration: none; color: var(--fg-2); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; border-left: 2px solid transparent; }
+.liste a.z.kind { padding-left: 30px; color: var(--muted); }
+.liste a.z.le { padding-left: 8px; color: var(--fg); border-top: 1px solid var(--line); }
+.liste a.z.le:first-child { border-top-color: transparent; }
+.liste a.z:hover, .liste details > summary:hover { color: var(--fg); background: var(--surface-2); }
+.liste a.z[aria-current="true"] { background: var(--surface-2); color: var(--fg); font-weight: 700; border-left-color: var(--coral); }
+.liste a.z[aria-current="true"] + a.z.le { border-top-color: transparent; }
+.seite > .seg { align-self: flex-start; }
+.seite-mobil { display: none; }
+@media (max-width: 820px) {
+  .raster { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .seite { position: static; padding-right: 0; border-right: 0; border-bottom: 1px solid var(--line); padding-bottom: 16px; }
+  .seite.zu { display: none; }
+  .seite-mobil { display: block; }
+  .liste { max-height: 50vh; }
+}
+
+/* Abschnitte: Haarlinien statt Karten */
+.karte { min-width: 0; border-top: 1px solid var(--line); padding-top: 20px; }
+.karte > h2, .karte > .reihe > h2 { margin-bottom: 4px; }
+.karte > h2 + .unter, .karte > .reihe + .unter { margin-top: 0; }
+.unter { color: var(--muted); font-size: 13px; margin-bottom: 16px; max-width: 100ch; }
+.kopfzeile { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: flex-end; justify-content: space-between; }
+.kopfzeile h2 { font-size: 28px; line-height: 1.2; letter-spacing: -0.3px; margin-top: 4px; }
+.kopfblock + .karte, .kpis + .karte, #ansicht > .stapel-v > .karte:first-child { border-top: 0; padding-top: 0; }
+#ansicht > .stapel-v > .karte:first-child > h2, #ansicht > .stapel-v > div:first-child:not([class]) > h2:first-child,
+#ansicht > .stapel-v > .stapel-v:first-child > :first-child > h2:first-child { font-size: 28px; line-height: 1.2; letter-spacing: -0.3px; margin-bottom: 8px; }
+.kopfblock + .karte { margin-top: -8px; }
+.pfad { font-size: 13px; color: var(--muted); }
+.pfad a { color: var(--muted); }
+.hinweis { border-left: 2px solid var(--line-strong); padding: 8px 12px; background: var(--surface-2); border-radius: 0; font-size: 13px; max-width: 110ch; }
+.hinweis.achtung { border-left-color: var(--warn); background: var(--warn-soft); }
+.hinweis.fehler { border-left-color: var(--fehler); background: var(--fehler-soft); }
+/* Kennzahl-Leiste: 2px-Linie oben, Haarlinien zwischen den Werten */
+/* erste Spalte bündig mit dem Seitenrand: Raster um die Innenabstände nach links schieben und den Überstand abschneiden */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(176px, 1fr)); gap: 0; border-top: 2px solid var(--rule); border-bottom: 1px solid var(--line); overflow: hidden; margin-left: -24px; clip-path: inset(0 0 0 24px); }
+.kpi { padding: 16px 24px 16px 24px; margin-left: -1px; border-left: 1px solid var(--line); margin-top: -1px; border-top: 1px solid var(--line); text-decoration: none; color: inherit; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+a.kpi:hover { background: var(--surface-2); color: inherit; }
+a.kpi:hover .w { color: var(--coral-ink); }
+.kpi .t { font-size: 13px; color: var(--muted); }
+.kpi .w { font-family: var(--font-h); font-size: 32px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.15; letter-spacing: -0.3px; }
+.kpi .b { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.marke { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 2px; border: 1px solid var(--line-strong); color: var(--muted); white-space: nowrap; }
+.marke::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.marke.hoch { color: var(--fg); border-color: var(--coral); background: var(--warn-soft); }
+.marke.hoch::before { background: var(--coral); }
+.marke.hoch::before { border-radius: 0; transform: rotate(45deg); }
+.marke.mittel::before { background: none; border: 2px solid currentColor; }
+.marke.niedrig::before { background: none; border: 1px solid currentColor; }
+.chip { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 2px; background: var(--surface-2); color: var(--fg); text-decoration: none; white-space: nowrap; }
+a.chip:hover { background: var(--accent-soft); }
+.flag { display: inline-block; font-size: 11px; font-weight: 700; line-height: 16px; padding: 0 5px; border-radius: 2px; margin-left: 4px; white-space: nowrap; border: 1px solid currentColor; vertical-align: 1px; letter-spacing: 0.1px; }
+.flag.warn { color: var(--fg); border-color: var(--coral); background: var(--warn-soft); }
+.flag.fehler { color: var(--on-diag); border-color: var(--coral); background: var(--coral); }
+.flag.info { color: var(--muted); text-decoration: none; }
+.tab td.r .flag { margin: 0 6px 0 0; }
+.tab td.r .flag:last-child { margin: 0 0 0 6px; }
+a.flag.info:hover { color: var(--coral-ink); }
+.unt-text { color: var(--muted); font-style: italic; }
+.unt-text.unt::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; border: 1px solid var(--hatch); background: repeating-linear-gradient(135deg, var(--hatch) 0 1.5px, transparent 1.5px 4px); }
+
+/* Tabellen: Kopf mit 2px-Linie, Zeilen mit Haarlinien */
+.tab-wrap { overflow-x: auto; max-width: 100%; border: 0; border-radius: 0; background: transparent; }
+table.tab { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+.tab th, .tab td { padding: 8px 12px 8px 0; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+.tab th:last-child, .tab td:last-child { padding-right: 0; }
+.tab thead th { background: var(--bg); font-size: 12px; font-weight: 600; color: var(--muted); vertical-align: bottom; position: sticky; top: 0; border-bottom: 2px solid var(--rule); }
+.tab .r { text-align: right; }
+/* LE-Profil: gleiche Spalten in allen Abschnitten */
+.tab.profil { table-layout: fixed; min-width: 520px; }
+.tab.profil th:nth-child(2) { width: 152px; } .tab.profil th:nth-child(3) { width: 136px; padding-left: 16px; } .tab.profil th:nth-child(4) { width: 152px; }
+.tab.profil td:nth-child(3) { padding-left: 16px; }
+.tab th button { all: unset; cursor: pointer; }
+.tab th button:hover { color: var(--fg); }
+.tab th button:focus-visible { outline: 2px solid var(--fokus); outline-offset: 2px; }
+.tab th[aria-sort] { color: var(--fg); }
+.tab th[aria-sort] button::after { content: " ▲"; font-size: 8px; }
+.tab th[aria-sort="descending"] button::after { content: " ▼"; }
+.tab tbody tr:hover td { background: var(--surface-2); }
+.tab td.null { color: var(--muted); font-style: italic; }
+.tab td a { text-decoration-color: color-mix(in srgb, currentColor 28%, transparent); }
+.tab td a:hover, .tab td a:focus-visible { text-decoration-color: currentColor; }
+.tab td.r { white-space: nowrap; }
+.tab .fest { position: sticky; left: 0; background: var(--bg); z-index: 1; }
+.tab thead .fest { background: var(--bg); z-index: 2; }
+.tab tr.summe td { font-weight: 700; border-bottom: 2px solid var(--line-strong); }
+.tab tr.abschnitt td { font-family: var(--font-h); font-weight: 600; font-size: 12px; color: var(--muted); padding-top: 16px; text-transform: none; }
+td.heat { text-align: right; position: relative; background: color-mix(in srgb, var(--seq) calc(var(--v, 0) * var(--heat-k)), var(--surface)); white-space: nowrap; padding-left: 8px; }
+.tab td.heat:last-child { padding-right: 8px; }
+.tab td.heat { padding-right: 8px; }
+td.heat a { color: inherit; text-decoration: none; display: block; }
+td.heat a:hover { color: var(--coral-ink); text-decoration: underline; }
+td.heat.spanne { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--hatch) 32%, var(--surface)) 0 2px, var(--surface) 2px 6px); }
+td.heat.unt { font-size: 12px; color: var(--muted); }
+td.heat.leer { color: var(--muted); background: var(--surface); }
+td.heat.auff::after { content: ""; position: absolute; top: 0; right: 0; border-style: solid; border-width: 0 7px 7px 0; border-color: transparent var(--fg-2) transparent transparent; }
+
+/* Balkenzeilen: Name | Spur | Wert */
+.bz-liste { display: grid; grid-template-columns: minmax(48px, max-content) minmax(0, 1fr) max-content; column-gap: 16px; }
+.bz { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; padding: 4px 0; text-decoration: none; color: inherit; font-size: 13px; }
+.bz:hover { background: var(--surface-2); }
+.bz > a:not(.n) { text-decoration: none; color: inherit; display: block; }
+.bz .n { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bz a.n, a.bz .n { color: var(--fg); text-decoration: none; }
+.bz a.n:hover { color: var(--coral-ink); text-decoration: underline; }
+.bz .v { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 13px; }
+.bz a.v:hover { color: var(--coral-ink); }
+.bz .v small { color: var(--muted); font-size: 12px; }
+.bz .diff { display: block; width: 100%; height: 12px; }
+.bz.aus { color: var(--muted); }
+.bz.aus .spur .bk { opacity: .45; }
+.spur { position: relative; height: 12px; background: var(--surface-3); border-radius: 0; }
+.spur .bk { position: absolute; left: 0; top: 0; bottom: 0; background: var(--bar); border-radius: 0; min-width: 1px; }
+.spur .iq { position: absolute; top: 3px; height: 6px; background: var(--bar); opacity: .55; border-radius: 0; }
+.spur .md { position: absolute; top: 1px; width: 10px; height: 10px; margin-left: -5px; background: var(--dot); border-radius: 50%; z-index: 1; }
+.sp, .spur .sp, .ut { background: repeating-linear-gradient(135deg, var(--hatch) 0 1.5px, transparent 1.5px 4px); border: 1px solid var(--hatch); border-radius: 0; }
+.spur .sp { position: absolute; top: 0; bottom: 0; min-width: 5px; }
+.spur .ut { position: absolute; left: 0; top: 0; bottom: 0; width: 14px; }
+.spur .ref { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; background: var(--ref); }
+.achse { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.achse .sk { position: relative; height: 18px; border-top: 1px solid var(--line-strong); }
+.achse .sk span { position: absolute; top: 3px; transform: translateX(-50%); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.achse .sk span:first-child { transform: none; }
+.achse .sk span:last-child { transform: translateX(-100%); }
+.stapel { display: flex; gap: 1px; height: 18px; }
+.stapel .sg { flex: 1 1 0; min-width: 2px; border-radius: 0; overflow: hidden; font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sg.diag { background: var(--st-diag); color: var(--on-diag); } .sg.unklar { background: var(--st-unklar); color: var(--on-unklar); } .sg.undiag { background: var(--st-undiag); color: var(--on-undiag); }
+.sg.offen { background: var(--st-offen); color: var(--on-offen); }
+.sg.v1 { background: var(--s1); color: var(--on-s1); } .sg.v2 { background: var(--s2); color: var(--on-s2); } .sg.v3 { background: var(--s3); color: var(--on-s3); }
+.sg.v4 { background: var(--s4); color: var(--on-s4); } .sg.v5 { background: var(--s5); color: var(--on-s5); } .sg.v6 { background: var(--s6); color: var(--on-s6); }
+.sg.g7 { background: var(--s7); color: var(--on-s7); }
+.sg.ohne { background: var(--surface); color: var(--fg); box-shadow: inset 0 0 0 1px var(--muted); }
+.sg.unt { border: 1px solid var(--hatch); background: repeating-linear-gradient(135deg, var(--hatch) 0 1.5px, transparent 1.5px 4px); }
+.sg.unt.fest { flex: 0 0 7px; }
+.sg > span { display: block; overflow: hidden; }
+.sg .zu-eng { visibility: hidden; }
+.zd-raster { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 8px; row-gap: 2px; align-items: center; }
+.zd-raster .zd-m { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.zd-raster .stapel { height: 12px; gap: 1px; }
+.zd-raster .stapel .sg { font-size: 0; border-radius: 0; }
+.legende { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--fg-2); margin: 0 0 12px; }
+.legende span { display: inline-flex; align-items: center; gap: 6px; }
+.legende i { width: 12px; height: 12px; border-radius: 0; display: inline-block; flex: none; }
+.legende i.pkt { border-radius: 50%; width: 10px; height: 10px; }
+.legende i.schraff { border: 1px solid var(--hatch); background: repeating-linear-gradient(135deg, var(--hatch) 0 1.5px, transparent 1.5px 4px); }
+/* Minibalken im LE-Profil: Punkt = LE, Strich = alle LE */
+.minibalken { position: relative; display: inline-block; width: 96px; height: 12px; background: var(--surface-3); border-radius: 0; vertical-align: middle; }
+.minibalken .bk { position: absolute; left: 0; top: 0; bottom: 0; background: transparent; border-radius: 0; }
+.minibalken .bk::after { content: ""; position: absolute; right: -5px; top: 1px; width: 10px; height: 10px; border-radius: 50%; background: var(--dot); }
+.minibalken .sp { position: absolute; top: 0; bottom: 0; min-width: 3px; }
+.minibalken .ref { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--ref); }
+.diff { position: relative; display: inline-block; width: 112px; height: 10px; vertical-align: middle; background: linear-gradient(var(--line-strong), var(--line-strong)) 50% 0 / 1px 100% no-repeat; }
+.diff i { position: absolute; top: 1px; bottom: 1px; border-radius: 0; }
+.diff i.neg { background: var(--db-ab); } .diff i.pos { background: var(--db-auf); }
+/* Hantel: offener Kreis = vorher, gefüllt = jetzt */
+.db-spur { position: relative; height: 18px; }
+.db-spur::before { content: ""; position: absolute; left: 0; right: 0; top: 8px; height: 1px; background: var(--line); }
+.db-spur .ln { position: absolute; top: 8px; height: 2px; border-radius: 0; background: var(--db-ln); }
+.db-spur .ln.ab { background: var(--db-ab); } .db-spur .ln.auf { background: var(--db-auf); }
+.db-spur .pt { position: absolute; top: 4px; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: var(--db-neu); border: 0; }
+.db-spur .pt.alt { background: var(--surface); border: 2px solid var(--db-alt); }
+.db-spur .sp { position: absolute; top: 4px; height: 10px; min-width: 6px; border-radius: 0; }
+.db-spur .ut { position: absolute; top: 4px; height: 10px; width: 14px; margin-left: -7px; border-style: dashed; border-radius: 0; }
+.aend-liste { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 0; font-size: 13px; margin-bottom: 8px; }
+.aend-liste > a, .aend-liste > span { padding: 8px 0; border-top: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
+.aend-liste > span > a:first-child { font-weight: 700; color: var(--fg); }
+.aend-liste > span > strong { font-weight: 700; }
+.aend-liste > .r { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 600; text-decoration: none; color: var(--fg); padding-left: 16px; }
+.aend-liste > a.r:hover { color: var(--coral-ink); text-decoration: underline; }
+.mc { position: relative; min-width: 0; }
+.mc svg { display: block; overflow: visible; }
+.mc text { font-size: 12px; fill: var(--muted); font-variant-numeric: tabular-nums; font-family: var(--font); }
+.mc .gitter { stroke: var(--line); stroke-width: 1; } .mc .achse0 { stroke: var(--line-strong); stroke-width: 1; }
+.mc rect[style^="fill:var"] { stroke: var(--surface); stroke-width: 1px; }
+.mc .ziel:hover { fill: var(--fg); fill-opacity: .06; }
+
+/* Aufklappbares, Einträge, Fragen */
+details.block { border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; }
+details.block:last-of-type { border-bottom: 1px solid var(--line); }
+details.block + details.block { margin-top: 0; }
+details.block > summary { cursor: pointer; padding: 12px 0; font-family: var(--font-h); font-weight: 600; font-size: 15px; display: flex; gap: 8px; justify-content: space-between; align-items: baseline; list-style: none; }
+details.block > summary::-webkit-details-marker { display: none; }
+details.block > summary::before { content: ""; width: 0; height: 0; border-style: solid; border-width: 5px 0 5px 7px; border-color: transparent transparent transparent var(--muted); flex: none; align-self: center; margin-right: 4px; transition: transform .12s; }
+details.block[open] > summary::before { transform: rotate(90deg); }
+details.block > summary > :first-child { margin-right: auto; }
+details.block > summary small { font-family: var(--font); font-weight: 400; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+details.block > summary:hover { color: var(--coral-ink); }
+details.block[open] > summary { border-bottom: 0; }
+details.block[open] { padding-bottom: 16px; }
+details.block > .tab-wrap { border: 0; border-radius: 0; }
+details.schlicht > summary { cursor: pointer; color: var(--fg-2); font-size: 13px; font-weight: 600; }
+details.schlicht > summary:hover { color: var(--coral-ink); }
+textarea.rf-text { display: block; margin-top: 12px; min-height: 22em; font: inherit; font-size: 14px; line-height: 1.5; max-width: 110ch; background: var(--field); color: var(--fg); white-space: pre; overflow-x: auto; }
+@media (max-width: 600px) { textarea.rf-text { font-size: 12px; } }
+pre.text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 8px 0 0; max-width: 110ch; }
+pre.code { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12px; margin: 0; padding: 8px 12px; background: var(--surface-2); border-radius: 0; border-left: 2px solid var(--line-strong); }
+mark { background: var(--mark); color: inherit; border-radius: 0; padding: 0 1px; }
+dl.fakten { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; font-size: 13px; }
+dl.fakten dt { color: var(--muted); } dl.fakten dd { margin: 0; overflow-wrap: anywhere; }
+.eintrag { background: transparent; border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 16px 0; min-width: 0; }
+.eintrag + .eintrag { margin-top: 0; }
+p.glossar { margin: 0; padding: 12px 0; border-top: 1px solid var(--line); max-width: 110ch; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); }
+p.glossar strong { color: var(--fg); }
+p.glossar:first-of-type { margin-top: 8px; }
+.eintrag h3 { margin-bottom: 4px; font-size: 15px; }
+.eintrag p { max-width: 110ch; overflow-wrap: anywhere; }
+.todo-z { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 4px 8px; padding: 12px 0; border-top: 1px solid var(--line); }
+.todo-z:first-child { border-top: 0; }
+.todo-z.erl .txt { text-decoration: line-through; color: var(--muted); }
+.todo-z input[type="checkbox"] { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); }
+.todo-z input[type="text"] { width: 100%; font-size: 12px; padding: 4px 8px; }
+.frage-ein { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.frage-ein textarea { flex: 1 1 320px; min-height: 48px; }
+.vorschlaege { display: flex; flex-wrap: wrap; gap: 8px; }
+.vorschlaege button { font: inherit; font-size: 12px; text-align: left; border: 1px solid var(--line-strong); background: var(--field); color: var(--fg); border-radius: 0; padding: 4px 10px; cursor: pointer; }
+.vorschlaege button:hover { border-color: var(--accent); }
+.antwort { background: transparent; border: 0; border-top: 2px solid var(--rule); border-radius: 0; padding: 16px 0 0; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.antwort .q { font-family: var(--font-h); font-weight: 600; font-size: 16px; overflow-wrap: anywhere; }
+.antwort .a { max-width: 100ch; overflow-wrap: anywhere; }
+.antwort .a p + p, .antwort .a ul + p, .antwort .a p + ul { margin-top: 8px; }
+.antwort .a ul { margin: 0; padding-left: 20px; }
+.antwort .a code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); padding: 0 3px; border-radius: 0; }
+.antwort .fuss2 { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; justify-content: space-between; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; }
+.denkt { color: var(--muted); display: inline-flex; gap: 8px; align-items: center; }
+.denkt::before { content: ""; width: 8px; height: 8px; background: var(--coral); animation: puls 1.1s ease-in-out infinite; }
+@keyframes puls { 50% { opacity: .25; } }
+.schritte { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.dia { min-width: 0; margin: 0; }
+.dia h4 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.dia .zeichnung { overflow-x: auto; max-width: 100%; }
+.dia svg { display: block; max-width: none; font-family: var(--font); }
+.dia .notiz { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.lade { display: grid; place-items: center; height: 304px; border-radius: 0; background: transparent; border-top: 2px solid var(--rule); border-bottom: 1px solid var(--line); color: var(--muted); animation: puls 1.6s ease-in-out infinite; }
+.tip { position: fixed; z-index: 50; max-width: min(320px, calc(100vw - 16px)); background: var(--leiste); color: #FAFAFA; font-size: 12px; line-height: 1.45; padding: 8px 10px; border-radius: 0; border-top: 2px solid var(--coral); white-space: pre-line; pointer-events: none; font-variant-numeric: tabular-nums; }
+@media (max-width: 820px) {
+  .wrap, .leiste-in { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  .leiste-in { gap: 0 16px; min-height: 0; }
+  .marke-titel { min-height: 48px; }
+  .nav { flex-basis: 100%; margin-left: -10px; }
+  .nav a { padding: 10px 10px 7px; }
+  .nav .werkzeuge { margin-left: 0; }
+  #ansicht { margin-top: 24px; }
+  .kopfzeile h2 { font-size: 22px; }
+}
+@media (max-width: 520px) {
+  .bz-liste { column-gap: 8px; grid-template-columns: minmax(40px, max-content) minmax(96px, 1fr) minmax(0, max-content); }
+  /* Hantel: Wert unter die Spur, damit die Spur die ganze Breite bekommt */
+  .bz-liste.hantel { grid-template-columns: minmax(40px, max-content) minmax(0, 1fr); }
+  .bz-liste.hantel .bz { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .bz-liste.hantel .bz .v { grid-column: 2; text-align: left; white-space: normal; }
+  .tab.profil { min-width: 0; }
+  .tab.profil th:nth-child(3), .tab.profil td:nth-child(3) { display: none; }
+  .tab.profil th:nth-child(3) { width: 0; padding: 0; }
+  .tab.profil th:nth-child(2) { width: 108px; } .tab.profil th:nth-child(4) { width: 100px; }
+  .nav a { padding: 10px 8px 7px; }
+  .nav .werkzeuge a { padding: 10px 7px 7px; }
+  .bz .v { white-space: normal; }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpis { margin-left: -16px; clip-path: inset(0 0 0 16px); }
+  .kpi { padding: 12px 12px 12px 16px; }
+  .kpi .w { font-size: 26px; }
+  .stapel-v { gap: 24px; }
+}
+@media (prefers-reduced-motion: reduce) { .denkt::before, .lade { animation: none; } details.block > summary::before { transition: none; } }
+</style>
+
+<div id="app">
+<header class="leiste">
+  <div class="leiste-in">
+    <div class="marke-titel"><h1>{{TITEL}}</h1></div>
+    <nav class="nav" id="nav" aria-label="Ansichten">
+      <a href="#start" data-v="start">Übersicht</a>
+      <a href="#a" data-v="a">{{NAV_A}}</a>
+      <a href="#le" data-v="le">LE</a>
+      <span class="werkzeuge"></span>
+    </nav>
+  </div>
+</header>
+<div class="wrap">
+  <div class="kontext"><p id="stand">{{TEXT}}</p><div class="schalter" id="schalter"></div></div>
+  <main id="ansicht"><div class="lade" id="lade" aria-live="polite"><span id="lade-text">Datenbank wird geladen …</span></div></main>
+  <footer class="fuss muted" id="fuss">Nur Aggregate je LE. Unterdrückte Zellen („&lt;5“, schraffiert) werden nie als 0 gezeigt und nie zurückgerechnet. Mit ergänzender Unterdrückung kann eine unterdrückte Zelle auch 5 oder mehr Fälle zählen (feste Breite, keine Spanne); eine Spanne steht nur bei Dateien ohne ergänzende Unterdrückung. Eine Veränderung ist „n. b.“ (nicht berechenbar), sobald eine Seite unterdrückt ist.</footer>
+</div>
+</div>
+<div id="tip" class="tip" role="tooltip" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-asm.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6.16/dist/plot.umd.min.js"></script>
+<script>
+(function () {
+"use strict";
+
+/* ===================================================================== Grundlagen */
+const SQLJS_URL = window.__lokalSqlJsUrl;
+const ZR_KURZ = {};
+const NAV_A = (window.__jsonDash && window.__jsonDash.navA) || "Kennzahlen";
+const $ = (s, r) => (r || document).querySelector(s);
+/* Elemente bauen: Datenwerte landen immer als Textknoten im Dokument, nie als HTML */
+function h(tag, attrs, ...kinder) {
+  const el = document.createElement(tag);
+  if (attrs) for (const k of Object.keys(attrs)) {
+    const v = attrs[k];
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "style") el.style.cssText = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else el.setAttribute(k, String(v));
+  }
+  for (const kind of kinder.flat(Infinity)) {
+    if (kind == null || kind === false || kind === "") continue;
+    el.append(kind.nodeType ? kind : document.createTextNode(String(kind)));
+  }
+  return el;
+}
+const leeren = (el) => { while (el.firstChild) el.removeChild(el.firstChild); return el; };
+const nf0 = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 0 });
+const nf1 = new Intl.NumberFormat("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const nf2 = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 });
+const minus = (t) => t.replace("-", "−");
+const fz = (n) => (n == null ? "–" : minus(nf0.format(n)));
+const f1 = (n) => nf1.format(n);
+const fp = (p) => f1(p) + " %";
+const fzahl = (n) => (n == null ? "–" : minus(Number.isInteger(n) ? nf0.format(n) : nf2.format(n)));
+const vz = (v, f) => (v == null ? "–" : (v > 0 ? "+" : "") + (f || fz)(v));
+/* Anzeigetext einer Anzahl aus der Datenbank ('1234', '1–4', '63.5') mit deutschem Zahlenformat */
+function zahlText(t) {
+  if (t == null || t === "") return "–";
+  return String(t).replace(/\d+(\.\d+)?/g, (m) => (m.includes(".") ? nf2.format(+m) : nf0.format(+m)));
+}
+const istUntText = (t) => t != null && /^(unterdrückt|<5)$/.test(String(t).trim());
+const istUntZeile = (r) => !!r && !!r.unterdrueckt && r.wert == null && r.wert_min == null;
+/* Anteil: exakt, als Spanne (eine Zelle unterdrückt, ohne ergänzende Unterdrückung) oder leer */
+function anteilAus(p, lo, hi) {
+  if (p != null) return { art: "exakt", p, lo: p, hi: p, text: fp(p) };
+  if (lo != null && hi != null) {
+    const eng = f1(lo) === f1(hi);
+    return { art: "spanne", p: null, lo, hi, eng, text: eng ? fp(lo) : f1(lo) + "–" + f1(hi) + " %" };
+  }
+  return { art: "leer", text: "–", lo: null, hi: null, p: null };
+}
+const anteilW = (w) => (w ? anteilAus(w.anteil_prozent, w.anteil_prozent_min, w.anteil_prozent_max) : anteilAus());
+/* Anteil einer Kennzahl k aus einer View-Zeile (v_le_profil) */
+function anteil(r, k) {
+  if (!r) return anteilAus();
+  const a = anteilAus(r[k + "_prozent"], r[k + "_prozent_min"], r[k + "_prozent_max"]);
+  return a.art === "leer" && istUntText(r[k + "_text"]) ? { art: "unt", text: "unterdrückt", lo: null, hi: null, p: null } : a;
+}
+const mitte = (a) => (a.art === "leer" || a.lo == null || a.hi == null ? null : (a.lo + a.hi) / 2);
+const slug = (s) => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const kuerze = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
+function merke(k, v) { try { localStorage.setItem("json-dash-" + k, v); } catch (e) { /* ohne Speicher weiter */ } }
+function gemerkt(k) { try { return localStorage.getItem("json-dash-" + k); } catch (e) { return null; } }
+
+/* ===================================================================== Zustand */
+const S = {
+  zr: "gesamt", ds: "", r: { v: "start" }, kzSuche: "", kzModus: "anteil", ewModus: "anzahl", mrModus: "stapel", kzFac: {}, kzKat: {}, leAlle: false,
+  sortLe: { key: "le", dir: 1 }, rfLe: "", leZuletzt: "", rfPrio: "", rfSuche: "", wSuche: "", wHerkunft: "", todoWer: "", todoPrio: "", todoOffen: false,
+  offen: new Set(["Fälle", "Einwilligung", "Diagnosestatus (alle Fälle)", "Diagnoserate (abgeschlossene Fälle)", "WGS-Seq. Art (Fälle mit WGS/lrWGS)", "Meldebestätigungen"]),
+  modell: "schnell", verlauf: [], laeuft: null, merkLokal: [],
+};
+const D = {};           /* Daten aus der Datenbank */
+const F = { sample: undefined, downloads: undefined, db: undefined, user: undefined, uid: null, darf: null,
+            todo: new Map(), todoGeladen: false, merk: [], merkGeladen: false, nurLesen: false, dbHinweis: "" };
+let DB = null, BYTES = null, DBN = null, SQLLIB = null;   /* DBN: die Datei selbst (neuester Datenstand je Zeitraum); DB: die gezeigte Sicht */
+const DBS = new Map();                                    /* Sicht „Stand am Datenstand d“: Kopie mit umdefiniertem View zeitraum_aktuell */
+let ZR = ["gesamt"];
+function q(sql, params) {
+  const st = DB.prepare(sql);
+  try { if (params) st.bind(params); const out = []; while (st.step()) out.push(st.getAsObject()); return out; } finally { st.free(); }
+}
+/* Fragefeld und Leckschutz: immer auf der Datei selbst, unabhängig vom gezeigten Datenstand */
+function qN(sql, params) { const alt = DB; DB = DBN || DB; try { return q(sql, params); } finally { DB = alt; } }
+
+/* ===================================================================== Datenstände */
+const fDatum = (d) => (d && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d.slice(8, 10) + "." + d.slice(5, 7) + "." + d.slice(0, 4) : d || "–");
+const fDatumK = (d) => (d && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d.slice(8, 10) + "." + d.slice(5, 7) + "." : d || "–");
+const dsNeu = () => D.dsNeu;
+const dsFuer = (zr) => D.ds.filter((d) => D.dsZr.some((x) => x.datenstand === d.datenstand && x.zeitraum === zr)).map((d) => d.datenstand);
+/* Datenstand eines Zeitraums in der gezeigten Sicht: der jüngste bis zum gewählten (S.ds, leer = neuester) */
+function dsAktiv(zr) { const l = dsFuer(zr || S.zr).filter((d) => !S.ds || d <= S.ds); return l.length ? l[l.length - 1] : null; }
+const dsErg = (ds) => !!(D.dsMap.get(ds) || {}).ergaenzende_unterdrueckung;
+const untErkl = (ds) => (dsErg(ds) ? "unterdrückt („<5“): 1–4 Fälle oder zum Schutz einer Nachbarzelle verborgen, auch 5 oder mehr möglich" : "unterdrückt: 1 bis 4 Fälle");
+const untLegende = (ds) => h("span", null, h("i", { class: "schraff" }), ds === "zeitreihe" || dsErg(ds || dsAktiv()) ? "unterdrückt (auch ≥ 5 möglich), feste Breite" : "unterdrückt: 1–4 Fälle (Spanne)");
+function dbFuer(ds) {
+  if (!ds || ds === dsNeu() || !/^\d{4}-\d{2}-\d{2}$/.test(ds)) return DBN;
+  if (!DBS.has(ds)) {
+    const db = new SQLLIB.Database(BYTES);
+    db.run("DROP VIEW zeitraum_aktuell; CREATE VIEW zeitraum_aktuell AS SELECT zeitraum, MAX(datenstand) AS datenstand FROM datenstand_zeitraum WHERE datenstand <= '" + ds + "' GROUP BY zeitraum;"
+      + "UPDATE kennzahl SET bezug = (SELECT ks.bezug FROM kennzahl_stand ks WHERE ks.zeile = kennzahl.zeile AND ks.datenstand = '" + ds + "'),"
+      + " bezug_zeilen = (SELECT ks.bezug_zeilen FROM kennzahl_stand ks WHERE ks.zeile = kennzahl.zeile AND ks.datenstand = '" + ds + "')"
+      + " WHERE EXISTS (SELECT 1 FROM kennzahl_stand ks WHERE ks.zeile = kennzahl.zeile AND ks.datenstand = '" + ds + "');"
+      + "PRAGMA query_only = ON;");
+    DBS.set(ds, db);
+  }
+  return DBS.get(ds);
+}
+/* Kontext (Zeitraum, Datenstand) setzen; alles aus der Sicht Abgeleitete neu laden */
+function setzeKontext(zr, ds) {
+  zr = ZR_KURZ[zr] ? zr : "gesamt";
+  ds = ds && D.dsMap.has(ds) && ds !== dsNeu() ? ds : "";
+  if (zr === S.zr && ds === S.ds && DB) return false;
+  S.zr = zr; merke("zr", zr);
+  if (ds !== S.ds || !DB) {
+    S.ds = ds; merke("ds", ds);
+    DB = ds ? dbFuer(ds) : DBN;
+    for (const k of ["wAlle", "kzGr", "facetten", "diag", "ewA", "kzAbs"]) delete D[k];
+    ladeStamm();
+  }
+  return true;
+}
+/* Parameter der Adresse für den Kontext, nur wenn er von der Vorgabe abweicht */
+const par = () => { const p = []; if (S.zr !== "gesamt") p.push("zr=" + S.zr); if (S.ds) p.push("ds=" + S.ds); return p.length ? "?" + p.join("&") : ""; };
+const ln = (pfad) => "#" + pfad + par();
+function standText() {
+  const zr = S.zr, ds = dsAktiv(zr), d = D.dsMap.get(ds) || {};
+  const dz = D.dsZr.find((x) => x.datenstand === ds && x.zeitraum === zr) || {};
+  const f = (D.alle[zr] || {}).faelle_text;
+  return ZR_KURZ[zr] + " · Datenstand " + fDatum(ds) + (dz.erstmeldung_von ? " (Erstmeldungen " + fDatum(dz.erstmeldung_von) + " bis " + fDatum(dz.erstmeldung_bis) + ")" : "")
+    + (f ? " · " + zahlText(f) + " Fälle" : "") + (S.ds ? " · älterer Stand, neuester: " + fDatum(dsNeu()) : "") + (d.ergaenzende_unterdrueckung ? " · ergänzende Unterdrückung" : "");
+}
+function schalter() {
+  const box = leeren($("#schalter")), r = S.r;
+  if (["rueckfragen", "wissen", "todo"].includes(r.v)) return;
+  const pfad = (location.hash || "#start").replace(/^#/, "").split("?")[0];
+  const geh = (zr, ds) => { if (setzeKontext(zr, ds)) { history.replaceState(null, "", ln(pfad)); zeige(); } };
+  box.append(h("div", { class: "seg", role: "group", "aria-label": "Zeitraum" }, ZR.map((zr) =>
+    h("button", { type: "button", id: "zr-" + zr, "aria-pressed": String(zr === S.zr), onclick: () => geh(zr, S.ds) }, ZR_KURZ[zr]))));
+  const l = dsFuer(S.zr);
+  box.append(h("span", { class: "gruppe" }, h("span", null, "Datenstand"), h("div", { class: "seg", role: "group", "aria-label": "Datenstand" }, l.slice().reverse().map((ds) =>
+    h("button", { type: "button", id: "ds-" + ds, "aria-pressed": String(ds === dsAktiv()), disabled: l.length < 2, "data-tipp": (D.dsMap.get(ds) || {}).hinweis || null,
+      onclick: () => geh(S.zr, ds) }, fDatumK(ds))))));
+}
+
+/* ===================================================================== Laden */
+function ladeText(t) { const el = $("#lade-text"); if (el) el.textContent = t; }
+const istSqlite = (b) => !!b && b.length > 100 && String.fromCharCode.apply(null, b.subarray(0, 15)) === "SQLite format 3";
+function b64ZuBytes(t) { const bin = atob(t.replace(/\s+/g, "")), out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
+/* Erst die Binärdatei, sonst dieselben Bytes als Base64-Text */
+async function ladeBytes() {
+  const fehler = [];
+  for (const [datei, b64] of [["rd.sqlite", false], ["rd.sqlite.b64.txt", true]]) {
+    try {
+      if (b64) ladeText("Datenbank wird geladen (Textfassung) …");
+      const r = await fetch(datei);
+      if (!r.ok) { fehler.push(datei + ": HTTP " + r.status); continue; }
+      const b = b64 ? b64ZuBytes(await r.text()) : new Uint8Array(await r.arrayBuffer());
+      if (istSqlite(b)) return b;
+      fehler.push(datei + " ist keine SQLite-Datei");
+    } catch (e) { fehler.push(datei + ": " + (e && e.message || e)); }
+  }
+  throw new Error(fehler.join("; "));
+}
+/* Matrixzeilen aus einer Quellenangabe wie „Diagnosestatus (alle Fälle), Zeilen 80, 82–83“ */
+const ZEILEN_RE = /Zeilen?\s+((?:\d+(?:\s*[–-]\s*\d+)?)(?:\s*,\s*\d+(?:\s*[–-]\s*\d+)?)*)/g;
+function zeilenAus(text) {
+  const out = new Set();
+  for (const m of String(text || "").matchAll(ZEILEN_RE)) for (const teil of m[1].split(",")) {
+    const [a, b] = teil.split(/[–-]/).map((x) => parseInt(x, 10));
+    if (!Number.isFinite(a)) continue;
+    for (let z = a; z <= (Number.isFinite(b) && b >= a && b - a < 60 ? b : a); z++) out.add(z);
+  }
+  return out;
+}
+const PROFIL_ZEILE = window.__jsonDash.profilZeile;
+function ladeStamm() {
+  D.le = q("SELECT * FROM le ORDER BY kuerzel");
+  D.leMap = new Map(D.le.map((l) => [l.kuerzel, l]));
+  D.leSlug = new Map(D.le.map((l) => [slug(l.kuerzel), l.kuerzel]));
+  D.zr = q("SELECT * FROM zeitraum ORDER BY reihenfolge");
+  ZR = D.zr.map((z) => z.zeitraum);
+  for (const z of D.zr) ZR_KURZ[z.zeitraum] = z.kurz || z.zeitraum;
+  D.ds = qN("SELECT * FROM datenstand ORDER BY reihenfolge, datenstand");
+  D.dsMap = new Map(D.ds.map((d) => [d.datenstand, d]));
+  D.dsZr = qN("SELECT * FROM datenstand_zeitraum");
+  D.dsNeu = (D.ds.find((d) => d.ist_neuester) || D.ds[D.ds.length - 1] || {}).datenstand || null;
+  D.meta = new Map(q("SELECT schluessel, wert FROM meta WHERE schluessel NOT LIKE 'quelle:%'").map((r) => [r.schluessel, r.wert]));
+  D.profil = {}; for (const z of ZR) D.profil[z] = {};
+  for (const r of q("SELECT * FROM v_le_profil")) (D.profil[r.zeitraum] || (D.profil[r.zeitraum] = {}))[r.le] = r;
+  D.alle = {}; for (const r of q("SELECT * FROM v_le_profil_alle_le")) D.alle[r.zeitraum] = r;
+  /* Reihenfolge wie in der Arbeitsmappe des neuesten Datenstands, der die Zeile hat */
+  D.kz = q("SELECT k.*, (SELECT GROUP_CONCAT(ks.datenstand) FROM kennzahl_stand ks WHERE ks.zeile = k.zeile) AS staende FROM kennzahl k "
+    + "ORDER BY (SELECT ks.matrixzeile FROM kennzahl_stand ks WHERE ks.zeile = k.zeile ORDER BY ks.datenstand DESC LIMIT 1), k.zeile");
+  D.kzMap = new Map(D.kz.map((k) => [k.zeile, k]));
+  D.bezug = new Map(qN("SELECT datenstand || '|' || zeile AS k, bezug FROM kennzahl_stand").map((r) => [r.k, r.bezug]));
+  D.rf = q("SELECT * FROM rueckfrage ORDER BY nr");
+  D.rfLe = q("SELECT * FROM rueckfrage_le ORDER BY le, nr, teil");
+  /* Versandfertige Rückfragen je LE (geprüfte Dateien output/Rueckfragen_an_LE_Versand); fehlt die Tabelle (ältere Datendatei), gibt es keinen Text */
+  try { D.rfV = qN("SELECT * FROM rueckfrage_versand"); D.rfVH = qN("SELECT punkt, hinweis FROM rueckfrage_versand_hinweis"); }
+  catch (e) { D.rfV = []; D.rfVH = []; }
+  D.rfAnz = new Map(); D.flag = new Map();
+  for (const r of D.rfLe) {
+    let a = D.rfAnz.get(r.le); if (!a) D.rfAnz.set(r.le, (a = { nr: new Set(), hoch: new Set() }));
+    a.nr.add(r.nr); if (r.prioritaet === "hoch") a.hoch.add(r.nr);
+    let f = D.flag.get(r.le); if (!f) D.flag.set(r.le, (f = new Map()));
+    for (const z of zeilenAus(r.quelle)) { if (!f.has(z)) f.set(z, []); f.get(z).push("Rückfrage " + r.nr + (r.teil || "") + ": " + r.thema); }
+  }
+  D.profilZeile = Object.assign({}, PROFIL_ZEILE);
+  for (const r of q("SELECT spalte, text FROM beschreibung WHERE objekt = 'v_le_profil'")) {
+    const m = /Matrixzeilen? (\d+)/.exec(r.text);
+    if (m && D.kzMap.has(+m[1])) D.profilZeile[r.spalte.replace(/_prozent$/, "")] = +m[1];
+  }
+  D.diag = {};
+  D.mbDa = false;
+  D.facTab = new Map();
+  for (const r of q("SELECT abschnitt, name, art, kategorien FROM facette ORDER BY abschnitt, nr")) { if (!D.facTab.has(r.abschnitt)) D.facTab.set(r.abschnitt, []); D.facTab.get(r.abschnitt).push({ name: r.name, art: r.art, kats: JSON.parse(r.kategorien) }); }
+}
+const faul = (name, fn) => () => (D[name] !== undefined ? D[name] : (D[name] = fn()));
+const wAlle = faul("wAlle", () => {
+  const m = new Map();
+  for (const r of q("SELECT zeile, zeitraum, wert_anzeige, wert, unterdrueckt, wert_min, wert_max, anteil_prozent, anteil_prozent_min, anteil_prozent_max FROM v_wert_alle_le")) {
+    if (!m.has(r.zeile)) m.set(r.zeile, {});
+    m.get(r.zeile)[r.zeitraum] = r;
+  }
+  return m;
+});
+const notizen = faul("notiz", () => q("SELECT id, quelle, art, herkunft, titel, abschnitt, text FROM notiz ORDER BY id"));
+const todos = faul("todo", () => q("SELECT * FROM todo ORDER BY id"));
+
+/* ===================================================================== Kennzahlen: Abschnitte, Adressen */
+function kzGruppen() {
+  if (D.kzGr) return D.kzGr;
+  const out = []; let akt = null;
+  for (const k of D.kz) {
+    if (!akt || akt.abschnitt !== k.abschnitt) out.push((akt = { abschnitt: k.abschnitt, block: k.block, id: "s-" + slug(k.abschnitt), zeilen: [] }));
+    akt.zeilen.push(k);
+  }
+  return (D.kzGr = out);
+}
+const gruppeVon = (zeile) => kzGruppen().find((g) => g.zeilen.some((k) => k.zeile === zeile));
+const gruppeId = (id) => kzGruppen().find((g) => g.id === id);
+const kzHref = (k) => (D.profilZeile[k] ? ln("a/" + D.profilZeile[k]) : ln("a"));
+const leSlug = (k) => slug(k);
+const leLink = (k, klasse) => h("a", { href: ln("le/" + leSlug(k)), class: klasse, "data-tipp": (D.leMap.get(k) || {}).name }, k);
+const zelleHref = (id, le) => ln("a/" + id + "/le/" + leSlug(le));
+/* GFK1 = GFK2: LE ohne dokumentierte zweite Fallkonferenz (exakt 0); ihre Diagnoserate über abgeschlossene Fälle ist überhöht */
+const GFK_TIPP = "GFK1 = GFK2: keine zweite Fallkonferenz dokumentiert (0 Fälle mit GFK2). Alle Undiagnostizierten gelten als „offen“; die Diagnoserate über abgeschlossene Fälle ist deshalb überhöht und nicht aussagekräftig.";
+const istGfkAbschnitt = (abschnitt) => /abgeschlossene Fälle/.test(abschnitt || "");
+const ohneGfk2 = (le, zr) => { const z = zr || S.zr; return gfkNullIn(le, z, dsAktiv(z)); };
+/* dasselbe für einen beliebigen Datenstand: mit GFK2 = Zeilen 46 + 48 (wie v_le_profil), beide exakt 0 */
+function gfkNullIn(le, zr, ds) {
+  if (!D.gfkStand) { D.gfkStand = new Map(); for (const r of qN("SELECT le, zeitraum, datenstand, zeile, wert FROM wert_stand WHERE zeile IN (" + (window.__jsonDash.gfkZeilen.join(",") || "NULL") + ")")) { const k = r.le + "|" + r.zeitraum + "|" + r.datenstand; D.gfkStand.set(k, (D.gfkStand.get(k) || 0) + (r.wert === 0 ? 1 : 0)); } }
+  return window.__jsonDash.gfkZeilen.length > 0 && D.gfkStand.get(le + "|" + zr + "|" + ds) === window.__jsonDash.gfkZeilen.length;
+}
+const gfkMarke = () => h("span", { class: "flag warn", "data-tipp": GFK_TIPP }, "GFK1=GFK2");
+const rfMarke = (le, zeile) => null; const rfMarkeAus = (le, zeile) => { const f = (D.flag.get(le) || new Map()).get(zeile); return f ? h("a", { class: "flag info", href: ln("rueckfragen/" + leSlug(le)), "data-tipp": [...new Set(f)].join("\n") }, "Rückfrage") : null; };
+/* Bezug einer Kennzahl in einem Datenstand (Vorgabe: der gezeigte des Zeitraums) */
+const bezugIn = (zeile, ds) => { const k = (ds || dsAktiv()) + "|" + zeile; return D.bezug.has(k) ? D.bezug.get(k) : (D.kzMap.get(zeile) || {}).bezug; };
+const bezugText = (kz) => bezugIn(kz.zeile) || (kz.einheit === "Tage" ? "Tage" : "Anzahl");
+/* Anzeige einer Zelle aus v_wert (wert_anzeige) oder wert_stand (wert_text, Grenzen) */
+function anzeige(r) {
+  if (!r) return "–";
+  if (r.wert_anzeige != null) return r.wert_anzeige;
+  if (r.wert != null) return String(r.wert);
+  if (r.unterdrueckt) return r.wert_min != null && r.wert_max != null ? r.wert_min + "–" + r.wert_max : "unterdrückt";
+  return r.wert_text;
+}
+function wertText(w, ohneAnteil) {
+  if (!w) return h("span", { class: "muted" }, "keine Spalte");
+  const a = anteilW(w), t = anzeige(w), z = istUntText(t) ? h("span", { class: "unt-text unt" }, "unterdrückt") : zahlText(t);
+  return a.art === "leer" || ohneAnteil ? z : [z, h("span", { class: "muted" }, " · " + a.text)];
+}
+function vergleichBalken(w, t, name) {
+  const a = anteilW(w), b = anteilW(t);
+  if (!w || !t || a.art === "leer" || b.art === "leer") return "";
+  const el = h("span", { class: "minibalken", "data-tipp": name + ": " + a.text + "\nalle LE: " + b.text + " (Strich)" });
+  el.append(a.art === "spanne" ? h("i", { class: "sp", style: "left:" + a.lo + "%;width:" + (a.hi - a.lo) + "%" }) : h("i", { class: "bk", style: "width:" + Math.min(100, mitte(a)) + "%" }));
+  el.append(h("i", { class: "ref", style: "left:" + Math.min(100, mitte(b)) + "%" }));
+  return el;
+}
+
+/* ===================================================================== Router */
+const ANS = {};
+const WERKZEUGE = ["start"];
+/* Adresse lesen; alte Adressen werden umgeleitet. Rückgabe: { v, id, le, zeit, arg, par } */
+function leseHash() {
+  let roh = (location.hash || "").replace(/^#/, "");
+  try { roh = decodeURIComponent(roh); } catch (e) { /* ungültige Kodierung: roh weiter */ }
+  const [pfad, qs] = roh.split("?");
+  let m, neu = null;
+  if (pfad === "" || pfad === "ueberblick" || pfad === "entwicklung" || /^(rueckfragen|wissen|todo|fragen)(\/|$)/.test(pfad)) neu = "start";
+  else if (!D.mbDa && /^a\/mb(\/|$)/.test(pfad)) neu = "a";
+  else if ((m = /^le-([a-z0-9-]+)$/.exec(pfad))) neu = "le/" + m[1];
+  else if (pfad === "kennzahl") neu = "a";
+  else if ((m = /^kennzahl-(\d+)$/.exec(pfad))) neu = "a/" + m[1];
+  else if ((m = /^entwicklung-(\d+)$/.exec(pfad))) neu = "a/" + m[1] + "/zeit";
+  else if (pfad === "zeitstrahl") neu = "a/" + (D.kzMap.has(50) ? 50 : "");
+  else if (pfad === "meldungen") neu = "a/mb";
+  if (neu != null) { history.replaceState(null, "", "#" + neu + (qs ? "?" + qs : "")); return leseHash(); }
+  const t = pfad.split("/"), p = new URLSearchParams(qs || "");
+  const le = (x) => (x ? D.leSlug.get(slug(x)) || null : null);
+  const r = { v: "start", par: { zr: p.get("zr"), ds: p.get("ds") }, roh: pfad };
+  if (t[0] === "a") {
+    r.id = t[1] || null;
+    if (t[2] === "le") { r.v = "zelle"; r.le = le(t[3]); if (!r.le) { r.v = "a"; r.unbekannt = t[3]; } }
+    else { r.v = "a"; r.zeit = t[2] === "zeit"; }
+  } else if (t[0] === "le") { r.v = "le"; r.le = le(t[1]); r.zeit = t[2] === "zeit"; if (t[1] && !r.le) r.unbekannt = t[1]; }
+  else if (WERKZEUGE.includes(t[0])) { r.v = t[0]; r.arg = t[1] || null; }
+  return r;
+}
+function route() {
+  const r = leseHash(), alt = S.r;
+  /* Werkzeuge ohne Parameter behalten den Kontext; Datenansichten nehmen ihn aus der Adresse */
+  if (!["rueckfragen", "wissen", "todo", "fragen"].includes(r.v) || r.par.zr || r.par.ds) setzeKontext(r.par.zr || "gesamt", r.par.ds || "");
+  S.r = r;
+  if (r.le) S.leZuletzt = r.le;
+  if (r.v === "rueckfragen") S.rfLe = (r.arg && D.leSlug.get(r.arg)) || "";
+  zeige();
+  if (r.roh !== alt.roh) window.scrollTo(0, 0);
+}
+function zeige() {
+  if (!DB) return;
+  const r = S.r, v = r.v === "zelle" ? "a" : r.v;
+  for (const a of document.querySelectorAll("#nav a")) {
+    a.href = ln(a.dataset.v);
+    if (a.dataset.v === v) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+  }
+  $("#stand").textContent = standText();
+  schalter();
+  let neu = h("div", { class: "stapel-v" });
+  try {
+    if (r.v === "a" || r.v === "zelle" || r.v === "le") neu = mitListe(r);
+    else ANS[r.v](neu, r);
+  } catch (e) {
+    console.error(e);
+    neu = h("div", { class: "hinweis fehler" }, "Diese Ansicht konnte nicht aufgebaut werden: " + (e && e.message || e));
+  }
+  $("#ansicht").replaceChildren(neu);
+  requestAnimationFrame(passeAn);
+}
+/* Tabellenzellen, die nur „unterdrückt“ zeigen, bekommen das Schraffurquadrat wie die Diagramme (Heatmap-Zellen sind selbst schraffiert) */
+function markiereUnt(root) {
+  for (const el of root.querySelectorAll("td:not(.heat), td:not(.heat) > a, td:not(.heat) > span"))
+    if (!el.childElementCount && el.textContent.trim() === "unterdrückt" && !el.classList.contains("unt")) el.classList.add("unt-text", "unt");
+}
+new MutationObserver((ms) => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1) markiereUnt(n.parentElement || n); }).observe($("#ansicht"), { childList: true, subtree: true });
+/* Beschriftungen in gestapelten Balken nur zeigen, wenn sie hineinpassen */
+function passeAn() { for (const s of document.querySelectorAll(".sg > span")) s.classList.toggle("zu-eng", s.scrollWidth > s.clientWidth); }
+let anpassTimer = 0;
+window.addEventListener("resize", () => { clearTimeout(anpassTimer); anpassTimer = setTimeout(passeAn, 120); });
+
+/* ===================================================================== Tooltip: bleibt im Fenster */
+const tip = $("#tip");
+function tipAn(el, x, y) {
+  tip.textContent = el.getAttribute("data-tipp");
+  tip.hidden = false;
+  const w = tip.offsetWidth, hh = tip.offsetHeight;
+  let l = x + 14, t = y + 18;
+  if (l + w > window.innerWidth - 8) l = Math.max(8, x - w - 12);
+  if (t + hh > window.innerHeight - 8) t = Math.max(8, y - hh - 12);
+  tip.style.left = l + "px"; tip.style.top = t + "px";
+}
+const tipAus = () => { tip.hidden = true; };
+const tippZiel = (e) => (e.target && e.target.closest ? e.target.closest("[data-tipp]") : null);
+document.addEventListener("pointermove", (e) => { const el = tippZiel(e); if (el) tipAn(el, e.clientX, e.clientY); else tipAus(); });
+document.addEventListener("pointerdown", (e) => { const el = tippZiel(e); if (el && e.pointerType !== "mouse") tipAn(el, e.clientX, e.clientY); else if (!el) tipAus(); });
+document.addEventListener("focusin", (e) => { const el = tippZiel(e); if (el) { const r = el.getBoundingClientRect(); tipAn(el, r.left + Math.min(r.width, 40), r.bottom - 12); } });
+document.addEventListener("focusout", tipAus);
+window.addEventListener("scroll", tipAus, { passive: true });
+
+/* ===================================================================== Bausteine */
+function sortiere(zeilen, wert, dir) {
+  return zeilen.slice().sort((a, b) => {
+    const x = wert(a), y = wert(b);
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    if (typeof x === "string" || typeof y === "string") return dir * String(x).localeCompare(String(y), "de");
+    return dir * (x - y);
+  });
+}
+function marke(prio) {
+  const p = String(prio || "").toLowerCase();
+  return h("span", { class: "marke " + (p === "hoch" ? "hoch" : p === "mittel" ? "mittel" : "niedrig") }, prio || "–");
+}
+function kpi(o) {
+  return h(o.href ? "a" : "div", { class: "kpi", href: o.href, "data-tipp": o.tipp },
+    h("span", { class: "t" }, o.t), h("span", { class: "w" }, o.w), h("span", { class: "b" }, o.b), o.extra || null);
+}
+const seg = (label, wahl, akt, setze) => h("div", { class: "seg", role: "group", "aria-label": label },
+  wahl.map(([w, name]) => h("button", { type: "button", "aria-pressed": String(akt === w), onclick: () => { setze(w); zeige(); } }, name)));
+function achse(max, einheit, links) {
+  const f = (v) => (einheit === "%" ? f1(v).replace(",0", "") + " %" : fzahl(v));
+  return h("div", { class: "achse", "aria-hidden": "true" }, h("span"),
+    h("div", { class: "sk", style: links ? "margin-left:18px;margin-right:6px" : null }, h("span", { style: "left:0" }, f(0)), h("span", { style: "left:50%" }, f(max / 2)), h("span", { style: "left:100%" }, f(max))), h("span"));
+}
+function skalaMax(v, prozent) {
+  if (!(v > 0)) return prozent ? 100 : 10;
+  if (prozent) return v <= 5 ? 5 : v <= 10 ? 10 : v <= 25 ? 25 : v <= 50 ? 50 : 100;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const s of [1, 2, 2.5, 5, 10]) if (v <= s * p) return s * p;
+  return 10 * p;
+}
+/* Zeile einer Balkenliste: Name (Link auf den LE) | Spur und Wert (Link auf Kennzahl × LE) */
+const bzZeile = (le, spur, wert, href, tipp, aus) => h("div", { class: "bz" + (aus ? " aus" : "") }, leLink(le, "n"),
+  href ? h("a", { href, "data-tipp": tipp, "aria-label": String(tipp || le).split("\n").join(", ") }, spur) : h("span", { "data-tipp": tipp }, spur), h(href ? "a" : "span", { class: "v", href }, wert));
+/* Quellenangabe mit Links auf die genannten Matrixzeilen */
+function quelleMitLinks(text) {
+  const out = h("span");
+  let pos = 0;
+  for (const m of String(text || "").matchAll(ZEILEN_RE)) {
+    const start = m.index + m[0].length - m[1].length;
+    out.append(text.slice(pos, start));
+    let p2 = 0;
+    for (const z of m[1].matchAll(/\d+/g)) { out.append(m[1].slice(p2, z.index), D.kzMap.has(+z[0]) ? h("a", { href: ln("a/" + z[0]) }, z[0]) : z[0]); p2 = z.index + z[0].length; }
+    out.append(m[1].slice(p2));
+    pos = m.index + m[0].length;
+  }
+  out.append((text || "").slice(pos));
+  return out;
+}
+function karte(titel, unter, ...inhalt) { return h("section", { class: "karte" }, titel ? h("h2", null, titel) : null, unter ? h("p", { class: "unter" }, unter) : null, inhalt); }
+/* Kopf einer Detailansicht: Pfad, Titel, Reiter Stand | Verlauf */
+function detailKopf(pfad, titel, reiter, rechts) {
+  return h("div", { class: "kopfblock" }, h("div", { class: "kopfzeile" }, h("div", null, h("p", { class: "pfad" }, pfad.map((p, i) => [i ? " › " : "", p])), h("h2", null, titel)),
+    rechts ? h("div", { class: "reihe" }, rechts) : null),
+    reiter ? h("nav", { class: "reiter", "aria-label": "Sicht" },
+      h("a", { href: reiter.stand, "aria-current": reiter.zeit ? null : "page" }, "Stand"), h("a", { href: reiter.verlauf, "aria-current": reiter.zeit ? "page" : null }, "Verlauf")) : null);
+}
+
+/* ===================================================================== Liste links (Kennzahlen oder LE) */
+function mitListe(r) {
+  const modusLe = r.v === "le";
+  const liste = h("div", { class: "liste", id: modusLe ? "le-liste" : "kz-liste" });
+  const kopfSeg = h("nav", { class: "seg", "aria-label": "Navigation" }, h("a", { href: ln("a"), "aria-current": modusLe ? null : "page" }, NAV_A), h("a", { href: ln("le"), "aria-current": modusLe ? "page" : null }, "LE"));
+  const seite = h("aside", { class: "seite" + ((modusLe ? r.le : r.id) ? " zu" : "") }, kopfSeg);
+  if (modusLe) {
+    for (const l of D.le) {
+      const p = D.profil[S.zr][l.kuerzel];
+      liste.append(h("a", { class: "z le", href: ln("le/" + leSlug(l.kuerzel) + (r.zeit ? "/zeit" : "")), "aria-current": l.kuerzel === r.le ? "true" : null, "data-tipp": l.name },
+        l.kuerzel, h("small", null, p ? zahlText(p.faelle_text) + " Fälle" : "keine Spalte")));
+    }
+  } else {
+    const fuelle = () => {
+      leeren(liste);
+      const s = S.kzSuche.trim().toLowerCase(), aktZ = r.id && /^\d+$/.test(r.id) ? +r.id : null;
+      let n = 0;
+      const zeil = (k) => h("a", { class: "z" + (k.teil_von ? " kind" : ""), href: ln("a/" + k.zeile + (r.zeit ? "/zeit" : "")), "aria-current": k.zeile === aktZ ? "true" : null }, k.kategorie);
+      for (const g of kzGruppen()) {
+        const treffer = s ? g.zeilen.filter((k) => (k.kategorie + " " + g.abschnitt + " " + (k.bedeutung || "") + " " + (k.datenkranz_feld || "") + " zeile " + k.zeile).toLowerCase().includes(s)) : g.zeilen;
+        if (!treffer.length) continue;
+        n += treffer.length;
+        const vert = istKategorial(g);
+        liste.append(h("details", { open: (!!s && n <= 150) || r.id === g.id || g.zeilen.some((k) => k.zeile === aktZ) },
+          h("summary", null, g.abschnitt, " ", h("small", null, "(" + g.zeilen.length + ")")),
+          vert ? h("a", { class: "z", href: ln("a/" + g.id + (r.zeit ? "/zeit" : "")), "aria-current": r.id === g.id ? "true" : null }, h("em", null, "Verteilung aller Kategorien")) : null,
+          treffer.map(zeil)));
+      }
+      if (D.mbDa && (!s || "meldebestätigungen abgleich mb".includes(s))) liste.append(h("details", { open: r.id === "mb" }, h("summary", null, "Meldebestätigungen"),
+        h("a", { class: "z", href: ln("a/mb" + (r.zeit ? "/zeit" : "")), "aria-current": r.id === "mb" ? "true" : null }, "Abgleich Fälle − Meldebestätigungen")));
+      if (!liste.firstChild) liste.append(h("p", { class: "muted klein", style: "padding:6px" }, "Keine Kennzahl passt zu „" + S.kzSuche + "“."));
+    };
+    fuelle();
+    seite.append(h("input", { type: "search", id: "kz-suche", "aria-label": "Kennzahl suchen", value: S.kzSuche, placeholder: "Kennzahl suchen (" + D.kz.length + ")", oninput: (e) => { S.kzSuche = e.target.value; fuelle(); } }));
+  }
+  seite.append(liste);
+  const haupt = h("div", { class: "stapel-v" });
+  if (r.unbekannt) haupt.append(h("p", { class: "hinweis achtung" }, "LE „" + r.unbekannt + "“ gibt es nicht."));
+  if (r.v === "zelle") zelle(haupt, r);
+  else if (modusLe) (r.le ? (r.zeit ? leZeit : leStand) : leIndex)(haupt, r.le);
+  else if (r.id) kennzahl(haupt, r);
+  else aIndex(haupt);
+  const knopf = h("button", { type: "button", class: "btn klein", onclick: () => { seite.classList.toggle("zu"); } }, modusLe ? "LE-Liste" : "Kennzahl-Liste");
+  requestAnimationFrame(() => { const akt = liste.querySelector('[aria-current="true"]'); if (akt) liste.scrollTop = Math.max(0, akt.offsetTop - 90); });
+  return h("div", { class: "raster" }, h("div", { class: "seite-mobil" }, knopf), seite, haupt);
+}
+
+/* ===================================================================== Übersicht */
+const KERN = window.__jsonDash.kern.map((x) => ({ k: x.k, t: () => x.t, gfk: x.gfk }));
+ANS.start = (root) => {
+  const zr = S.zr, a = D.alle[zr] || {}, P = ewPaar(zr), E = P ? ewDaten(zr) : null;
+  const delta = (key) => {
+    if (!P) return "";
+    const c = ewZelle(E, D.profilZeile[key], "", P);
+    if (key === "faelle") return " · Δ " + ewDelta(c) + " seit " + fDatumK(P.von);
+    return c.dp == null ? "" : " · " + vz(c.dp, f1) + " Pp. seit " + fDatumK(P.von);
+  };
+  const ohneG = D.le.filter((l) => ohneGfk2(l.kuerzel)).map((l) => l.kuerzel);
+  const kk = (key, titel, extra) => kpi({ t: titel, w: anteil(a, key).text, href: kzHref(key), b: ((a[key + "_text"] != null ? zahlText(a[key + "_text"]) + " Fälle" : "") + delta(key)).replace(/^ · /, ""), extra });
+  root.append(h("div", { class: "kpis" },
+    kpi({ t: "Fälle", w: zahlText(a.faelle_text), href: kzHref("faelle"), b: D.le.filter((l) => D.profil[zr][l.kuerzel]).length + " LE mit Spalte" + delta("faelle") }),
+    KERN.slice(0, 5).map((x) => kk(x.k, x.t(), x.gfk && ohneG.length ? h("span", { class: "flag warn", style: "align-self:flex-start", "data-tipp": GFK_TIPP + "\nBetroffen: " + ohneG.join(", ") }, "GFK1=GFK2 bei " + ohneG.length + " LE") : null))));
+  if (!P) { root.append(h("p", { class: "hinweis" }, "Für „" + ZR_KURZ[zr] + "“ gibt es vor dem " + fDatum(dsAktiv(zr)) + " keinen Datenstand, also keine Veränderungen.")); return; }
+  const A = ewAuffaellig(zr), max = 8;
+  const zeileL = (z, rechts) => [h("span", null, z.le ? leLink(z.le) : h("strong", null, "alle LE"), " · ", h("a", { href: ln("a/" + z.zeile + "/zeit"), "data-tipp": z.c.hinweis ? "Hinweis: " + z.c.hinweis : null }, kuerze(z.kz.kategorie, 70)),
+    h("span", { class: "muted klein" }, " · " + kuerze(z.kz.abschnitt, 40))), h(z.le ? "a" : "span", { class: "r", href: z.le ? zelleHref(z.zeile, z.le) : null }, rechts)];
+  const block = (titel, liste, rechts) => {
+    if (!liste.length) return [];
+    const box = h("div", { class: "aend-liste" }, liste.slice(0, max).flatMap((z) => zeileL(z, rechts(z))));
+    return [h("h3", { style: "margin-top:10px" }, titel + " (" + liste.length + ")"), box, liste.length > max ? h("button", { type: "button", class: "btn klein", style: "margin-top:4px",
+      onclick: (e) => { box.append(...liste.slice(max).flatMap((z) => zeileL(z, rechts(z)))); e.currentTarget.remove(); } }, "alle " + liste.length + " zeigen") : null];
+  };
+  const faelle = A.faelle.filter((z) => z.c.d != null).sort((x, y) => y.c.d - x.c.d);
+  root.append(karte("Größte Veränderungen " + fDatumK(P.von) + " → " + fDatumK(P.bis) + ", " + ZR_KURZ[zr], "Nur exakte Werte; unterdrückte Seiten sind nicht berechenbar. Jeder Eintrag öffnet Kennzahl × LE.",
+    block("Fallzahl gesunken", A.gesunken.filter((z) => z.zeile === D.profilZeile.faelle), (z) => fz(z.c.a.wert) + " → " + fz(z.c.b.wert)),
+    block("Größter Zuwachs an Fällen", faelle.filter((z) => z.c.d > 0), (z) => fz(z.c.a.wert) + " → " + fz(z.c.b.wert) + " (" + vz(z.c.d) + ")"),
+    block("Auf 0 gefallen (vorher ≥ 10)", A.null.slice().sort((x, y) => y.c.a.wert - x.c.a.wert), (z) => fz(z.c.a.wert) + " → 0"),
+    block("Sprünge über " + EW_SPRUNG_PP + " Prozentpunkte je Woche", A.sprung, (z) => anteilW(z.c.a).text + " → " + anteilW(z.c.b).text),
+    block("Jetzt unterdrückt", A.jetztUnt, (z) => fz(z.c.a.wert) + " → unterdrückt"),
+    block("Neue Kennzahlen", A.neu, (z) => ewText(z.c.b, true))));
+};
+
+/* ===================================================================== Kennzahlen: Einstieg und Detail */
+function aIndex(root) {
+  root.append(karte(NAV_A, "Links eine Kennzahl oder die Verteilung eines Abschnitts wählen. Häufig gebraucht:",
+    h("div", { class: "reihe" }, [{ k: "faelle", t: () => "Fälle" }].concat(KERN).map((x) => h("a", { class: "chip", href: kzHref(x.k) }, x.t())),
+      D.mbDa ? h("a", { class: "chip", href: ln("a/mb") }, "Meldebestätigungen") : null)));
+}
+function kennzahl(root, r) {
+  const g = gruppeId(r.id);
+  if (g && istKategorial(g)) return verteilung(root, g, r.zeit);
+  const kz = D.kzMap.get(+r.id);
+  if (!kz) { root.append(h("p", { class: "hinweis achtung" }, "Kennzahl „" + r.id + "“ gibt es nicht.")); return; }
+  const gr = gruppeVon(kz.zeile);
+  root.append(detailKopf([h("a", { href: ln("a") }, NAV_A), gr && istKategorial(gr) ? h("a", { href: ln("a/" + gr.id) }, gr.abschnitt) : kz.abschnitt], kz.kategorie,
+    { stand: ln("a/" + kz.zeile), verlauf: ln("a/" + kz.zeile + "/zeit"), zeit: r.zeit }));
+  if (r.zeit) return zeitKennzahl(root, kz);
+  root.append(kz.einheit === "Tage" && /^Median/.test(kz.kategorie) ? dauerKarte(kz) : balkenKarte(kz), definition(kz));
+}
+/* Definition, Bezug, Quelle und Notizen, zugeklappt */
+function definition(kz) {
+  const T = wAlle().get(kz.zeile) || {}, eltern = kz.teil_von ? D.kzMap.get(kz.teil_von) : null;
+  const fakt = (dt, dd) => (dd ? [h("dt", null, dt), h("dd", null, dd)] : null);
+  const nz = q("SELECT kn.stelle, n.titel, n.abschnitt, n.text FROM kennzahl_notiz kn JOIN notiz n ON n.id = kn.notiz_id WHERE kn.zeile = ? ORDER BY n.id", [kz.zeile]);
+  return h("details", { class: "karte" }, h("summary", { style: "cursor:pointer;font-weight:600" }, "Definition und Quelle"),
+    h("p", { style: "margin:8px 0;max-width:95ch" }, kz.bedeutung),
+    h("dl", { class: "fakten" }, fakt("Zeile der Matrix", String(kz.zeile)), fakt("Einheit", kz.einheit), fakt("Bezug des Anteils", bezugIn(kz.zeile) ? bezugIn(kz.zeile) + " (Datenstand " + fDatumK(dsAktiv()) + ")" : null),
+      fakt("Feld im Datenkranz", kz.datenkranz_feld ? h("span", { class: "mono" }, kz.datenkranz_feld) : null), fakt("Quelle der Erklärung", kz.bedeutung_quelle),
+      eltern ? fakt("Teil von", h("a", { href: ln("a/" + eltern.zeile) }, eltern.kategorie)) : null, kz.mehrfachnennung ? fakt("Mehrfachnennung", "möglich: Anteile nicht addieren") : null,
+      fakt("Alle LE", h("span", { class: "num" }, ZR.map((z, i) => [i ? " · " : "", ZR_KURZ[z] + " (" + fDatumK(dsAktiv(z)) + "): ", T[z] ? wertText(T[z]) : "–"])))),
+    nz.map((n) => h("details", { class: "schlicht", style: "margin-top:6px" }, h("summary", null, n.titel + " › " + n.abschnitt), h("pre", { class: "text" }, n.text))),
+    null);
+}
+function abschnittDefinition(g) {
+  return h("details", { class: "karte" }, h("summary", { style: "cursor:pointer;font-weight:600" }, "Definition und Quelle"),
+    h("dl", { class: "fakten", style: "margin-top:8px" }, g.zeilen.map((k) => [h("dt", null, h("a", { href: ln("a/" + k.zeile) }, k.kategorie)),
+      h("dd", null, kuerze(k.bedeutung, 300), k.bedeutung_quelle ? h("span", { class: "muted" }, " Quelle: " + k.bedeutung_quelle + ".") : null, bezugIn(k.zeile) ? h("span", { class: "muted" }, " Bezug: " + bezugIn(k.zeile) + ".") : null)])));
+}
+/* Werte einer Zeile je LE im gezeigten Kontext */
+const wertJeLe = (zeile, zr) => new Map(q("SELECT " + SPALTEN_W + " FROM v_wert WHERE zeile = ? AND zeitraum = ?", [zeile, zr || S.zr]).map((r) => [r.le, r]));
+/* Stand einer Kennzahl: Balken je LE, Strich = alle LE */
+function balkenKarte(kz) {
+  const zr = S.zr, t = (wAlle().get(kz.zeile) || {})[zr], je = wertJeLe(kz.zeile), tage = kz.einheit === "Tage";
+  const hatAnteil = !tage && ([...je.values()].some((r) => r.anteil_prozent_min != null) || (t && t.anteil_prozent_min != null));
+  const modus = tage ? "wert" : hatAnteil && S.kzModus === "anteil" ? "anteil" : "anzahl";
+  const gfk = istGfkAbschnitt(kz.abschnitt);
+  const ein = D.le.map((l) => {
+    const w = je.get(l.kuerzel);
+    if (!w) return { le: l.kuerzel, fehlt: true };
+    const a = anteilW(w), unt = istUntZeile(w);
+    if (modus === "anteil") return { le: l.kuerzel, w, lo: a.lo, hi: a.hi, exakt: a.art === "exakt", text: unt && a.art === "leer" ? "unterdrückt" : a.text, neben: unt ? "" : zahlText(w.wert_anzeige), unt: unt && a.art === "leer" };
+    const exakt = w.wert != null;
+    return { le: l.kuerzel, w, lo: exakt ? w.wert : w.wert_min, hi: exakt ? w.wert : w.wert_max, exakt, text: unt ? "unterdrückt" : zahlText(w.wert_anzeige) + (tage && exakt ? " Tage" : ""), neben: a.art === "leer" ? "" : a.text, unt };
+  });
+  const tA = anteilW(t), ref = modus === "anteil" ? mitte(tA) : t && t.wert != null ? t.wert : null;
+  const max = skalaMax(Math.max(0, ref || 0, ...ein.map((e) => e.hi || 0)), modus === "anteil");
+  const liste = h("div", { class: "bz-liste" });
+  for (const e of sortiere(ein, (e) => (e.fehlt || e.hi == null ? null : (e.lo + e.hi) / 2), -1)) {
+    if (e.fehlt) { liste.append(bzZeile(e.le, h("span", { class: "klein" }, "keine Spalte für „" + ZR_KURZ[zr] + "“"), "–", null, null, true)); continue; }
+    const spur = h("div", { class: "spur" });
+    if (e.unt) spur.append(h("i", { class: "ut" }));
+    if (e.hi != null) spur.append(e.exakt ? h("i", { class: "bk", style: "width:" + Math.min(100, (e.hi / max) * 100) + "%" })
+      : h("i", { class: "sp", style: "left:" + (e.lo / max) * 100 + "%;width:" + ((e.hi - e.lo) / max) * 100 + "%" }));
+    if (ref != null) spur.append(h("i", { class: "ref", style: "left:" + Math.min(100, (ref / max) * 100) + "%" }));
+    const marke = gfk && ohneGfk2(e.le) ? gfkMarke() : null;
+    liste.append(bzZeile(e.le, spur, [h("span", { class: e.unt ? "unt-text" : null }, e.text), e.neben ? h("small", null, " · " + e.neben) : null, marke], zelleHref(kz.zeile, e.le),
+      e.le + " · " + kz.kategorie + "\n" + e.text + (e.neben ? " · " + e.neben : "") + (e.unt ? "\n" + untErkl(dsAktiv()) : "") + (ref != null ? "\nalle LE: " + (modus === "anteil" ? tA.text : fzahl(ref)) : "")));
+  }
+  liste.append(achse(max, modus === "anteil" ? "%" : ""));
+  return h("section", { class: "karte" },
+    h("div", { class: "reihe zwischen" }, h("h2", null, (modus === "anteil" ? "Anteil" : modus === "wert" ? "Tage" : "Anzahl") + " je LE"),
+      hatAnteil ? seg("Darstellung", [["anteil", "Anteil"], ["anzahl", "Anzahl"]], modus, (m) => { S.kzModus = m; }) : null),
+    h("p", { class: "unter" }, "Alle LE: " + (t ? [zahlText(anzeige(t)), tA.art !== "leer" ? " · " + tA.text : ""].join("") : "–") + (modus === "anteil" ? " · Bezug: " + bezugText(kz) : "") + ". Strich = alle LE."),
+    h("div", { class: "legende" }, untLegende(), gfk ? h("span", null, gfkMarke(), "keine GFK2: Rate nicht aussagekräftig") : null),
+    liste, h("div", { class: "reihe", style: "margin-top:10px" }, csvKnopf("kennzahl_" + kz.zeile + "_" + zr + ".csv", () => ({ spalten: ["le", "anzahl", "anteil_prozent", "anteil_prozent_min", "anteil_prozent_max"],
+      zeilen: [...je.values()].map((r) => [r.le, r.wert_anzeige, r.anteil_prozent, r.anteil_prozent_min, r.anteil_prozent_max]) }))));
+}
+/* Bearbeitungsdauer: Q1–Q3 als Band, Median als Marke, je LE (ersetzt den Zeitstrahl) */
+function dauerKarte(kz) {
+  const g = gruppeVon(kz.zeile), zr = S.zr, zeile = (re) => (g.zeilen.find((k) => re.test(k.kategorie)) || {}).zeile;
+  const zM = kz.zeile, zQ1 = zeile(/^1\. Quartil/), zQ3 = zeile(/^3\. Quartil/), zN = zeile(/^Dauer berechenbar/);
+  const W = [zM, zQ1, zQ3, zN].map((z) => (z ? wertJeLe(z) : new Map())), T = wAlle();
+  const alle = [zM, zQ1, zQ3, zN].map((z) => (z ? (T.get(z) || {})[zr] : null));
+  const ein = D.le.map((l) => ({ le: l.kuerzel, m: W[0].get(l.kuerzel), q1: W[1].get(l.kuerzel), q3: W[2].get(l.kuerzel), n: W[3].get(l.kuerzel) })).filter((e) => e.m);
+  const max = skalaMax(Math.max(...ein.map((e) => (e.q3 && e.q3.wert) || (e.m && e.m.wert) || 0)), false);
+  const x = (v) => Math.min(100, (v / max) * 100);
+  const liste = h("div", { class: "bz-liste" });
+  for (const e of sortiere(ein, (e) => e.m.wert, -1)) {
+    const spur = h("div", { class: "spur" });
+    if (e.m.wert == null) { if (e.m.unterdrueckt) spur.append(h("i", { class: "ut" })); }
+    else {
+      if (e.q1 && e.q3 && e.q1.wert != null && e.q3.wert != null) spur.append(h("i", { class: "iq", style: "left:" + x(e.q1.wert) + "%;width:" + (x(e.q3.wert) - x(e.q1.wert)) + "%" }));
+      spur.append(h("i", { class: "md", style: "left:" + x(e.m.wert) + "%" }));
+    }
+    if (alle[0] && alle[0].wert != null) spur.append(h("i", { class: "ref", style: "left:" + x(alle[0].wert) + "%" }));
+    const t = (r) => (r ? (r.wert != null ? fzahl(r.wert) : "unterdrückt") : "–");
+    liste.append(bzZeile(e.le, spur, e.m.wert == null ? h("span", { class: "unt-text" }, e.m.unterdrueckt ? "unterdrückt" : "–") : [fzahl(e.m.wert) + " Tage", h("small", null, " · n = " + (e.n ? zahlText(anzeige(e.n)) : "–"))],
+      zelleHref(zM, e.le), e.le + " · " + g.abschnitt + "\nMedian " + t(e.m) + " Tage, Quartile " + t(e.q1) + " bis " + t(e.q3) + "\nn = " + (e.n ? zahlText(anzeige(e.n)) : "–")));
+  }
+  liste.append(achse(max, ""));
+  return h("section", { class: "karte" }, h("h2", null, "Median und Quartile je LE, Tage"),
+    h("p", { class: "unter" }, g.abschnitt + ". Band = 1. bis 3. Quartil, Marke = Median, Strich = Median aller LE (" + (alle[0] && alle[0].wert != null ? fzahl(alle[0].wert) + " Tage" : "–") + "). Mediane verschiedener Dauern nicht addieren."),
+    liste, h("div", { class: "reihe", style: "margin-top:10px" }, csvKnopf("dauer_" + zM + "_" + zr + ".csv", () => ({ spalten: ["le", "median", "q1", "q3", "n"],
+      zeilen: ein.map((e) => [e.le, e.m && e.m.wert, e.q1 && e.q1.wert, e.q3 && e.q3.wert, e.n ? anzeige(e.n) : ""]) }))));
+}
+
+/* ===================================================================== Verteilungen (kategoriale Abschnitte) */
+/* Eine Facette ist eine Verteilung (ein Balken je LE); manche Abschnitte haben mehrere (je Altersgruppe, Erkrankungsgruppe, Feld).
+   „teilung“: Zeilen zerlegen den Bezug, Breite = Anzahl. „binaer“: eine Zeile und ihr Rest zu 100 %, Breite = Anteil. */
+const ST4 = ["diag", "unklar", "undiag", "offen"];
+const GRUND_PRAEFIX = "nicht übermittelt, Grund laut DIP: ";
+const GRUENDE = ["Patient nicht einwilligungsfähig", "Patient lehnt ab", "Einwilligung nicht zurückgegeben", "anderer patientenbezogener Grund",
+  "technische Gründe", "organisatorische Gründe", "anderer Wert", "kein Grund angegeben"];
+const GRUND_NICHT_EXPORTIERT = "nicht im Export (Spalte reasonResearchConsentMissing fehlt)";
+const grundKl = (i) => "sg " + (i < 6 ? "v" + (i + 1) : i === 6 ? "g7" : "offen");
+const TEILUNG = {
+  "Geschlecht": null, "Alter bei Einschluss (GFK1)": null, "Versicherung": null, "Sequenzierung (libraryType)": null,
+  "WGS-Seq. Art (Fälle mit WGS/lrWGS)": null, "Diagnosestatus (alle Fälle)": ST4, "Diagnoserate (abgeschlossene Fälle)": ST4.slice(0, 3),
+  "Bearbeitungsdauer medizinisch (GFK1 bis GFK2)": null, "Bearbeitungsdauer dokumentarisch (GFK2 bis Einreichung beim KDK)": null,
+};
+const nachPraefix = (zeilen) => {
+  const m = new Map();
+  for (const k of zeilen) { const i = k.kategorie.lastIndexOf(": "); if (i < 0) continue; const p = k.kategorie.slice(0, i); if (!m.has(p)) m.set(p, []); m.get(p).push(k); }
+  return m;
+};
+/* Verteilungen aus der Tabelle facette (json_dashboard.py); Farben der RD-Seite, wo Abschnitt und Zahl der Kategorien passen */
+function facettenJson(g) {
+  if (!D.facetten) D.facetten = new Map();
+  if (D.facetten.has(g.abschnitt)) return D.facetten.get(g.abschnitt);
+  const farbe = TEILUNG[g.abschnitt];
+  const f = (D.facTab.get(g.abschnitt) || []).map((x) => {
+    const kats = x.kats.filter((k) => D.kzMap.has(k.zeile));
+    return { name: x.name, art: x.art, kats, zeilen: new Set(kats.map((k) => k.zeile)),
+      farben: x.art === "binaer" ? ["v1", "offen"] : farbe && farbe.length === kats.length ? farbe : null };
+  }).filter((x) => x.kats.length > 1);
+  D.facetten.set(g.abschnitt, f.length ? f : null);
+  return D.facetten.get(g.abschnitt);
+}
+function facettenVon(g) {
+  if (D.facTab) return facettenJson(g);
+  if (!D.facetten) D.facetten = new Map();
+  if (D.facetten.has(g.abschnitt)) return D.facetten.get(g.abschnitt);
+  const a = g.abschnitt, z = g.zeilen, bin = (k, label, farben, rest) => ({ name: k.kategorie, art: "binaer", farben, kats: [{ label, zeile: k.zeile }, { label: rest, zeile: k.zeile, rest: true }] });
+  let f = null;
+  if (Object.prototype.hasOwnProperty.call(TEILUNG, a)) {
+    f = [{ name: null, art: "teilung", farben: TEILUNG[a], kats: z.filter((k) => !k.teil_von && k.einheit !== "Tage").map((k) => ({ label: k.kategorie, zeile: k.zeile })) }];
+  } else if (/Grund/.test(a) && z.filter((k) => !k.teil_von).length === 1 && z.some((k) => k.teil_von)) {
+    const kopf = z.find((k) => !k.teil_von), teile = z.filter((k) => k.teil_von === kopf.zeile);
+    f = [{ name: null, kopf: kopf.zeile, art: "teilung", farben: teile.map((k) => { const i = GRUENDE.indexOf(k.kategorie); return i < 0 ? "ohne" : grundKl(i).slice(3); }),
+      kats: teile.map((k) => ({ label: k.kategorie, zeile: k.zeile })) }];
+  } else if (a === "Diagnosestatus nach Altersgruppe") {
+    f = [...nachPraefix(z).entries()].map(([p, ks]) => ({ name: p, art: "teilung", farben: ST4, kats: ks.map((k) => ({ label: k.kategorie.slice(p.length + 2), zeile: k.zeile })) }));
+  } else if (a.startsWith("Erkrankungsgruppen")) {
+    f = z.filter((k) => !k.teil_von).map((kopf) => ({ name: kopf.kategorie, kopf: kopf.zeile, art: "teilung", farben: ST4,
+      kats: z.filter((k) => k.teil_von === kopf.zeile).map((k) => ({ label: k.kategorie.slice(kopf.kategorie.length + 2), zeile: k.zeile })) })).filter((x) => x.kats.length);
+  } else if (a.startsWith("Broad Consent nach Altersgruppe")) f = z.map((k) => bin(k, "gültige Forschungseinwilligung", ["v1", "offen"], "keine gültige"));
+  else if (a.startsWith("Diagnoserate nach WGS-Seq. Art")) f = z.filter((k) => k.kategorie.endsWith(": Diagnose")).map((k) => Object.assign(bin(k, "Diagnose", ["diag", "offen"], "keine Diagnose"), { name: k.kategorie.replace(/: Diagnose$/, "") }));
+  else if (a.startsWith("Füllgrad optionaler Felder")) f = z.filter((k) => k.bezug).map((k) => bin(k, "angegeben", ["v1", "offen"], "nicht angegeben"));
+  if (f) for (const x of f) x.zeilen = new Set(x.kats.map((k) => k.zeile).concat(x.kopf ? [x.kopf] : []));
+  D.facetten.set(a, f && f.length ? f : null);
+  return D.facetten.get(a);
+}
+const istKategorial = (g) => !!facettenVon(g);
+/* Wert einer Kategorie aus einer v_wert-Zeile: {flex, text, supp} */
+function katWert(fac, kat, r) {
+  if (!r) return null;
+  if (fac.art === "teilung") {
+    if (r.wert == null && (r.wert_min != null || r.unterdrueckt)) return { flex: null, supp: true, text: istUntText(r.wert_anzeige || r.wert_text) ? "unterdrückt" : zahlText(r.wert_anzeige || r.wert_text) };
+    return { flex: r.wert || 0, text: zahlText(r.wert_anzeige || r.wert_text) };
+  }
+  const p = r.anteil_prozent;
+  if (p == null) {
+    if (r.anteil_prozent_min == null) return kat.rest ? null : { flex: null, supp: r.wert == null, text: zahlText(r.wert_anzeige || r.wert_text) };
+    return kat.rest ? { flex: null, supp: true, text: f1(100 - r.anteil_prozent_max) + "–" + f1(100 - r.anteil_prozent_min) + " %" }
+      : { flex: null, supp: true, text: zahlText(r.wert_anzeige || r.wert_text) + " (" + f1(r.anteil_prozent_min) + "–" + f1(r.anteil_prozent_max) + " %)" };
+  }
+  return kat.rest ? { flex: 100 - p, text: fp(100 - p) } : { flex: p, text: zahlText(r.wert_anzeige || r.wert_text) + " (" + fp(p) + ")" };
+}
+/* Reihenfolge nach Ähnlichkeit: hierarchische Clusterung (mittlere Verknüpfung, euklidisch über die beiderseits bekannten Kategorien) */
+function aehnlichkeitsReihenfolge(vek) {
+  let cl = vek.map((v, i) => ({ ids: [i] }));
+  const d = (a, b) => { let s = 0, n = 0; for (let k = 0; k < vek[a].length; k++) { const x = vek[a][k], y = vek[b][k]; if (x == null || y == null) continue; s += (x - y) ** 2; n++; } return n ? Math.sqrt((s * vek[a].length) / n) : 100 * Math.sqrt(vek[a].length); };
+  const dc = (A, B) => { let s = 0; for (const a of A.ids) for (const b of B.ids) s += d(a, b); return s / (A.ids.length * B.ids.length); };
+  while (cl.length > 1) {
+    let best = [0, 1, Infinity];
+    for (let i = 0; i < cl.length; i++) for (let j = i + 1; j < cl.length; j++) { const x = dc(cl[i], cl[j]); if (x < best[2]) best = [i, j, x]; }
+    const [i, j] = best, A = cl[i], B = cl[j];
+    const opts = [A.ids.concat(B.ids), A.ids.concat(B.ids.slice().reverse()), A.ids.slice().reverse().concat(B.ids)];
+    const kante = (o) => d(o[A.ids.length - 1], o[A.ids.length]);
+    const ids = opts.reduce((m, o) => (kante(o) < kante(m) ? o : m), opts[0]);
+    cl = cl.filter((_, k) => k !== i && k !== j).concat([{ ids }]);
+  }
+  return cl.length ? cl[0].ids : [];
+}
+/* gestapelter Balken; unterdrückte Teile mit fester schmaler Breite. Zahlen im Balken nur, wenn keine Kategorie unterdrückt ist.
+   anteile: Anteil an den exakt bekannten, null für unterdrückte Kategorien (für die Ähnlichkeit) */
+function verteilungsStapel(fac, kl, ws, titel, mitZahlen) {
+  const summe = ws.reduce((a, w) => a + (w && w.flex ? w.flex : 0), 0), mitUnt = ws.some((w) => w && w.supp);
+  const anteile = ws.map((w) => (w && w.supp ? null : summe && w && w.flex ? (100 * w.flex) / summe : 0));
+  const stapel = h("div", { class: "stapel" });
+  ws.forEach((w, i) => {
+    if (!w) return;
+    if (w.supp) stapel.append(h("div", { class: "sg unt fest" }));
+    else if (w.flex > 0) stapel.append(h("div", { class: kl(i), style: "flex-grow:" + w.flex }, mitZahlen && !mitUnt ? h("span", null, anteile[i] >= 8 ? f1(anteile[i]).replace(",0", "") : "") : null));
+  });
+  const tipp = [titel].concat(fac.kats.map((k, i) => (ws[i] ? k.label + ": " + ws[i].text + (fac.art === "teilung" && ws[i].flex && summe ? " (" + fp(anteile[i]) + (mitUnt ? " der exakt bekannten" : "") + ")" : "") : null)).filter(Boolean));
+  return { stapel, tipp: tipp.join("\n"), anteile, summe, mitUnt, leer: ws.every((w) => !w) };
+}
+const SPALTEN_W = "le, zeile, wert_anzeige, wert, unterdrueckt, wert_min, wert_max, anteil_prozent, anteil_prozent_min, anteil_prozent_max";
+function werteJeLe(fac, zr) {
+  const zeilen = [...new Set(fac.kats.map((k) => k.zeile))], roh = new Map();
+  for (const r of q("SELECT " + SPALTEN_W + " FROM v_wert WHERE zeitraum = ? AND zeile IN (" + zeilen.map(() => "?").join(",") + ")", [zr].concat(zeilen))) {
+    if (!roh.has(r.le)) roh.set(r.le, {});
+    roh.get(r.le)[r.zeile] = r;
+  }
+  return roh;
+}
+function facWahl(g) {
+  const facs = facettenVon(g);
+  let fi = S.kzFac[g.abschnitt] || 0;
+  if (fi >= facs.length) fi = 0;
+  const fac = facs[fi], kl = (i) => "sg " + (fac.farben ? fac.farben[i] : "v" + ((i % 6) + 1));
+  const wahl = facs.length < 2 ? null : facs.length <= 5 ? seg("Teilmenge", facs.map((f, i) => [i, kuerze(f.name, 30)]), fi, (i) => { S.kzFac[g.abschnitt] = i; })
+    : h("label", { class: "feld" }, "Teilmenge", h("select", { id: "kz-facette", onchange: (e) => { S.kzFac[g.abschnitt] = +e.target.value; zeige(); } }, facs.map((f, i) => h("option", { value: String(i), selected: i === fi }, f.name))));
+  return { fac, kl, wahl };
+}
+const facLegende = (fac, kl, ds) => h("div", { class: "legende" }, fac.kats.map((k, i) => h("span", null, h("i", { class: kl(i) }), k.label)), untLegende(ds));
+function verteilung(root, g, zeit) {
+  const { fac, kl, wahl } = facWahl(g);
+  root.append(detailKopf([h("a", { href: ln("a") }, NAV_A)], g.abschnitt + (fac.name ? " · " + fac.name : ""), { stand: ln("a/" + g.id), verlauf: ln("a/" + g.id + "/zeit"), zeit }, wahl));
+  if (zeit) return zeitVerteilung(root, g, fac, kl);
+  const zr = S.zr, T = wAlle(), roh = werteJeLe(fac, zr), gfk = istGfkAbschnitt(g.abschnitt);
+  const werteVon = (w) => fac.kats.map((k) => katWert(fac, k, w[k.zeile]));
+  const zeilen = D.le.filter((l) => roh.has(l.kuerzel)).map((l) => ({ le: l.kuerzel, ...verteilungsStapel(fac, kl, werteVon(roh.get(l.kuerzel)), l.kuerzel + (fac.name ? " · " + fac.name : ""), true) }));
+  const mit = zeilen.filter((z) => z.summe > 0), ohne = zeilen.filter((z) => z.summe === 0);
+  const leerText = (z) => (z.leer ? "keine Werte" : z.mitUnt ? "nur unterdrückte Werte" : fac.art === "binaer" ? "kein Anteil berechenbar" : "keine Fälle");
+  const gesW = {}; for (const k of fac.kats) { const t = (T.get(k.zeile) || {})[zr]; if (t) gesW[k.zeile] = t; }
+  const ges = verteilungsStapel(fac, kl, werteVon(gesW), "Alle LE", true);
+  const liste = h("div", { class: "bz-liste" }, h("div", { class: "bz", "data-tipp": ges.tipp }, h("span", { class: "n" }, "alle LE"), ges.summe ? ges.stapel : h("span", { class: "klein" }, ges.leer ? "keine Werte" : ges.mitUnt ? "nur unterdrückte Werte" : "keine Fälle"), h("span", { class: "v" })));
+  for (const z of aehnlichkeitsReihenfolge(mit.map((z) => z.anteile)).map((i) => mit[i]).concat(ohne))
+    liste.append(bzZeile(z.le, z.summe ? z.stapel : h("span", { class: "klein" }, leerText(z)), [z.mitUnt ? h("small", { "data-tipp": "Mindestens eine Kategorie unterdrückt: Breiten nur über die exakt bekannten" }, "unvollst.") : null, gfk && ohneGfk2(z.le) ? gfkMarke() : null],
+      zelleHref(g.id, z.le), z.tipp, !z.summe));
+  const fehlt = D.le.filter((l) => !roh.has(l.kuerzel)).map((l) => l.kuerzel);
+  root.append(h("section", { class: "karte" }, h("h2", null, "Verteilung je LE"),
+    h("p", { class: "unter" }, (fac.art === "binaer" ? "Breite = Anteil und Rest zu 100 %. " : "Breite = Anteil an den exakt bekannten Kategorien. ") + "LE nach Ähnlichkeit geordnet; „unvollst.“: eine Kategorie ist unterdrückt."
+      + (fehlt.length ? " Ohne Spalte: " + fehlt.join(", ") + "." : "")),
+    facLegende(fac, kl), liste,
+    h("div", { class: "reihe", style: "margin-top:10px" }, csvKnopf("verteilung_" + slug(g.abschnitt + (fac.name ? "_" + fac.name : "")) + "_" + zr + ".csv", () => ({
+      spalten: ["le"].concat(fac.kats.map((k) => k.label)), zeilen: D.le.filter((l) => roh.has(l.kuerzel)).map((l) => [l.kuerzel].concat(werteVon(roh.get(l.kuerzel)).map((w) => (w ? w.text : "")))) })))),
+    abschnittDefinition(g));
+}
+/* Verteilung eines LE über die Zeit: ein schmaler Balken je Monat (zeitreihe) oder je Zeitraum der Matrix */
+function zeitVerlauf(g, fac, kl, le) {
+  const perioden = new Map();
+  let quelle = null, lauf = null;
+  if (fac.art === "teilung") {
+    const namen = fac.kats.map((k) => D.kzMap.get(k.zeile).kategorie);
+    lauf = qN("SELECT lauf, aufloesung, block, MAX(geladen_am) AS am FROM zeitreihe WHERE (block = ? OR kennzahl IN (" + namen.map(() => "?").join(",") + ")) AND periode <> 'gesamt' AND aufloesung <> 'gesamt' GROUP BY lauf, aufloesung, block ORDER BY am DESC LIMIT 1",
+      [g.abschnitt].concat(namen.map((n) => GRUND_PRAEFIX + n)))[0] || null;
+    if (lauf) {
+      const s = mrSerie({ lauf: lauf.lauf, block: lauf.block, aufloesung: lauf.aufloesung });
+      for (const r of qN("SELECT periode, kennzahl, wert, wert_text, wert_min, unterdrueckt FROM zeitreihe WHERE lauf = ? AND aufloesung = ? AND block = ? AND le = ? AND periode <> 'gesamt'", [lauf.lauf, lauf.aufloesung, lauf.block, le])) {
+        if (s.maske.has(le + "|" + r.periode + "|" + r.kennzahl)) { r.wert = null; r.unterdrueckt = 1; r.wert_text = "unterdrückt"; }
+        const i = namen.indexOf(r.kennzahl.startsWith(GRUND_PRAEFIX) ? r.kennzahl.slice(GRUND_PRAEFIX.length) : r.kennzahl);
+        if (i < 0) continue;
+        if (!perioden.has(r.periode)) perioden.set(r.periode, []);
+        perioden.get(r.periode)[i] = katWert(fac, fac.kats[i], r);
+      }
+      quelle = "je " + auflName(lauf.aufloesung) + " der Erstmeldung, Lauf „" + lauf.lauf + "“";
+    }
+  }
+  if (!lauf) {
+    for (const zr of ZR.filter((z) => z !== "gesamt")) { const w = werteJeLe(fac, zr).get(le); if (w) perioden.set(ZR_KURZ[zr] + " (" + fDatumK(dsAktiv(zr)) + ")", fac.kats.map((k) => katWert(fac, k, w[k.zeile]))); }
+    quelle = "Zeiträume der Matrix (keine Monatswerte)";
+  }
+  if (!perioden.size) return null;
+  const raster = h("div", { class: "zd-raster" });
+  for (const per of lauf ? [...perioden.keys()].sort() : [...perioden.keys()]) {
+    const ws = perioden.get(per) || [], z = verteilungsStapel(fac, kl, ws, le + " · " + per, false);
+    raster.append(h("span", { class: "zd-m" }, per), z.summe || z.mitUnt ? (z.stapel.setAttribute("data-tipp", z.tipp), z.stapel) : h("span", { class: "zd-m" }, ws.some((w) => w) ? "keine Fälle" : "keine Werte"));
+  }
+  return karte("Verteilung von " + le + " über die Zeit", quelle + ".", facLegende(fac, kl, lauf ? "zeitreihe" : dsAktiv(ZR.find((z) => z !== "gesamt"))), raster);
+}
+
+/* ===================================================================== Monatsreihen (Tabelle zeitreihe) */
+const istMonat = (a) => /^(monat|month)$/i.test(a || "");
+const auflName = (a) => (istMonat(a) ? "Monat" : /^(quartal|quarter)$/i.test(a || "") ? "Quartal" : a || "Periode");
+/* je Block der jüngste Lauf mit Perioden */
+const mrBloecke = faul("mrBloecke", () => {
+  const out = [], gesehen = new Set();
+  for (const r of qN("SELECT block, lauf, aufloesung, MAX(geladen_am) AS am FROM zeitreihe WHERE aufloesung <> 'gesamt' AND periode <> 'gesamt' GROUP BY block, lauf, aufloesung ORDER BY am DESC, lauf DESC")) {
+    if (!gesehen.has(r.block)) { gesehen.add(r.block); out.push(r); }
+  }
+  return out;
+});
+/* Blöcke, die zu einem Abschnitt gehören: gleicher Name oder Kennzahlen (ohne gemeinsamen Vorsatz) = Kategorien des Abschnitts */
+const bloeckeFuer = (g) => mrBloecke().filter((b) => b.block === g.abschnitt || [...mrSerie(b).kurz.values()].some((k) => g.zeilen.some((z) => z.kategorie === k)));
+const MR_FARBE = { v1: "var(--s1)", v2: "var(--s2)", v3: "var(--s3)", v4: "var(--s4)", v5: "var(--s5)", v6: "var(--s6)", g7: "var(--s7)", offen: "var(--st-offen)", ohne: "var(--surface);stroke:var(--muted)" };
+const fMonat = (p) => (/^\d{4}-\d{2}$/.test(p) ? p.slice(5) + "." + p.slice(2, 4) : p);
+function mrSerie(b) {
+  D.mr = D.mr || new Map();
+  const key = b.lauf + "|" + b.block;
+  if (D.mr.has(key)) return D.mr.get(key);
+  const zellen = new Map(), perioden = new Set(), kzMonat = new Set(), kzGes = new Set(), les = new Set();
+  const rein = (le, r) => {
+    const ges = r.periode === "gesamt" || r.aufloesung === "gesamt";
+    zellen.set(le + "|" + (ges ? "gesamt" : r.periode) + "|" + r.kennzahl, { w: r.wert == null ? null : +r.wert, unt: !!r.unterdrueckt || r.wert == null, text: r.wert_text });
+    if (ges) kzGes.add(r.kennzahl); else { perioden.add(r.periode); kzMonat.add(r.kennzahl); }
+    if (le) les.add(le);
+  };
+  for (const r of qN("SELECT le, periode, aufloesung, kennzahl, wert, wert_text, unterdrueckt FROM zeitreihe WHERE lauf = ? AND block = ?", [b.lauf, b.block])) rein(r.le, r);
+  for (const r of qN("SELECT periode, aufloesung, kennzahl, wert, wert_text, unterdrueckt FROM zeitreihe_alle_le WHERE lauf = ? AND block = ?", [b.lauf, b.block])) rein("", r);
+  const per = [...perioden].sort(), kz = [...kzMonat];
+  const i0 = kz.length > 1 ? kz.reduce((p, k) => { let i = 0; while (i < p.length && p[i] === k[i]) i++; return p.slice(0, i); }) : "";
+  const vors = i0.includes(": ") ? i0.slice(0, i0.lastIndexOf(": ") + 2) : "";
+  const kurz = new Map(kz.map((k) => [k, vors ? k.slice(vors.length) : k]));
+  const istGrund = kz.every((k) => GRUENDE.includes(kurz.get(k)) || kurz.get(k) === GRUND_NICHT_EXPORTIERT);
+  const summeGes = (k) => { const z = zellen.get("|gesamt|" + k); return z && z.w != null ? z.w : -1; };
+  kz.sort(istGrund ? (a, c) => GRUENDE.indexOf(kurz.get(a)) - GRUENDE.indexOf(kurz.get(c)) : (a, c) => summeGes(c) - summeGes(a));
+  const farbe = new Map(kz.map((k, i) => [k, istGrund ? (GRUENDE.indexOf(kurz.get(k)) < 0 ? "ohne" : grundKl(GRUENDE.indexOf(kurz.get(k))).slice(3)) : i < 6 ? "v" + (i + 1) : i === 6 ? "g7" : "offen"]));
+  const total = [...kzGes].find((k) => !kzMonat.has(k) && (!vors || vors.startsWith(k))) || null;
+  const s = { lauf: b.lauf, block: b.block, aufl: b.aufloesung, per, kz, kurz, farbe, total, les: D.le.map((l) => l.kuerzel).filter((l) => les.has(l)), zellen, maske: mrMaske(zellen, per, kz, [...les]) };
+  s.zelle = (le, p, k) => { const z = zellen.get(le + "|" + p + "|" + k); if (!z) return null; return s.maske.has(le + "|" + p + "|" + k) ? { w: null, unt: true, maske: true, text: "unterdrückt" } : z; };
+  D.mr.set(key, s);
+  return s;
+}
+/* Schutz für die Anzeige: Zeigt die Seite Monate und den ganzen Lauf nebeneinander, ließe sich ein einzelner unterdrückter Monat als
+   „ganzer Lauf minus übrige Monate“ ausrechnen (ebenso „alle LE minus übrige LE“). Hat eine solche Gruppe genau eine Unbekannte, blendet
+   die Seite zusätzlich den kleinsten exakten Monatswert der Gruppe aus, bis keine Gruppe mehr genau eine Unbekannte hat. */
+function mrMaske(zellen, per, kz, les) {
+  const maske = new Set(), gruppen = [];
+  for (const le of les.concat([""])) for (const k of kz) gruppen.push(per.map((p) => le + "|" + p + "|" + k).concat([le + "|gesamt|" + k]));
+  for (const p of per) for (const k of kz) gruppen.push(les.map((le) => le + "|" + p + "|" + k).concat(["|" + p + "|" + k]));
+  const bekannt = (c) => { const z = zellen.get(c); return !!z && z.w != null && !maske.has(c); };
+  for (let runde = 0, neu = true; neu && runde < 60; runde++) {
+    neu = false;
+    for (const g0 of gruppen) {
+      const g = g0.filter((c) => zellen.has(c));
+      if (g.length < 2 || !zellen.has(g0[g0.length - 1])) continue;
+      if (g.filter((c) => !bekannt(c)).length !== 1) continue;
+      const monate = g.filter((c) => bekannt(c) && !c.includes("|gesamt|"));
+      if (!monate.length) continue;
+      const pos = monate.filter((c) => zellen.get(c).w > 0);
+      maske.add((pos.length ? pos : monate).reduce((m, c) => (zellen.get(c).w < zellen.get(m).w ? c : m)));
+      neu = true;
+    }
+  }
+  return maske;
+}
+let MC_NR = 0;
+const zsvg = (tag, attrs, ...kinder) => { const el = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const k in attrs || {}) if (attrs[k] != null) el.setAttribute(k, String(attrs[k])); for (const x of kinder) if (x) el.append(x); return el; };
+/* Säulen (gestapelt) oder Linien über die Perioden für einen LE ("" = alle LE). Unterdrückte Zellen: schraffierter Deckel fester Höhe
+   bzw. Lücke in der Linie und schraffierte Marke an der Achse. */
+function mrDiagramm(s, le, modus) {
+  const box = h("div", { class: "mc" }), werte = s.per.map((p) => s.kz.map((k) => s.zelle(le, p, k)));
+  const zeichne = (W) => {
+    const H = 230, linien = modus === "linien", ml = 38, mr = 6, mt = 10, mb = 30, kap = 6;
+    const iw = Math.max(40, W - ml - mr), ih = H - mt - mb, band = iw / Math.max(1, s.per.length);
+    const sum = werte.map((z) => z.reduce((a, c) => a + (c && c.w != null ? c.w : 0), 0)), untN = werte.map((z) => z.filter((c) => c && c.w == null).length);
+    const max = skalaMax((linien ? Math.max(0, ...werte.flat().map((c) => (c && c.w != null ? c.w : 0))) : Math.max(0, ...sum)) || 1, false);
+    const y = (v) => mt + ih - (v / max) * ih, id = "mcS" + ++MC_NR;
+    const svg = zsvg("svg", { width: W, height: H, viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": (le || "Alle LE") + ", " + s.block + " je " + auflName(s.aufl) });
+    svg.append(zsvg("defs", null, zsvg("pattern", { id, patternUnits: "userSpaceOnUse", width: 5, height: 5, patternTransform: "rotate(45)" }, zsvg("rect", { width: 2, height: 5, style: "fill:var(--hatch)" }))));
+    for (const t of [0, max / 2, max]) {
+      svg.append(zsvg("line", { x1: ml, x2: ml + iw, y1: y(t), y2: y(t), class: t ? "gitter" : "achse0" }));
+      svg.append(zsvg("text", { x: ml - 5, y: y(t) + 4, "text-anchor": "end" }, document.createTextNode(fzahl(t))));
+    }
+    const jedes = band < 34 ? Math.ceil(34 / band) : 1, deckel = (x, yy, w, hh) => zsvg("rect", { x, y: yy, width: w, height: hh, fill: "url(#" + id + ")", style: "stroke:var(--hatch);stroke-width:.8" });
+    s.per.forEach((p, i) => {
+      const xm = ml + i * band + band / 2, bw = Math.max(2, band * 0.68);
+      if (!linien) {
+        let yy = mt + ih;
+        s.kz.forEach((k, j) => {
+          const c = werte[i][j];
+          if (!c || c.w == null || c.w <= 0) return;
+          const hgt = (c.w / max) * ih; yy -= hgt;
+          svg.append(zsvg("rect", { x: xm - bw / 2, y: yy, width: bw, height: Math.max(0.5, hgt), style: "fill:" + MR_FARBE[s.farbe.get(k)] }));
+        });
+        if (untN[i]) svg.append(deckel(xm - bw / 2, yy - kap, bw, kap));
+      } else if (untN[i]) svg.append(deckel(xm - 5, mt + ih - 7, 10, 7));
+      if (i % jedes === 0) svg.append(zsvg("text", { x: xm, y: H - mb + 14, "text-anchor": "middle" }, document.createTextNode(fMonat(p))));
+    });
+    if (linien) s.kz.forEach((k, j) => {
+      let d = "", stift = false;
+      s.per.forEach((p, i) => {
+        const c = werte[i][j], xm = ml + i * band + band / 2;
+        if (!c || c.w == null) { stift = false; return; }
+        d += (stift ? "L" : "M") + xm.toFixed(1) + " " + y(c.w).toFixed(1); stift = true;
+        svg.append(zsvg("circle", { cx: xm, cy: y(c.w), r: 2.6, style: "fill:" + MR_FARBE[s.farbe.get(k)] }));
+      });
+      if (d) svg.insertBefore(zsvg("path", { d, style: "fill:none;stroke-width:1.8;stroke:" + MR_FARBE[s.farbe.get(k)] }), svg.querySelector("circle"));
+    });
+    s.per.forEach((p, i) => {
+      const zeilen = [(le || "Alle LE") + " · " + (istMonat(s.aufl) ? "Erstmeldung " : "") + p];
+      s.kz.forEach((k, j) => { const c = werte[i][j]; if (c) zeilen.push(s.kurz.get(k) + ": " + (c.w == null ? (c.maske ? "unterdrückt (Schutz)" : "unterdrückt") : fz(c.w))); });
+      zeilen.push("Summe der exakten Werte: " + fz(sum[i]) + (untN[i] ? " (ohne " + untN[i] + " unterdrückte)" : ""));
+      svg.append(zsvg("rect", { x: ml + i * band, y: mt, width: band, height: ih, class: "ziel", fill: "transparent", "data-tipp": zeilen.join("\n") }));
+    });
+    box.replaceChildren(svg);
+  };
+  let breite = 0;
+  new ResizeObserver((e) => { const w = Math.floor(e[0].contentRect.width); if (w && Math.abs(w - breite) > 2) { breite = w; zeichne(w); } }).observe(box);
+  return box;
+}
+/* Karte einer Monatsreihe für alle LE ("") oder einen LE */
+function mrKarte(b, le) {
+  const s = mrSerie(b), titel = s.kz.some((k) => k.startsWith(GRUND_PRAEFIX)) ? "Gründe fehlender Forschungseinwilligung je " + auflName(s.aufl) : b.block + " je " + auflName(s.aufl);
+  if (le && !s.les.includes(le)) return karte(titel, le + " hat im Lauf „" + s.lauf + "“ keine Werte.");
+  const tot = s.total ? s.zelle(le, "gesamt", s.total) : null;
+  return h("section", { class: "karte" }, h("div", { class: "reihe zwischen" }, h("h2", null, titel + (le ? ", " + le : ", alle LE")), seg("Darstellung", [["stapel", "Gestapelt"], ["linien", "Linien"]], S.mrModus, (m) => { S.mrModus = m; })),
+    h("p", { class: "unter" }, "Fälle je " + auflName(s.aufl) + " der Erstmeldung, Lauf „" + s.lauf + "“ (unabhängig vom Datenstand der Matrix)" + (tot ? "; " + s.total + " im ganzen Lauf: " + (tot.w == null ? "unterdrückt" : fz(tot.w)) : "")
+      + ". Unterdrückte Zellen zählen in keiner Säule mit (schraffierter Deckel)" + (s.maske.size ? "; " + s.maske.size + " Monatswerte zusätzlich zum Schutz ausgeblendet" : "") + "."),
+    h("div", { class: "legende" }, s.kz.map((k) => h("span", null, h("i", { class: "sg " + s.farbe.get(k) }), s.kurz.get(k))), h("span", null, h("i", { class: "schraff" }), "unterdrückt oder zum Schutz ausgeblendet")),
+    mrDiagramm(s, le || "", S.mrModus),
+    h("div", { class: "reihe", style: "margin-top:8px" }, csvKnopf("monate_" + slug(s.block) + "_" + (le || "alle") + ".csv", () => ({ spalten: ["periode"].concat(s.kz.map((k) => s.kurz.get(k))),
+      zeilen: s.per.map((p) => [p].concat(s.kz.map((k) => { const c = s.zelle(le || "", p, k); return !c ? "" : c.w == null ? "unterdrückt" : c.w; }))) }))));
+}
+
+/* ===================================================================== Vergleich zweier Stände (Datenstände oder Zeiträume) */
+/* E: zellen Map(zeile -> Map(le ("" = alle LE) -> Map(stand -> Zeile))), st (Stände in Reihenfolge), name(stand), hinweis, bezug.
+   Eine Veränderung steht nur da, wenn beide Seiten exakt sind; sonst „n. b.“ */
+const EW_SPRUNG_PP = 10;
+const SP_STAND = "zeile, wert_text, wert, unterdrueckt, wert_min, wert_max, anteil_prozent, anteil_prozent_min, anteil_prozent_max";
+function ewDaten(zr) {
+  D.ew = D.ew || {};
+  if (D.ew[zr]) return D.ew[zr];
+  const zellen = new Map(), rein = (r, le) => {
+    let z = zellen.get(r.zeile); if (!z) zellen.set(r.zeile, (z = new Map()));
+    let l = z.get(le); if (!l) z.set(le, (l = new Map()));
+    l.set(r.datenstand, r);
+  };
+  for (const r of qN("SELECT le, datenstand, " + SP_STAND + " FROM wert_stand WHERE zeitraum = ?", [zr])) rein(r, r.le);
+  for (const r of qN("SELECT datenstand, " + SP_STAND + " FROM wert_stand_alle_le WHERE zeitraum = ?", [zr])) rein(r, "");
+  const hinweis = new Map();
+  for (const r of qN("SELECT zeile, le, datenstand_vorher, datenstand, hinweis FROM v_datenstandvergleich WHERE zeitraum = ? AND hinweis <> ''", [zr])) hinweis.set(r.zeile + "|" + r.le, r);
+  for (const r of qN("SELECT zeile, datenstand_vorher, datenstand, hinweis FROM v_datenstandvergleich_alle_le WHERE zeitraum = ? AND hinweis <> ''", [zr])) hinweis.set(r.zeile + "|", r);
+  const bezug = new Map(qN("SELECT datenstand || '|' || zeile AS k, bezug FROM kennzahl_stand").map((r) => [r.k, r.bezug]));
+  return (D.ew[zr] = { st: dsFuer(zr), zellen, hinweis, bezug, name: fDatumK, gfk: (le, P) => gfkNullIn(le, zr, P.von) || gfkNullIn(le, zr, P.bis) });
+}
+/* Zeiträume ohne „gesamt“ (Teilzeiträume) im gezeigten Kontext, als Vergleich */
+function zrDaten() {
+  const st = ZR.filter((z) => z !== "gesamt"), zellen = new Map();
+  for (const zr of st) {
+    for (const r of q("SELECT " + SPALTEN_W + " FROM v_wert WHERE zeitraum = ?", [zr])) { if (!zellen.has(r.zeile)) zellen.set(r.zeile, new Map()); const z = zellen.get(r.zeile); if (!z.has(r.le)) z.set(r.le, new Map()); z.get(r.le).set(zr, r); }
+    for (const r of q("SELECT zeile, wert_anzeige, wert, unterdrueckt, wert_min, wert_max, anteil_prozent, anteil_prozent_min, anteil_prozent_max FROM v_wert_alle_le WHERE zeitraum = ?", [zr])) { if (!zellen.has(r.zeile)) zellen.set(r.zeile, new Map()); const z = zellen.get(r.zeile); if (!z.has("")) z.set("", new Map()); z.get("").set(zr, r); }
+  }
+  return { st, zellen, hinweis: new Map(), bezug: new Map(), name: (z) => ZR_KURZ[z], ohneFlags: true, gfk: (le, P) => ohneGfk2(le, P.von) || ohneGfk2(le, P.bis) };
+}
+const tageZwischen = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 864e5);
+/* Paar der Datenstände: der vorige und der gezeigte Datenstand des Zeitraums */
+function ewPaar(zr) {
+  const st = dsFuer(zr), bis = dsAktiv(zr), i = st.indexOf(bis);
+  return i < 1 ? null : { von: st[i - 1], bis, wochen: Math.max(1, tageZwischen(st[i - 1], bis) / 7) };
+}
+function ewZelle(E, zeile, le, P) {
+  const m = ((E.zellen.get(zeile) || new Map()).get(le)) || new Map(), a = m.get(P.von) || null, b = m.get(P.bis) || null, kz = D.kzMap.get(zeile) || {};
+  const ex = (r) => !!r && r.wert != null;
+  const d = ex(a) && ex(b) ? b.wert - a.wert : null;
+  const dp = a && b && a.anteil_prozent != null && b.anteil_prozent != null ? Math.round((b.anteil_prozent - a.anteil_prozent) * 10) / 10 : null;
+  const fl = [];
+  if (!a && b) fl.push(["neu", "info", "neu"]);
+  if (a && !b) fl.push(["entfallen", "info", "nicht mehr geliefert"]);
+  if (ex(a) && b && !ex(b) && b.unterdrueckt) fl.push(["jetzt_unt", "info", "jetzt unterdrückt"]);
+  if (a && !ex(a) && a.unterdrueckt && ex(b)) fl.push(["vorher_unt", "info", "vorher unterdrückt"]);
+  if (!E.ohneFlags) {
+    if (kz.einheit === "Anzahl" && ex(a) && ex(b) && a.wert >= 10 && b.wert === 0) fl.push(["null", "fehler", "auf 0 gefallen"]);
+    else if (kz.einheit === "Anzahl" && d != null && d < 0) fl.push(["gesunken", zeile === D.profilZeile.faelle ? "fehler" : "warn", zeile === D.profilZeile.faelle ? "Fallzahl gesunken" : "gesunken"]);
+    if (dp != null && Math.abs(dp) / P.wochen > EW_SPRUNG_PP) fl.push(["sprung", "warn", "Sprung " + vz(dp, f1) + " Pp."]);
+  }
+  const hw = E.hinweis.get(zeile + "|" + le);
+  return { a, b, d, dp, fl, hinweis: hw && hw.datenstand === P.bis && hw.datenstand_vorher === P.von ? hw.hinweis : null };
+}
+const ewText = (r, mitAnteil) => {
+  if (!r) return "–";
+  const t = anzeige(r), a = anteilW(r);
+  return (istUntText(t) ? "unterdrückt" : zahlText(t)) + (mitAnteil && a.art !== "leer" ? " (" + a.text + ")" : "");
+};
+const ewDelta = (c) => (c.d == null ? (c.a && c.b ? "n. b." : "–") : vz(c.d));
+const ewFlags = (c) => c.fl.map(([, art, t]) => h("span", { class: "flag " + art }, t));
+/* Hantel: Punkt je Stand (älter hohl), Linie dazwischen; unterdrückt mit Spanne: schraffierte Spanne, ohne Spanne: Marke links vor der Skala */
+function ewHantel(E, zeile, le, P, modus, max) {
+  const spur = h("div", { class: "db-spur" }), m = ((E.zellen.get(zeile) || new Map()).get(le)) || new Map();
+  const x = (v) => "calc(18px + (100% - 24px) * " + Math.max(0, Math.min(1, v / max)).toFixed(4) + ")";
+  const breite = (lo, hi) => "calc((100% - 24px) * " + ((hi - lo) / max).toFixed(4) + ")";
+  const lage = (r) => {
+    if (!r) return null;
+    if (modus === "anteil") { const a = anteilW(r); return a.art === "exakt" ? { v: a.lo } : a.art === "spanne" ? { lo: a.lo, hi: a.hi } : r.unterdrueckt ? { ut: true } : null; }
+    return r.wert != null ? { v: +r.wert } : r.wert_min != null ? { lo: +r.wert_min, hi: +r.wert_max } : r.unterdrueckt ? { ut: true } : null;
+  };
+  const pa = lage(m.get(P.von)), pb = lage(m.get(P.bis));
+  if (pa && pb && pa.v != null && pb.v != null && pa.v !== pb.v) spur.append(h("i", { class: "ln " + (pb.v > pa.v ? "auf" : "ab"), style: "left:" + x(Math.min(pa.v, pb.v)) + ";width:" + breite(Math.min(pa.v, pb.v), Math.max(pa.v, pb.v)) }));
+  for (const [p, alt] of [[pa, true], [pb, false]]) {
+    if (!p) continue;
+    if (p.ut) spur.append(h("i", { class: "ut", style: "left:7px;" + (alt ? "opacity:.6" : "") }));
+    else if (p.v == null) spur.append(h("i", { class: "sp", style: "left:" + x(p.lo) + ";width:" + breite(p.lo, p.hi) + (alt ? ";opacity:.6" : "") }));
+    else spur.append(h("i", { class: "pt" + (alt ? " alt" : ""), style: "left:" + x(p.v) }));
+  }
+  return spur;
+}
+/* Hantelliste einer Kennzahl über die LE (Datenstände oder Zeiträume) */
+function hantelKarte(E, P, kz, titel) {
+  const zeile = kz.zeile, tage = kz.einheit === "Tage", gfk = istGfkAbschnitt(kz.abschnitt);
+  const hatAnteil = !tage && [...(E.zellen.get(zeile) || new Map()).values()].some((m) => [...m.values()].some((r) => r.anteil_prozent_min != null));
+  const modus = hatAnteil && S.ewModus === "anteil" ? "anteil" : "anzahl";
+  const zellen = D.le.map((l) => ({ le: l.kuerzel, c: ewZelle(E, zeile, l.kuerzel, P) })).filter((z) => z.c.a || z.c.b), alle = ewZelle(E, zeile, "", P);
+  const wert = (r) => (!r ? 0 : modus === "anteil" ? (r.anteil_prozent_max != null ? r.anteil_prozent_max : 0) : r.wert != null ? +r.wert : r.wert_max != null ? +r.wert_max : 0);
+  const max = modus === "anteil" ? 100 : skalaMax(Math.max(1, ...zellen.flatMap((z) => [wert(z.c.a), wert(z.c.b)])), false);
+  const dT = (c) => (modus === "anteil" ? (c.dp == null ? (c.a && c.b ? "n. b." : "–") : vz(c.dp, f1) + " Pp.") : ewDelta(c));
+  const liste = h("div", { class: "bz-liste hantel" });
+  for (const z of sortiere(zellen, (z) => { const v = modus === "anteil" ? z.c.dp : z.c.d; return v == null ? null : Math.abs(v); }, -1)) {
+    const c = z.c, d = dT(c), aT = modus === "anteil" ? anteilW(c.a).text : ewText(c.a), bT = modus === "anteil" ? anteilW(c.b).text : ewText(c.b);
+    const tipp = [z.le + " · " + kz.kategorie, E.name(P.von) + ": " + ewText(c.a, true), E.name(P.bis) + ": " + ewText(c.b, true), "Δ " + ewDelta(c) + (c.dp != null ? ", " + vz(c.dp, f1) + " Pp." : "")]
+      .concat(c.d == null && c.a && c.b ? ["n. b.: mindestens eine Seite unterdrückt"] : [], c.hinweis ? ["Hinweis: " + c.hinweis] : []);
+    liste.append(bzZeile(z.le, ewHantel(E, zeile, z.le, P, modus, max), [h("small", null, aT.replace("unterdrückt", "unt.") + " → "), bT.replace("unterdrückt", "unt."), " ",
+      h("strong", { class: d === "n. b." ? "unt-text" : null, style: "font-weight:600" }, "Δ " + d), ewFlags(c), gfk && E.gfk && E.gfk(z.le, P) ? gfkMarke() : null], zelleHref(zeile, z.le), tipp.join("\n")));
+  }
+  liste.append(achse(max, modus === "anteil" ? "%" : "", true));
+  const bz = [P.von, P.bis].map((s) => E.bezug.get(s + "|" + zeile)).filter((x) => x != null);
+  return h("section", { class: "karte" },
+    h("div", { class: "reihe zwischen" }, h("h2", null, titel + ": " + E.name(P.von) + " → " + E.name(P.bis)),
+      hatAnteil ? seg("Darstellung", [["anzahl", "Anzahl"], ["anteil", "Anteil"]], modus, (m) => { S.ewModus = m; }) : null),
+    h("p", { class: "unter" }, "Alle LE: " + ewText(alle.a, true) + " → " + ewText(alle.b, true) + ", Δ " + ewDelta(alle) + ". Sortiert nach dem Betrag der Veränderung; „n. b.“: eine Seite unterdrückt."),
+    new Set(bz).size > 1 ? h("p", { class: "hinweis achtung", style: "margin-bottom:8px" }, "Bezug geändert: „" + bz[0] + "“ → „" + bz[1] + "“. Anteile nur mit Vorsicht vergleichen.") : null,
+    h("div", { class: "legende" }, h("span", null, h("i", { class: "pkt", style: "border:2px solid var(--db-alt);background:var(--surface)" }), E.name(P.von)),
+      h("span", null, h("i", { class: "pkt", style: "background:var(--db-neu)" }), E.name(P.bis)), h("span", null, h("i", { style: "background:var(--db-auf);height:2px" }), "gestiegen"),
+      h("span", null, h("i", { style: "background:var(--db-ab);height:2px" }), "gesunken"), h("span", null, h("i", { class: "schraff" }), "unterdrückt")),
+    liste, h("div", { class: "reihe", style: "margin-top:10px" }, csvKnopf("vergleich_" + zeile + "_" + P.von + "_" + P.bis + ".csv", () => ({
+      spalten: ["le", "vorher", "anteil_vorher", "nachher", "anteil_nachher", "differenz", "differenz_prozentpunkte", "auffaellig"],
+      zeilen: [["alle LE", alle]].concat(zellen.map((z) => [z.le, z.c])).map(([le, c]) => [le, c.a ? anzeige(c.a) : "", c.a ? c.a.anteil_prozent : "", c.b ? anzeige(c.b) : "", c.b ? c.b.anteil_prozent : "",
+        c.d == null ? (c.a && c.b ? "nicht berechenbar" : "") : c.d, c.dp == null ? "" : c.dp, c.fl.map((f) => f[2]).join(", ")]) }))));
+}
+/* Liste der auffälligen Veränderungen eines Zeitraums (Übersicht) */
+function ewAuffaellig(zr) {
+  D.ewA = D.ewA || {};
+  const P = ewPaar(zr);
+  if (!P) return null;
+  const key = zr + "|" + P.von + "|" + P.bis;
+  if (D.ewA[key]) return D.ewA[key];
+  const E = ewDaten(zr), out = { P, null: [], sprung: [], gesunken: [], neu: [], jetztUnt: [], faelle: [] };
+  for (const [zeile, m] of E.zellen) {
+    const kz = D.kzMap.get(zeile);
+    if (!kz) continue;
+    for (const le of m.keys()) {
+      const c = ewZelle(E, zeile, le, P), z = { zeile, le, c, kz }, has = (f) => c.fl.some((x) => x[0] === f);
+      if (zeile === D.profilZeile.faelle && le) out.faelle.push(z);
+      if (has("null")) out.null.push(z);
+      else if (has("sprung") && kz.einheit !== "Tage") out.sprung.push(z);
+      if (has("gesunken")) out.gesunken.push(z);
+      if (has("jetzt_unt") && le) out.jetztUnt.push(z);
+      if (has("neu") && le === "") out.neu.push(z);
+    }
+  }
+  out.sprung.sort((a, b) => Math.abs(b.c.dp) - Math.abs(a.c.dp));
+  out.gesunken.sort((a, b) => a.c.d - b.c.d);
+  out.jetztUnt.sort((a, b) => b.c.a.wert - a.c.a.wert);
+  return (D.ewA[key] = out);
+}
+/* Verlauf einer Kennzahl: Datenstände, Zeiträume, Monatsreihe */
+function zeitKennzahl(root, kz) {
+  const P = ewPaar(S.zr), E = P ? ewDaten(S.zr) : null, alt = P && [...((E.zellen.get(kz.zeile)) || new Map()).values()].some((m) => m.has(P.von));
+  root.append(P && !alt ? h("p", { class: "hinweis" }, "Neue Kennzahl seit dem " + fDatum(P.bis) + ": kein Vergleich der Datenstände.")
+    : P ? hantelKarte(E, P, kz, "Datenstände, " + ZR_KURZ[S.zr])
+    : h("p", { class: "hinweis" }, "„" + ZR_KURZ[S.zr] + "“ hat vor dem " + fDatum(dsAktiv()) + " keinen Datenstand. Datenstände vergleicht „" + ZR.filter((z) => dsFuer(z).length > 1).map((z) => ZR_KURZ[z]).join(", ") + "“."));
+  const Z = zrDaten();
+  if (!P && Z.st.length === 2 && Z.zellen.has(kz.zeile)) root.append(hantelKarte(Z, { von: Z.st[0], bis: Z.st[1] }, kz, "Zeiträume (Datenstand " + fDatumK(dsAktiv(Z.st[1])) + ")"));
+  const g = gruppeVon(kz.zeile), bl = g ? bloeckeFuer(g) : [];
+  for (const b of bl) root.append(mrKarte(b, ""));
+  if (!bl.length) root.append(h("p", { class: "muted klein" }, "Keine Monatsreihe zu dieser Kennzahl."));
+}
+function zeitVerteilung(root, g, fac, kl) {
+  const kats = [...new Set(fac.kats.filter((k) => !k.rest).map((k) => k.zeile))];
+  let z = S.kzKat[g.abschnitt]; if (!kats.includes(z)) z = kats[0];
+  root.append(h("div", { class: "reihe" }, h("label", { class: "feld" }, "Kategorie", h("select", { id: "kz-kat", onchange: (e) => { S.kzKat[g.abschnitt] = +e.target.value; zeige(); } },
+    kats.map((x) => h("option", { value: String(x), selected: x === z }, D.kzMap.get(x).kategorie))))));
+  zeitKennzahl(root, D.kzMap.get(z));
+}
+
+/* ===================================================================== Kennzahl × LE */
+function zelle(root, r) {
+  const le = r.le, l = D.leMap.get(le);
+  const g = gruppeId(r.id), kz = g ? null : D.kzMap.get(+r.id);
+  if (!g && !kz) { root.append(h("p", { class: "hinweis achtung" }, "Kennzahl „" + r.id + "“ gibt es nicht.")); return; }
+  const titel = g ? g.abschnitt : kz.kategorie, abschnitt = g ? g.abschnitt : kz.abschnitt;
+  root.append(detailKopf([h("a", { href: ln("a/" + r.id) }, kuerze(titel, 60)), leLink(le)], le + " · " + titel, null,
+    h("span", { class: "klein muted" }, l.name || "")));
+  if (istGfkAbschnitt(abschnitt) && ohneGfk2(le)) root.append(h("p", { class: "hinweis achtung" }, gfkMarke(), " ", GFK_TIPP));
+  if (g) {
+    const { fac, kl, wahl } = facWahl(g), T = wAlle(), kats = fac.kats.filter((k) => !k.rest), zl = [...new Set(kats.map((k) => k.zeile))];
+    if (wahl) root.append(wahl);
+    const W = new Map(), sp = ZR.flatMap((zr) => dsFuer(zr).slice().reverse().map((ds) => zr + "|" + ds)), akt = S.zr + "|" + dsAktiv(), tb = h("tbody");
+    for (const x of qN("SELECT datenstand, zeitraum, " + SP_STAND + " FROM wert_stand WHERE le = ? AND zeile IN (" + zl.map(() => "?").join(",") + ")", [le].concat(zl))) W.set(x.zeile + "|" + x.zeitraum + "|" + x.datenstand, x);
+    for (const k of kats) {
+      const t = (T.get(k.zeile) || {})[S.zr];
+      tb.append(h("tr", null, h("td", null, h("a", { href: ln("a/" + k.zeile) }, k.label), rfMarke(le, k.zeile)),
+        sp.map((s) => h("td", { class: "r", style: s === akt ? "font-weight:600" : null }, h("a", { href: zelleHref(k.zeile, le), style: "color:inherit" }, wertText(W.get(k.zeile + "|" + s))))),
+        h("td", { class: "r" }, t ? wertText(t) : "–")));
+    }
+    root.append(karte("Kategorien je Zeitraum und Datenstand", "Fett: gezeigter Kontext. Wert: Kategorie × " + le + ".", h("div", { class: "tab-wrap" }, h("table", { class: "tab", style: "min-width:" + (300 + sp.length * 110) + "px" },
+      h("thead", null, h("tr", null, h("th", null, "Kategorie"), sp.map((s) => h("th", { class: "r" }, ZR_KURZ[s.split("|")[0]] + " " + fDatumK(s.split("|")[1]))), h("th", { class: "r" }, "alle LE, " + ZR_KURZ[S.zr]))), tb))));
+    const zv = zeitVerlauf(g, fac, kl, le); if (zv) root.append(zv);
+    return;
+  }
+  /* eine Zeile: alle Zeiträume × Datenstände, jede Spalte datiert */
+  const W = new Map(), A = new Map();
+  for (const x of qN("SELECT datenstand, zeitraum, " + SP_STAND + " FROM wert_stand WHERE le = ? AND zeile = ?", [le, kz.zeile])) W.set(x.zeitraum + "|" + x.datenstand, x);
+  for (const x of qN("SELECT datenstand, zeitraum, " + SP_STAND + " FROM wert_stand_alle_le WHERE zeile = ?", [kz.zeile])) A.set(x.zeitraum + "|" + x.datenstand, x);
+  const akt = S.zr + "|" + dsAktiv(), tb = h("tbody");
+  for (const zr of ZR) for (const ds of dsFuer(zr).slice().reverse()) {
+    const k = zr + "|" + ds;
+    tb.append(h("tr", { class: k === akt ? "summe" : null }, h("td", null, ZR_KURZ[zr]), h("td", null, fDatum(ds)), h("td", { class: "muted klein" }, bezugIn(kz.zeile, ds) || "–"),
+      h("td", { class: "r" }, istGfkAbschnitt(kz.abschnitt) && gfkNullIn(le, zr, ds) ? gfkMarke() : null, W.has(k) ? wertText(W.get(k)) : h("span", { class: "muted" }, (kz.staende || "").includes(ds) ? "keine Spalte" : "–")),
+      h("td", { class: "r" }, A.has(k) ? wertText(A.get(k)) : "–"), h("td", null, vergleichBalken(W.get(k), A.get(k), le))));
+  }
+  const P = ewPaar(S.zr), c = P ? ewZelle(ewDaten(S.zr), kz.zeile, le, P) : null;
+  root.append(karte("Werte je Zeitraum und Datenstand", "Fett: gezeigter Kontext. " + (W.get(akt) && istUntZeile(W.get(akt)) ? untErkl(dsAktiv()) + "." : ""),
+    h("div", { class: "tab-wrap" }, h("table", { class: "tab" }, h("thead", null, h("tr", null, ["Zeitraum", "Datenstand", "Bezug"].map((t) => h("th", null, t)), h("th", { class: "r" }, le), h("th", { class: "r" }, "alle LE"), h("th", null, le + " gegen alle LE"))), tb)),
+    c ? h("p", { style: "margin-top:8px" }, "Veränderung " + fDatumK(P.von) + " → " + fDatumK(P.bis) + ": ", h("strong", null, ewDelta(c)), c.dp != null ? " (" + vz(c.dp, f1) + " Pp.)" : "", ewFlags(c), c.hinweis ? h("span", { class: "muted klein" }, " · " + c.hinweis) : null) : null,
+    rfMarke(le, kz.zeile) ? h("p", { style: "margin-top:6px" }, "Dazu gibt es eine ", rfMarke(le, kz.zeile), " an " + le + ".") : null));
+  const g2 = gruppeVon(kz.zeile);
+  if (g2 && istKategorial(g2)) {
+    const facs = facettenVon(g2), fi = facs.findIndex((f) => f.zeilen.has(kz.zeile));
+    if (fi >= 0) { const fac = facs[fi], zv = zeitVerlauf(g2, fac, (i) => "sg " + (fac.farben ? fac.farben[i] : "v" + ((i % 6) + 1)), le); if (zv) root.append(zv); }
+  }
+  for (const b of g2 ? bloeckeFuer(g2) : []) root.append(mrKarte(b, le));
+}
+
+/* ===================================================================== LE */
+function leKopf(le, zeit) {
+  const l = D.leMap.get(le), rf = D.rfAnz.get(le), fakt = (dt, dd) => [h("dt", null, dt), h("dd", null, dd || "–")];
+  return [detailKopf([h("a", { href: ln("le") }, "LE")], le + " · " + (l.name_kurz || l.name || ""), { stand: ln("le/" + leSlug(le)), verlauf: ln("le/" + leSlug(le) + "/zeit"), zeit }),
+    h("div", { class: "reihe klein" }, h("span", { class: "muted" }, [l.ort, l.grz ? "GRZ " + l.grz : null].filter(Boolean).join(" · ")),
+      ohneGfk2(le) ? gfkMarke() : null,
+      h("details", { class: "schlicht" }, h("summary", null, "Stammdaten"), h("dl", { class: "fakten", style: "margin-top:6px" }, fakt("Name", l.name), fakt("IK", l.ik), fakt("Zulassung", l.zulassung),
+        fakt("Genomrechenzentrum", (l.grz || "–") + (l.grz_kennung ? " (" + l.grz_kennung + ")" : "")), fakt("Netzwerk", l.netzwerk), fakt("Klinischer Datenknoten", l.kdk),
+        fakt("Spalte in der Matrix", ZR.filter((z) => D.profil[z][le]).map((z) => ZR_KURZ[z]).join(", ")))))];
+}
+function leIndex(root) {
+  const zr = S.zr, P = D.profil[zr], sort = S.sortLe;
+  const sp = [{ key: "le", titel: "LE" }, { key: "faelle", titel: "Fälle", href: kzHref("faelle"), r: true }].concat(KERN.map((k) => ({ key: k.k, titel: k.t(), href: kzHref(k.k), r: true, kern: k })), []);
+  const wert = (key) => (l) => {
+    const p = P[l.kuerzel];
+    if (key === "le") return l.kuerzel;
+    if (key === "rf") return D.rfAnz.has(l.kuerzel) ? D.rfAnz.get(l.kuerzel).nr.size : 0;
+    if (!p) return null;
+    return key === "faelle" ? p.faelle : mitte(anteil(p, key));
+  };
+  const th = (s) => h("th", { scope: "col", class: (s.r ? "r " : "") + (s.key === "le" ? "fest" : ""), "aria-sort": sort.key === s.key ? (sort.dir > 0 ? "ascending" : "descending") : null },
+    s.href ? h("a", { href: s.href }, s.titel) : s.titel, " ", h("button", { type: "button", "aria-label": "nach " + s.titel + " sortieren", onclick: () => { if (sort.key === s.key) sort.dir = -sort.dir; else { sort.key = s.key; sort.dir = s.key === "le" ? 1 : -1; } zeige(); } }, sort.key === s.key ? "" : "⇅"));
+  const zelleTd = (p, kern, le) => {
+    const a = anteil(p, kern.k), z = D.profilZeile[kern.k], td = h("td", { class: "heat" });
+    const tipp = [(le || "alle LE") + " · " + kern.t(), a.art === "unt" ? untErkl(dsAktiv()) : a.art === "spanne" ? "Spanne, eine Zelle unterdrückt" : null, le ? "alle LE: " + anteil(D.alle[zr], kern.k).text : null];
+    if (a.art === "leer") td.classList.add("leer"); else if (a.art === "unt") td.classList.add("spanne", "unt"); else if (a.art === "spanne" && !a.eng) td.classList.add("spanne"); else td.style.setProperty("--v", String(Math.round(mitte(a))));
+    const fl = le ? (D.flag.get(le) || new Map()).get(z) : null;
+    if (fl) { td.classList.add("auff"); tipp.push(...new Set(fl)); }
+    const gfk = kern.gfk && le && ohneGfk2(le);
+    if (gfk) tipp.push(GFK_TIPP);
+    td.setAttribute("data-tipp", tipp.filter(Boolean).join("\n"));
+    td.append(le && z ? h("a", { href: zelleHref(z, le) }, a.text, gfk ? h("span", { class: "flag warn" }, "GFK") : null) : a.text);
+    return td;
+  };
+  const tb = h("tbody", null, h("tr", { class: "summe" }, h("td", { class: "fest" }, "alle LE"), h("td", { class: "r" }, zahlText((D.alle[zr] || {}).faelle_text)), KERN.map((k) => zelleTd(D.alle[zr], k, null))));
+  for (const l of sortiere(D.le, wert(sort.key), sort.dir)) {
+    const p = P[l.kuerzel], rf = D.rfAnz.get(l.kuerzel);
+    tb.append(h("tr", null, h("td", { class: "fest" }, leLink(l.kuerzel)),
+      p ? [h("td", { class: "r" }, h("a", { href: zelleHref(D.profilZeile.faelle, l.kuerzel), style: "color:inherit" }, zahlText(p.faelle_text))), KERN.map((k) => zelleTd(p, k, l.kuerzel))]
+        : h("td", { class: "muted", colspan: String(KERN.length + 1) }, "keine Spalte für „" + ZR_KURZ[zr] + "“"),
+      null));
+  }
+  root.append(karte("Leistungserbringer", "Anteile in %. Kopf: Kennzahl öffnen, ⇅ sortiert. Zelle: Kennzahl × LE.",
+    h("div", { class: "legende" }, untLegende(), h("span", null, h("span", { class: "flag warn" }, "GFK"), "keine GFK2: Diagnoserate abgeschl. Fälle nicht aussagekräftig")),
+    h("div", { class: "tab-wrap" }, h("table", { class: "tab" }, h("thead", null, h("tr", null, sp.map(th))), tb)),
+    h("div", { class: "reihe", style: "margin-top:8px" }, csvKnopf("le_kennzahlen_" + zr + ".csv", () => ({ spalten: ["le", "ort", "grz", "faelle"].concat(KERN.flatMap((x) => [x.k + "_prozent", x.k + "_prozent_min", x.k + "_prozent_max"])),
+      zeilen: D.le.map((l) => { const p = P[l.kuerzel]; return [l.kuerzel, l.ort, l.grz, p ? p.faelle_text : ""].concat(KERN.flatMap((x) => (p ? [p[x.k + "_prozent"], p[x.k + "_prozent_min"], p[x.k + "_prozent_max"]] : ["", "", ""]))); }) })))));
+}
+/* LE, Stand: alle Kennzahlen im gezeigten Kontext, je Abschnitt aufklappbar */
+function leStand(root, le) {
+  root.append(...leKopf(le, false));
+  const zr = S.zr;
+  if (!D.profil[zr][le]) root.append(h("p", { class: "hinweis achtung" }, le + " hat für „" + ZR_KURZ[zr] + "“ keine Spalte in der Matrix."));
+  const W = new Map(q("SELECT " + SPALTEN_W + " FROM v_wert WHERE le = ? AND zeitraum = ?", [le, zr]).map((x) => [x.zeile, x])), T = wAlle();
+  const box = h("div");
+  for (const g of kzGruppen()) {
+    const tb = h("tbody"), gfk = istGfkAbschnitt(g.abschnitt) && ohneGfk2(le);
+    const det = h("details", { class: "block", open: S.offen.has(g.abschnitt) || null, ontoggle: () => (det.open ? S.offen.add(g.abschnitt) : S.offen.delete(g.abschnitt)) },
+      h("summary", null, h("span", null, g.abschnitt, gfk ? gfkMarke() : null), h("small", null, (istKategorial(g) ? "Verteilung · " : "") + g.zeilen.length)),
+      h("div", { class: "tab-wrap" }, h("table", { class: "tab profil" }, h("thead", null, h("tr", null, h("th", null, "Kennzahl"), h("th", { class: "r" }, le), h("th", null, le + " gegen alle LE"), h("th", { class: "r" }, "alle LE"))), tb)));
+    for (const k of g.zeilen) {
+      const w = W.get(k.zeile), t = (T.get(k.zeile) || {})[zr];
+      tb.append(h("tr", null, h("td", { style: k.teil_von ? "padding-left:22px" : null }, h("a", { href: ln("a/" + k.zeile), "data-tipp": kuerze(k.bedeutung, 260) }, k.kategorie), rfMarke(le, k.zeile)),
+        h("td", { class: "r", style: "white-space:nowrap" }, w ? h("a", { href: zelleHref(k.zeile, le), style: "color:inherit" }, wertText(w)) : h("span", { class: "muted" }, "–")),
+        h("td", null, w ? h("a", { href: zelleHref(k.zeile, le) }, vergleichBalken(w, t, le)) : null), h("td", { class: "r", style: "white-space:nowrap" }, t ? wertText(t) : "–")));
+    }
+    if (istKategorial(g)) tb.append(h("tr", null, h("td", { colspan: "4" }, h("a", { href: zelleHref(g.id, le) }, "Verteilung von " + le + " über die Zeit"))));
+    box.append(det);
+  }
+  root.append(h("div", { class: "reihe zwischen" }, h("p", { class: "klein muted" }, "Wert · Anteil im gezeigten Kontext; Strich im Balken = alle LE. Kennzahl: alle LE vergleichen; Wert: Kennzahl × LE."),
+    h("div", { class: "reihe" }, h("button", { type: "button", class: "btn klein", onclick: () => box.querySelectorAll("details").forEach((d) => { d.open = true; }) }, "Alle öffnen"),
+      h("button", { type: "button", class: "btn klein", onclick: () => box.querySelectorAll("details").forEach((d) => { d.open = false; }) }, "Alle schließen"))), box);
+}
+/* LE, Verlauf: Veränderungen zwischen den Datenständen, Monatsreihen, Meldebestätigungen je Monat */
+function leZeit(root, le) {
+  root.append(...leKopf(le, true));
+  const P = ewPaar(S.zr);
+  if (P) {
+    const E = ewDaten(S.zr), tb = h("tbody");
+    let n = 0, alle = 0;
+    for (const g of kzGruppen()) {
+      const zeilen = g.zeilen.map((k) => ({ k, c: ewZelle(E, k.zeile, le, P) })).filter(({ c }) => c.a || c.b);
+      alle += zeilen.length;
+      const zeig = S.leAlle ? zeilen : zeilen.filter(({ c }) => (c.d != null && c.d !== 0) || (c.dp != null && c.dp !== 0) || c.fl.length || (c.d == null && c.a && c.b));
+      if (!zeig.length) continue;
+      n += zeig.length;
+      tb.append(h("tr", { class: "abschnitt" }, h("td", { colspan: "6" }, g.abschnitt, istGfkAbschnitt(g.abschnitt) && (gfkNullIn(le, S.zr, P.von) || gfkNullIn(le, S.zr, P.bis)) ? gfkMarke() : null)));
+      for (const { k, c } of zeig) tb.append(h("tr", null, h("td", { style: k.teil_von ? "padding-left:22px" : null }, h("a", { href: ln("a/" + k.zeile + "/zeit") }, kuerze(k.kategorie, 70))),
+        [c.a, c.b].map((x) => h("td", { class: "r" }, h("a", { href: zelleHref(k.zeile, le), style: "color:inherit" }, ewText(x, true)))),
+        h("td", { class: "r" + (c.d == null && c.a && c.b ? " unt-text" : ""), style: "white-space:nowrap" }, ewDelta(c)), h("td", { class: "r" }, c.dp == null ? "–" : vz(c.dp, f1)), h("td", null, ewFlags(c), c.hinweis ? h("span", { class: "flag info", "data-tipp": c.hinweis }, "Hinweis") : null)));
+    }
+    root.append(h("section", { class: "karte" }, h("div", { class: "reihe zwischen" }, h("h2", null, "Datenstände " + fDatumK(P.von) + " → " + fDatumK(P.bis) + ", " + ZR_KURZ[S.zr]),
+      seg("Zeilen", [[false, "geänderte (" + n + ")"], [true, "alle"]], S.leAlle, (x) => { S.leAlle = x; })),
+      h("p", { class: "unter" }, "Anzahl (Anteil). Δ nur bei exakten Werten, sonst „n. b.“; Pp. = Prozentpunkte." + (S.leAlle ? "" : " " + (alle - n) + " unveränderte Zeilen ausgeblendet.")),
+      h("div", { class: "tab-wrap" }, h("table", { class: "tab", style: "min-width:600px" }, h("thead", null, h("tr", null, h("th", null, "Kennzahl"), h("th", { class: "r" }, fDatum(P.von)), h("th", { class: "r" }, fDatum(P.bis)),
+        h("th", { class: "r" }, "Δ"), h("th", { class: "r" }, "Δ Pp."), h("th", null, "auffällig"))), tb))));
+  } else root.append(h("p", { class: "hinweis" }, "„" + ZR_KURZ[S.zr] + "“ hat vor dem " + fDatum(dsAktiv()) + " keinen Datenstand."));
+  for (const b of mrBloecke()) root.append(mrKarte(b, le));
+}
+
+/* ===================================================================== Speichern und Kopieren */
+function meldung(knopf, text) {
+  if (!knopf) return;
+  if (knopf._alt == null) knopf._alt = knopf.textContent;
+  knopf.textContent = text;
+  clearTimeout(knopf._t);
+  knopf._t = setTimeout(() => { knopf.textContent = knopf._alt; knopf._alt = null; }, 2600);
+}
+function kopiere(text, knopf) {
+  const rueckfall = () => {
+    const ta = h("textarea", { class: "mono", rows: "5", readonly: true, "aria-label": "Text zum Kopieren" });
+    ta.value = text;
+    knopf.parentElement.insertAdjacentElement("afterend", ta);
+    ta.focus(); ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    if (ok) { ta.remove(); meldung(knopf, "kopiert"); } else meldung(knopf, "markiert: jetzt kopieren");
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => meldung(knopf, "kopiert"), rueckfall);
+    else rueckfall();
+  } catch (e) { rueckfall(); }
+}
+async function speichere(dateiname, daten, knopf) {
+  if (!F.downloads) return;
+  try { await F.downloads.save({ filename: dateiname, data: daten }); meldung(knopf, "gespeichert"); }
+  catch (e) {
+    const c = e && e.code ? String(e.code) : "unavailable";
+    if (c === "declined") return;
+    if (c === "rate_limited") meldung(knopf, "bitte kurz warten");
+    else if (c === "too_large") meldung(knopf, "Datei zu groß");
+    else if (c === "bad_request" || c === "rejected_extension" || c === "extension_not_enabled" || c === "transform_error") meldung(knopf, "Format hier nicht möglich");
+    else { F.downloads = null; dlKnoepfe(); }
+  }
+}
+function dlKnoepfe() { for (const b of document.querySelectorAll(".braucht-dl")) b.hidden = !F.downloads; }
+function csvText(spalten, zeilen, trenner) {
+  const f = (v) => {
+    if (v == null) return "";
+    if (typeof v === "number") return String(v).replace(".", ",");
+    const s = String(v);
+    return /[";\n\t]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  return [spalten.map(f).join(trenner)].concat(zeilen.map((z) => z.map(f).join(trenner))).join("\r\n");
+}
+function csvKnopf(dateiname, holen) {
+  return [
+    h("button", { type: "button", class: "btn klein braucht-dl", hidden: !F.downloads, onclick: (e) => { const d = holen(); speichere(dateiname, "﻿" + csvText(d.spalten, d.zeilen, ";") + "\r\n", e.currentTarget); } }, "CSV speichern"),
+    h("button", { type: "button", class: "btn klein", onclick: (e) => { const d = holen(); kopiere(csvText(d.spalten, d.zeilen, "\t"), e.currentTarget); } }, "Tabelle kopieren"),
+  ];
+}
+
+/* ===================================================================== Fähigkeiten: nur Speichern */
+function faehigkeiten() {
+  const c = window.claude;
+  if (!c || typeof c.use !== "function") { F.downloads = null; return; }
+  Promise.resolve(c.use("downloads")).catch(() => null).then((d) => { F.downloads = d || null; dlKnoepfe(); });
+}
+
+/* ===================================================================== Start */
+async function start() {
+  faehigkeiten();
+  try {
+    if (typeof initSqlJs !== "function") throw new Error("Die SQLite-Bibliothek (sql.js) wurde nicht geladen");
+    BYTES = await ladeBytes();
+    ladeText("Datenbank wird geöffnet …");
+    SQLLIB = await initSqlJs();
+    DB = DBN = new SQLLIB.Database(BYTES);
+    DB.run("PRAGMA query_only = ON");
+    ladeStamm();
+  } catch (e) {
+    console.error(e);
+    DB = null;
+    $("#ansicht").replaceChildren(h("div", { class: "hinweis fehler" }, h("strong", null, "Die Daten konnten nicht geladen werden. "),
+      "Die Seite braucht rd.sqlite (oder rd.sqlite.b64.txt) neben sich. Technische Angabe: " + (e && e.message || e)));
+    return;
+  }
+  $("#fuss").append(" Datenbank vom " + String(D.meta.get("erstellt_am") || "").replace("T", " um ") + ".");
+  /* Ohne Kontext in der Adresse gilt der zuletzt gewählte */
+  const r = leseHash();
+  if (!r.par.zr && !r.par.ds && (gemerkt("zr") || gemerkt("ds"))) {
+    setzeKontext(gemerkt("zr") || "gesamt", gemerkt("ds") || "");
+    history.replaceState(null, "", ln(r.roh || "start"));
+  }
+  window.addEventListener("hashchange", route);
+  const neuZeichnen = () => { for (const f of document.querySelectorAll("figure.dia")) if (f._neu) f._neu(); };
+  try { window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", neuZeichnen); } catch (e) { /* ältere Browser */ }
+  new MutationObserver(neuZeichnen).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  route();
+}
+start();
+})();
+</script>

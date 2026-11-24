@@ -4,7 +4,7 @@ import scala.util.Properties.envOrElse
 name := "dnpm-ccdn-evaluation"  // Statistical evaluations on the backups of the Central Clinical Data Node
 ThisBuild / organization := "de.dnpm"
 ThisBuild / scalaVersion := "2.13.18"
-ThisBuild / version      := envOrElse("VERSION","0.1.4")
+ThisBuild / version      := envOrElse("VERSION","0.1.5")
 
 val ownerRepo  = envOrElse("REPOSITORY","dnpm-dip/cdn-evaluation-module").split("/")
 ThisBuild / githubOwner      := ownerRepo(0)

@@ -1116,8 +1116,9 @@ def suppression_groups(entities, cells):
                 group("a", [cells[e, i, field_] for e in entities])
 
     for entity, rows in entities.items():
-        known = {}      # nonempty set -> its quantities
-        for q in cells.values():
+        known = {}      # nonempty set -> its distinct quantities (a set is shown in many cells: without the
+        #                 dedup the product in each() multiplies out the repetitions)
+        for q in dict.fromkeys(cells.values()):
             if q[0] == entity and isinstance(q[1], frozenset):
                 known.setdefault(q[1], []).append(q)
         sections = {}   # section -> base set -> [(set, value quantity)], [base quantities]

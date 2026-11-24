@@ -95,8 +95,8 @@ run export-datenkranz --site UKT --usecase RD --output /out
 The RD evaluation matrix (Auswertematrix) is computed from such an export by
 `scripts/rd_evaluation_matrix/rd_evaluation_matrix.py`, in Python (standard library only) and on
 the Datenkranz alone, so that it can be shared with the other KDKs. It reports every value in total
-and per Leistungserbringer (counts below 5 suppressed, plus complementary cells so that none can be
-recomputed from sums), and lists the cases to clarify with their LE
+and per Leistungserbringer (counts below 5 of the diagnosis rows suppressed, plus complementary cells so that
+none can be recomputed from sums, see below), and lists the cases to clarify with their LE
 (Rückfragen). Specification: `docs/rd-evaluation-matrix.txt`. Export without `--until`, since later
 follow-ups determine the status of a case, and set the evaluation period in the script instead:
 ```
@@ -111,7 +111,48 @@ value column per LE). `--orphanet` is the Orphadata linearisation
 (https://www.orphadata.com/data/xml/en_product7.xml), needed for the disease groups.
 Tests: `python3 -m unittest discover -s scripts/rd_evaluation_matrix`.
 
-Time series of the matrix's key figures, per month or quarter, in total and per Leistungserbringer, are
+Small-cell suppression (`--min-cell`, default 5, 1 disables; `--suppress-scope diagnoses|all`, default
+`diagnoses`): with `diagnoses` only the diagnosis rows are suppressed, every other count, share and duration
+statistic is shown exactly, also below 5. The diagnosis rows (`DIAGNOSIS_SECTIONS`, `DIAGNOSIS_ITEMS` in
+`rd_evaluation_matrix.py`) are the sections
+- `Diagnosestatus (alle Fälle)`, `Diagnoserate (abgeschlossene Fälle)`,
+  `Diagnoserate nach WGS-Seq. Art (abgeschlossene Fälle mit WGS/lrWGS)`, `Diagnosestatus nach Altersgruppe`,
+- `Vorbefunde, Status <status> (Mehrfachnennung möglich)` and `Vorbefunde nach Jahr, Status <status>` (broken down
+  by the diagnosis status; their bases are the status counts),
+- `Orphacode`, `Erkrankungsgruppen gesamt`, `Erkrankungsgruppen Adult (ab 18)`, `Erkrankungsgruppen Pädiatrisch (unter 18)`,
+
+and the row `Rückfragen an LE (…) | Diagnose ohne Erkrankungsgruppe`. Their bases are suppressed with them
+(closed cases, cases of a status or disease group, sequenced cases of an age group), except those that are
+counts of other rows or follow from exact ones (`EXACT_DIAGNOSIS_BASES`: the cases, the sequenced cases =
+cases − "davon nicht sequenziert", the age blocks of the disease groups). The complementary suppression stays
+closed within the diagnosis rows: per row over the LEs and Gesamt, and per partition of an LE column, also
+against an exact total (e.g. the status partition sums to the exactly shown sequenced cases). Where the only
+other parts of such a partition are zeros, a zero is suppressed instead (preferably one whose row has a nonzero
+Gesamt; a zero alone in a row of zeros takes the zero of Gesamt along), so that a suppressed count isn't the exact
+total minus shown zeros. A diagnosis cell's quantity is kept apart from an exact cell that happens to
+count the same cases. `--suppress-scope all` suppresses every row as before. The data owners decided that
+showing the small non-diagnosis counts per LE (sex, age group, insurance, consent, durations of single cases, …)
+is acceptable; `--suppress-scope all` remains as the opt-out.
+
+Follow-up (sections `Follow-up (Fälle mit GFK2)`, `Dauer GFK2 bis erstes Follow-up`,
+`Follow-up: Pflichtfelder (Follow-up-Einträge aller Einreichungen)`, not diagnosis rows, so exact), the same
+schedule logic as the follow-up SOP metrics of the oncology matrix, with one interval for RD
+(`--follow-up-months`, default 12), all at `--reference-date`. The follow-ups are those of all submissions
+(`followUp.followUpRds[]`), each once.
+- Base: the cases with GFK2. `mit Follow-up`: at least one follow-up entry.
+- `Stand am Stichtag`, a partition of the base: `verstorben` (`vitalStatus` deceased in a follow-up, no further
+  follow-up due); `noch nicht fällig` (GFK2 less than one interval before the reference date); `fällig, aktuell`
+  (a `followUpDate` in the interval before the reference date); `fällig, überfällig` (none). `Follow-up aktuell,
+  von fälligen` = current / (current + overdue).
+- `Dauer GFK2 bis erstes Follow-up`: days from GFK2 to the earliest `followUpDate` on or after GFK2; count,
+  mean, median, quartiles (QUARTILE.INC), minimum, maximum.
+- Mandatory fields per follow-up entry: `followUpDate` readable, `vitalStatus` living or deceased,
+  `diagnosisEstablished` given; `deathDate` of the entries with `vitalStatus` deceased.
+
+The RD time series keeps its own follow-up block (`--follow-up-due-days`, "fällig: … innerhalb der Frist"); the
+quarterly matrices (`monthly_matrices.py --follow-up-months`) contain the sections above per period.
+
+Time series of the matrix's key figures, per quarter (default) or month (`--period`), in total and per Leistungserbringer, are
 computed from the same export by `scripts/rd_evaluation_matrix/rd_time_series.py`, also standard library
 only. It uses the functions of `rd_evaluation_matrix.py`, so that cases, LEs, the status of a case and the
 validity of its broad consent are defined in one place: over the whole period (Zeitraum `gesamt`) its figures
@@ -167,7 +208,9 @@ Three things to know when reading the figures:
   cases, also a zero; the plots show such periods as gaps. Neither output contains case keys or TANs. The
   cells per LE and month are small all the same, and part of the suppressed ones follow from the totals and
   the other cells: the tables, suppressed or not (`--min-cell 1`), are meant for the data nodes and the LE
-  concerned, not for publication.
+  concerned, not for publication. `--suppress-scope diagnoses` (default) applies this only to the blocks
+  `Diagnosestatus (alle Fälle)` and `Diagnoserate (abgeschlossene Fälle)` (the diagnosis rows of the matrix,
+  their base "Fälle" exact), every other figure is exact; `--suppress-scope all` to every block.
 
 The tests run with those of the matrix (`python3 -m unittest discover -s scripts/rd_evaluation_matrix`);
 those of the plots are skipped without matplotlib.
@@ -183,19 +226,24 @@ python3 scripts/data_quality_mvh/data_quality_mvh.py /out/export-datenkranz_<tim
 ```
 Tests: `python3 -m unittest discover -s scripts/data_quality_mvh`.
 
-The RD and oncology matrices per month (one evaluation per month of initial submission, one xlsx
-each) are computed in two steps. `scripts/monthly_matrices/monthly_matrices.py` (standard library only,
-on PROD) reads the export once and writes the results of both scripts per month into `<dir>/rd/` and
-`<dir>/dnpm/`; `scripts/monthly_matrices/fill_monthly.py` (openpyxl, outside of PROD) writes an xlsx next
+The RD and oncology matrices per calendar quarter (default) or month (`--period quarter|month`; one
+evaluation per period of initial submission, one xlsx each, Q4/2025 = Erstmeldung 2025-10-01 to before
+2026-01-01) are computed in two steps. `scripts/monthly_matrices/monthly_matrices.py` (standard library only,
+on PROD) reads the export once and writes the results of both scripts per period into `<dir>/rd/rd_<period>.json`
+and `<dir>/dnpm/dnpm_<period>.json` (`<period>` = `YYYY-Qn` or `YYYY-MM`). The first period is that of the
+earliest initial submission in the export, so there are no empty leading periods; `--from`/`--until`
+(`YYYY-MM` or `YYYY-Qn`) narrow the range. `--suppress-scope` (default `diagnoses`, see above and
+`scripts/dnpm_evaluation_matrix/README.md`) applies to both, `--follow-up-months` to the RD matrices. `--reference-date` is the same for all periods. `scripts/monthly_matrices/fill_monthly.py` (openpyxl, outside of PROD) writes an xlsx next
 to each result by `fill_template.py`. For oncology, a template is created from the rows on the first run
 (`<dir>/Auswertmatrix_MTB_Template.xlsx`, or `--dnpm-template`); its sheet "Rückfragen an LE" stays empty,
-since the oncology JSON contains no case keys (see `dnpm_<YYYY-MM>_rueckfragen.csv`).
+since the oncology JSON contains no case keys (see `dnpm_<period>_rueckfragen.csv`).
 ```
 python3 scripts/monthly_matrices/monthly_matrices.py /out/export-datenkranz_<time>.json \
-  --from 2025-07 --until 2026-11 --orphanet en_product7.xml --reference-date 2026-11-01 --output-dir monthly
-uv run scripts/monthly_matrices/fill_monthly.py monthly
+  --orphanet en_product7.xml --reference-date 2026-11-01 --output-dir quarterly
+uv run scripts/monthly_matrices/fill_monthly.py quarterly
 ```
-`--until` is the month after the last one; `--matrix rd|dnpm` restricts to one of them.
+`--until` is exclusive (the periods starting before it), `--period month` writes one matrix per month as
+before; `--matrix rd|dnpm` restricts to one of them. Tests: `python3 -m unittest discover -s scripts/monthly_matrices`.
 
 ### Running the scripts on the host
 

@@ -30,6 +30,10 @@ Output (<output> without extension):
 Counts 1 to --min-cell - 1 (default 5) are suppressed ("<5") in all outputs except the Rückfragen, as
 is every value whose base is that small, and every statistic computed from fewer values; further
 counts are suppressed with the same marker so that none of these can be derived from totals (README.md).
+--suppress-scope diagnoses (default) suppresses only the diagnosis rows (DIAGNOSIS_SECTIONS, DIAGNOSIS_ITEMS) and
+shows every other count and statistic exactly; --suppress-scope all suppresses every row.
+The follow-up sections after the network's MTB follow-up SOP (FU_SECTIONS: category, due / current / overdue at
+--reference-date, days from GFK2 to the first follow-up, mandatory fields, response) are described in README.md.
 
 Example:
   python3 dnpm_evaluation_matrix.py export-datenkranz_2026-11-01_10-00-00.json \\
@@ -144,6 +148,28 @@ RESPONSES = (("CR", "CR komplette Remission"), ("PR", "PR partielle Remission"),
 TMB_HIGH = 10.0             # mut/Mb, the common cut-off (e.g. FDA approval of pembrolizumab, KEYNOTE-158)
 FOLLOW_UP_MONTHS = (4, 8, 12, 18, 24)   # the intervals of the stakeholders' query document
 QS12_FROM = date(2026, 6, 1)            # QS durch KDK 01.2, criterion 12
+# Follow-up schedule after the MTB (GFK2) as defined by the network's MTB follow-up SOP: per category of a case
+# (key, label, interval in months) the interval in which a follow-up is due
+FU_STARTED, FU_NOT_STARTED, FU_NO_RECOMMENDATION = "1", "2", "3"
+FU_CATEGORIES = (
+    (FU_STARTED, "Kategorie 1: empfohlene Therapie begonnen", 3),
+    (FU_NOT_STARTED, "Kategorie 2: Therapie- oder Studienempfehlung, nicht begonnen", 3),
+    (FU_NO_RECOMMENDATION, "Kategorie 3: keine Therapie- oder Studienempfehlung (kein Target)", 12),
+)
+FU_NOT_STARTED_MONTHS = 24      # a recommendation not started is followed up for 2 years, then as category 3
+FU_LOST_MONTHS = 12             # no contact for a year: lost to follow-up
+FU_RESPONSE_WEEKS = 8           # first staging 6-8 weeks after the start of a therapy
+FU_DECEASED, FU_NOT_DUE, FU_CURRENT, FU_OVERDUE = (
+    "verstorben (kein Follow-up mehr fällig)", "noch nicht fällig (GFK2 weniger als ein Intervall vor dem Stichtag)",
+    "fällig, aktuell (Follow-up im Intervall vor dem Stichtag)", "fällig, überfällig (kein Follow-up im Intervall vor dem Stichtag)")
+FU_STATES = (FU_DECEASED, FU_NOT_DUE, FU_CURRENT, FU_OVERDUE)
+FU_SECTION = "Follow-up nach SOP-Intervall (sequenzierte Fälle mit GFK2)"
+FU_CATEGORY_SECTION = "Follow-up nach SOP-Intervall je Kategorie"
+FU_DAYS_SECTION = "Dauer GFK2 bis erstes Follow-up"
+FU_FIELDS_SECTION = "Follow-up: Pflichtfelder nach SOP (Follow-up-Einträge und -Therapien)"
+FU_RESPONSE_SECTION = "Follow-up: Ansprechen, Allgemeinzustand und Vitalstatus (sequenzierte Fälle mit GFK2)"
+FU_NOTE = "Follow-up nach dem MTB-Follow-up-SOP des Netzwerks (Abschnitte Follow-up nach SOP-Intervall und folgende):"
+FU_SECTIONS = (FU_SECTION, FU_CATEGORY_SECTION, FU_DAYS_SECTION, FU_FIELDS_SECTION, FU_RESPONSE_SECTION)
 
 # Research provisions of the broad consent, as Consent.permitsResearchUse in service-base
 RESEARCH_PROVISIONS = (
@@ -647,6 +673,10 @@ def evaluate_case(case, reference_date, min_medical_days):
     follow_ups = [(parse_date(f.get("followUpDate")), i, f) for i, s in enumerate(case.submissions)
                   for f in items(dig(s, "followUp", "followUpOds")) if isinstance(f, dict)]
     follow_up = max(follow_ups, key=lambda x: (x[0] or date.min, x[1]), default=(None, None, None))[2]
+    # each follow-up once (a submission may repeat the earlier ones), and the dates of a contact
+    fu_entries = list({json.dumps(f, sort_keys=True): f for _, _, f in follow_ups}.values())
+    fu_dates = sorted({d for d, _, _ in follow_ups if d})
+    contact_dates = sorted(set(fu_dates) | {d for d in (parse_date(f.get("lastContactDate")) for f in fu_entries) if d})
     deceased = any(f.get("vitalStatus") == "deceased" for _, _, f in follow_ups)
     death_dates = [parse_date(f.get("deathDate")) for _, _, f in follow_ups if f.get("deathDate")]
     if follow_up is not None and (deceased and not death_dates or death_dates and not deceased):
@@ -752,8 +782,40 @@ def evaluate_case(case, reference_date, min_medical_days):
         unlinked=[t for t in fu_therapies.values() if str(t.get("reference")) not in recommended],
         medical_days=medical_days, documentary_days=documentary_days, diagnosis_days=diagnosis_days,
         start_days=start_days, impossible=impossible, has_gfk2=gfk2 is not None, timeline=timeline,
+        gfk2=gfk2, fu_entries=fu_entries, fu_dates=fu_dates, contact_dates=contact_dates,
+        first_fu_days=next(((d - gfk2).days for d in fu_dates if d >= gfk2), None) if gfk2 else None,
         problems=problems,
     )
+
+
+def follow_up_category(e):
+    """The category of a case with GFK2 in the follow-up schedule (FU_CATEGORIES)"""
+    if e.implemented:
+        return FU_STARTED
+    return FU_NOT_STARTED if e.therapies or e.studies else FU_NO_RECOMMENDATION
+
+
+def follow_up_interval(e, reference_date):
+    """The follow-up interval in months of a case with GFK2 at the reference date"""
+    category = follow_up_category(e)
+    if category == FU_NOT_STARTED and add_months(e.gfk2, FU_NOT_STARTED_MONTHS) <= reference_date:
+        return dict((k, m) for k, _, m in FU_CATEGORIES)[FU_NO_RECOMMENDATION]
+    return dict((k, m) for k, _, m in FU_CATEGORIES)[category]
+
+
+def within(dates, months, reference_date):
+    """A date in the months before the reference date (up to it)"""
+    return any(d <= reference_date and add_months(d, months) > reference_date for d in dates)
+
+
+def follow_up_state(e, reference_date):
+    """The follow-up state of a case with GFK2 at the reference date (FU_STATES)"""
+    months = follow_up_interval(e, reference_date)
+    if e.deceased:
+        return FU_DECEASED
+    if add_months(e.gfk2, months) > reference_date:
+        return FU_NOT_DUE
+    return FU_CURRENT if within(e.fu_dates, months, reference_date) else FU_OVERDUE
 
 
 def submission_fact(row, resolution):
@@ -1064,6 +1126,70 @@ def matrix_rows(cases, subs, losses, problem_counts, reference_date):
             count(s, label, lambda e: lo <= e.follow_up_submissions <= hi, due, base_label)
         count(s, "verstorben", lambda e: e.deceased, due, base_label)
 
+    # follow-up schedule after the MTB (FU_CATEGORIES): the sequenced cases with a GFK2 date
+    of_gfk2 = [e for e in with_mtb if e.gfk2]
+    gfk2_label = "sequenzierte Fälle mit GFK2-Datum"
+    category = {e.key: follow_up_category(e) for e in of_gfk2}
+    state = {e.key: follow_up_state(e, reference_date) for e in of_gfk2}
+    s = FU_SECTION
+    for key, label, months in FU_CATEGORIES:
+        count(s, f"{label} (Intervall {months} Monate)", lambda e: category[e.key] == key, of_gfk2, gfk2_label)
+    for st in FU_STATES:
+        count(s, f"Stand am Stichtag: {st}", lambda e: state[e.key] == st, of_gfk2, gfk2_label)
+    due = [e for e in of_gfk2 if state[e.key] in (FU_CURRENT, FU_OVERDUE)]
+    count(s, "Follow-up aktuell, von fälligen", lambda e: state[e.key] == FU_CURRENT, due, "fällige Fälle")
+    count(s, f"Kategorie 2 ab {FU_NOT_STARTED_MONTHS} Monate nach GFK2 (danach Intervall wie Kategorie 3)",
+          lambda e: add_months(e.gfk2, FU_NOT_STARTED_MONTHS) <= reference_date,
+          [e for e in of_gfk2 if category[e.key] == FU_NOT_STARTED], "Fälle der Kategorie 2")
+    alive = [e for e in of_gfk2 if not e.deceased and add_months(e.gfk2, FU_LOST_MONTHS) <= reference_date]
+    count(s, f"kein dokumentierter Kontakt in den {FU_LOST_MONTHS} Monaten vor dem Stichtag (lost to follow-up nach SOP)",
+          lambda e: not within(e.contact_dates, FU_LOST_MONTHS, reference_date), alive,
+          f"nicht verstorbene Fälle mit GFK2 mindestens {FU_LOST_MONTHS} Monate vor Stichtag")
+    s = FU_CATEGORY_SECTION
+    for key, label, _ in FU_CATEGORIES:
+        of_category = [e for e in of_gfk2 if category[e.key] == key]
+        short = label.split(":")[0]
+        for st in FU_STATES:
+            count(s, f"{short}: {st}", lambda e: state[e.key] == st, of_category, f"Fälle der {short}")
+        count(s, f"{short}: Follow-up aktuell, von fälligen", lambda e: state[e.key] == FU_CURRENT,
+              [e for e in of_category if state[e.key] in (FU_CURRENT, FU_OVERDUE)], f"fällige Fälle der {short}")
+    s = FU_DAYS_SECTION
+    count(s, "Dauer berechenbar (Follow-up ab GFK2)", lambda e: e.first_fu_days is not None, of_gfk2, gfk2_label)
+    count(s, "nur Follow-up vor GFK2", lambda e: e.fu_dates and e.first_fu_days is None, of_gfk2, gfk2_label)
+    stats(s, "", [e.first_fu_days for e in of_gfk2 if e.first_fu_days is not None], DAYS)
+    s = FU_FIELDS_SECTION
+    entries = [f for e in cases for f in e.fu_entries]
+    add(s, "Follow-up-Einträge gesamt", len(entries))
+    count(s, "followUpDate lesbar", lambda f: parse_date(f.get("followUpDate")) is not None, entries, "Follow-up-Einträge")
+    count(s, "vitalStatus living oder deceased", lambda f: f.get("vitalStatus") in ("living", "deceased"), entries,
+          "Follow-up-Einträge")
+    count(s, "ecogPerformanceStatusScore konkret (0-5)", lambda f: f.get("ecogPerformanceStatusScore") in ECOG[:6],
+          entries, "Follow-up-Einträge")
+    fu_therapies = [t for e in cases for t in e.fu_therapies]
+    add(s, "Follow-up-Therapien gesamt", len(fu_therapies))
+    count(s, "therapyStartDate lesbar", lambda t: parse_date(t.get("therapyStartDate")) is not None, fu_therapies, "Therapien")
+    count(s, "substances angegeben", lambda t: filled(t.get("substances")), fu_therapies, "Therapien")
+    count(s, "therapyResponseDate, von Therapien mit Ansprechen", lambda t: parse_date(t.get("therapyResponseDate")) is not None,
+          [t for t in fu_therapies if t.get("therapyResponse")], "Therapien mit Ansprechen")
+    s = FU_RESPONSE_SECTION
+    response_due = [t for e in of_gfk2 for t in e.implemented if parse_date(t.get("therapyStartDate"))
+                    and parse_date(t.get("therapyStartDate")) + timedelta(weeks=FU_RESPONSE_WEEKS) <= reference_date]
+    count(s, f"Ansprechen dokumentiert, von begonnenen Empfehlungen mit Beginn mindestens {FU_RESPONSE_WEEKS} Wochen "
+          "vor dem Stichtag", lambda t: bool(t.get("therapyResponse")), response_due,
+          f"begonnene Empfehlungen, Beginn >= {FU_RESPONSE_WEEKS} Wochen vor Stichtag")
+    with_fu = [e for e in of_gfk2 if e.follow_up is not None]
+    count(s, "ECOG konkret (0-5) im letzten Follow-up", lambda e: e.follow_up.get("ecogPerformanceStatusScore") in ECOG[:6],
+          with_fu, "sequenzierte Fälle mit GFK2 und Follow-up")
+
+    def vital(e):
+        if e.deceased:
+            return "verstorben"
+        if e.follow_up is None:
+            return "ohne Follow-up"
+        return "lebend" if e.follow_up.get("vitalStatus") == "living" else MISSING
+    for label in ("verstorben", "lebend", MISSING, "ohne Follow-up"):
+        count(s, f"Vitalstatus (letztes Follow-up): {label}", lambda e: vital(e) == label, of_gfk2, gfk2_label)
+
     s = "Füllgrad optionaler Felder (Fälle)"
     count(s, "case.diagnosisOd.additionalDiagnoses", lambda e: e.additional_diagnoses, cases, "Fälle")
     count(s, "case.diagnosisOd.grading", lambda e: e.grading is not None, cases, "Fälle")
@@ -1124,6 +1250,10 @@ PARTITIONS = (
     (r"Umsetzung.*", r"Ende:"),
     (r"Umsetzung.*", r"Ansprechen:"),
     (r"Follow-up: Erstmeldung mindestens.*", r"(ohne|mit \d)"),
+    (re.escape(FU_SECTION), r"Kategorie \d"),
+    (re.escape(FU_SECTION), r"Stand am Stichtag"),
+    *((re.escape(FU_CATEGORY_SECTION), rf"Kategorie {k}: (?!Follow-up)") for k, _, _ in FU_CATEGORIES),
+    (re.escape(FU_RESPONSE_SECTION), r"Vitalstatus"),
 )
 
 
@@ -1132,7 +1262,65 @@ def partition_of(row):
                  if re.fullmatch(section, row.section) and re.match(item, row.item)), None)
 
 
-def suppress(matrix, entities, periods, min_cell):
+# Scope of the small-cell suppression (--suppress-scope, as in rd_evaluation_matrix.py): only the diagnosis rows
+# (default), or every row
+SUPPRESS_DIAGNOSES, SUPPRESS_ALL = "diagnoses", "all"
+SUPPRESS_SCOPES = (SUPPRESS_DIAGNOSES, SUPPRESS_ALL)
+# The diagnosis rows: the tumour diagnosis of a case (entity group of the ICD-10-GM main diagnosis, ICD-O-3
+# morphology and topography, germline diagnosis, M category, grading, hereditary tumour, reported germline
+# variant) and the counts broken down by it. With SUPPRESS_DIAGNOSES only their cells are suppressed, every other
+# count and statistic is exact.
+STAGE_SECTION = "Tumorstadium (M-Kategorie aus tnmClassifications)"
+GRADING_SECTION = "Grading (Differenzierungsgrad)"
+FILL_CASES = "Füllgrad optionaler Felder (Fälle)"
+DIAGNOSIS_SECTIONS = (
+    "Tumorentität (Hauptdiagnose ICD-10-GM, gruppiert)",
+    "Tumorentität (sequenzierte Fälle)",
+    "Diagnose: Kodierung",
+    "GFK2 (MTB): Ergebnis nach Tumorentität (sequenzierte Fälle)",
+    STAGE_SECTION,
+    GRADING_SECTION,
+)
+# Single diagnosis rows of other sections (section, item): the hereditary cases, the reported germline variants,
+# and the fill rates of grading and TNM, which are the cases minus the categories "nicht angegeben" / "kein TNM"
+DIAGNOSIS_ITEMS = (
+    ("Fälle", "davon hereditär (diseaseType hereditary)"),
+    ("Molekulare Befunde (sequenzierte Fälle)", "Keimbahnvariante berichtet (genomicSource germline)"),
+    (FILL_CASES, "case.diagnosisOd.grading"),
+    (FILL_CASES, "case.diagnosisOd.tnmClassifications"),
+    (FILL_CASES, "TNM oder additionalClassification"),
+)
+# Diagnosis rows that add up to a total shown elsewhere, exactly with SUPPRESS_DIAGNOSES (GFK2 dokumentiert, ...),
+# or to one of them (the cases with a behaviour code): partitions of the diagnosis scope beside PARTITIONS
+DIAGNOSIS_PARTITIONS = (
+    (r"Diagnose: Kodierung", r"Histologie "),
+    (r"GFK2 \(MTB\): Ergebnis nach Tumorentität.*", r".*: GFK2 dokumentiert$"),
+    (r"GFK2 \(MTB\): Ergebnis nach Tumorentität.*", r".*: Therapie- oder Studienempfehlung$"),
+)
+# Diagnosis rows of different sections that add up to the cases (exact): a fill rate and the category "not given"
+DIAGNOSIS_KEY_PARTITIONS = (
+    (f"{FILL_CASES} | case.diagnosisOd.grading", f"{GRADING_SECTION} | {MISSING}"),
+    (f"{FILL_CASES} | case.diagnosisOd.tnmClassifications", f"{STAGE_SECTION} | kein TNM"),
+)
+# Diagnosis rows that equal each other when the other part is 0 (TNM or additionalClassification = TNM without
+# additionalClassification): one is suppressed wherever the other is
+DIAGNOSIS_LINKED = (
+    (f"{FILL_CASES} | TNM oder additionalClassification", f"{FILL_CASES} | case.diagnosisOd.tnmClassifications"),
+)
+# Bases of diagnosis rows that are the count of another diagnosis row (base label: row key): suppressed with it
+DIAGNOSIS_BASES = {
+    "Fälle mit bestätigter Keimbahndiagnose": "Diagnose: Kodierung | Keimbahndiagnose bestätigt (germlineDiagnosisConfirmed)",
+    **{f"sequenzierte Fälle {g}": f"Tumorentität (sequenzierte Fälle) | {g}" for g in ENTITY_LABELS},
+    **{f"sequenzierte Fälle mit GFK2 {g}": f"{DIAGNOSIS_SECTIONS[3]} | {g}: GFK2 dokumentiert" for g in ENTITY_LABELS},
+}
+
+
+def is_diagnosis_row(row):
+    """A row of the diagnosis sections (DIAGNOSIS_SECTIONS) or a single diagnosis row (DIAGNOSIS_ITEMS)"""
+    return row.section in DIAGNOSIS_SECTIONS or (row.section, row.item) in DIAGNOSIS_ITEMS
+
+
+def suppress(matrix, entities, periods, min_cell, scope=SUPPRESS_ALL):
     """
     {(row index, entity, period): {value, base, percent}} of the rows of every entity and period
     (matrix[(entity, period)], WHOLE for the matrix itself): suppressed() as primary suppression, then
@@ -1141,47 +1329,84 @@ def suppress(matrix, entities, periods, min_cell):
     the whole period - in which exactly one cell is suppressed, the smallest other nonzero cell is
     suppressed as well (an LE or period before Gesamt or the whole period), until no group changes.
     Complementary cells get the same marker '<min_cell' as primary ones (deliberately indistinguishable).
+    With SUPPRESS_DIAGNOSES only the diagnosis rows (is_diagnosis_row) are suppressed and form groups, every
+    other row is exact. The groups then also include DIAGNOSIS_PARTITIONS, whose total can be exact: where
+    the other cells of a group with one suppressed cell are zeros, a zero is suppressed (one with a nonzero
+    base; in a row the one of Gesamt, else preferably one whose Gesamt is nonzero), so that the suppressed
+    cell isn't the total minus the shown zeros; and a base that is the count of another diagnosis row
+    (DIAGNOSIS_BASES) is suppressed with that count.
     Returns (values, counts): counts = {period kind: {"primary": n, "complementary": n}} for the matrix
     (WHOLE) and the time series ("series")
     """
     template = matrix[(TOTAL, WHOLE)]
     all_periods = [WHOLE] + periods
+    diagnoses = scope == SUPPRESS_DIAGNOSES
 
     def cell(k):
         return matrix[(k[1], k[2])][k[0]]
 
-    count_rows = [i for i, r in enumerate(template) if r.unit == COUNT]
+    count_rows = [i for i, r in enumerate(template) if r.unit == COUNT and (not diagnoses or is_diagnosis_row(r))]
     hidden = {(i, le, p) for i in count_rows for le in entities for p in all_periods
               if 0 < cell((i, le, p)).n < min_cell or 0 < (cell((i, le, p)).base or 0) < min_cell}
     primary = set(hidden)
-    groups = [[(i, le, p) for le in entities] for i in count_rows for p in all_periods]
-    groups += [[(i, le, p) for p in all_periods] for i in count_rows for le in entities]
+    groups = [("row", [(i, le, p) for le in entities]) for i in count_rows for p in all_periods]
+    groups += [("periods", [(i, le, p) for p in all_periods]) for i in count_rows for le in entities]
     parts = {}
     for i in count_rows:
         if partition_of(template[i]):
             parts.setdefault(partition_of(template[i]), []).append(i)
-    groups += [[(i, le, p) for i in rows] for rows in parts.values() for le in entities for p in all_periods]
+    if diagnoses:
+        for n, (section, item) in enumerate(DIAGNOSIS_PARTITIONS):
+            parts[("diagnosis", n)] = [i for i in count_rows if re.fullmatch(section, template[i].section)
+                                       and re.match(item, template[i].item)]
+        for n, keys in enumerate(DIAGNOSIS_KEY_PARTITIONS):
+            parts[("diagnosis keys", n)] = [i for i in count_rows if template[i].key in keys]
+    groups += [("part", [(i, le, p) for i in rows]) for rows in parts.values() for le in entities for p in all_periods]
+
+    def zero_first(kind):
+        """the zero to suppress: one with cases in its base (a zero of a base 0 is known), then as said above"""
+        if kind == "row":
+            return lambda k: (cell(k).base == 0, k[1] != TOTAL)
+        return lambda k: (cell(k).base == 0, cell((k[0], TOTAL, k[2])).n == 0, k[1] == TOTAL, k[2] == WHOLE)
+
+    index = {r.key: i for i, r in enumerate(template)}
+    linked = [(index[a], index[b]) for a, b in DIAGNOSIS_LINKED if diagnoses and a in index and b in index]
     changed = True
     while changed:
         changed = False
-        for group in groups:
+        for a, b in linked + [(b, a) for a, b in linked]:
+            for le in entities:
+                for p in all_periods:
+                    if (a, le, p) in hidden and (b, le, p) not in hidden:
+                        hidden.add((b, le, p))
+                        changed = True
+        for kind, group in groups:
             if sum(k in hidden for k in group) == 1:
                 rest = [k for k in group if k not in hidden and cell(k).n > 0]
                 if rest:
                     hidden.add(min(rest, key=lambda k: (k[1] == TOTAL, k[2] == WHOLE, cell(k).n)))
                     changed = True
+                elif diagnoses and len(group) > 1:
+                    hidden.add(min((k for k in group if k not in hidden), key=zero_first(kind)))
+                    changed = True
+    same_as_base = {j: index[DIAGNOSIS_BASES[r.base_label]] for j, r in enumerate(template)
+                    if diagnoses and r.base_label in DIAGNOSIS_BASES and DIAGNOSIS_BASES[r.base_label] in index}
+    in_scope = set(count_rows) if diagnoses else set(range(len(template)))
     values = {}
     counts = {kind: {"primary": 0, "complementary": 0} for kind in (WHOLE, "series")}
     for i in range(len(template)):
         for le in entities:
             for p in all_periods:
-                n, base, pct = suppressed(cell((i, le, p)), min_cell)
+                # out of scope exact: nothing is below a min_cell of 1
+                n, base, pct = suppressed(cell((i, le, p)), min_cell if i in in_scope else 1)
                 kind = counts[WHOLE if p == WHOLE else "series"]
                 if (i, le, p) in hidden - primary:
                     n, pct = f"<{min_cell}", None
                     kind["complementary"] += 1
                 elif n == f"<{min_cell}":
                     kind["primary"] += 1
+                if i in same_as_base and (same_as_base[i], le, p) in hidden and base != f"<{min_cell}":
+                    base, pct = f"<{min_cell}", None
                 values[(i, le, p)] = {"value": n, "base": base, "percent": pct}
     return values, counts
 
@@ -1207,11 +1432,14 @@ def suppressed(row, min_cell):
 # Main
 # ---------------------------------------------------------------------------------------------
 
-def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days=14, resolution=MONTH, cutoff=None):
+def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days=14, resolution=MONTH, cutoff=None,
+        suppress_scope=SUPPRESS_DIAGNOSES):
     """
     The matrix with its time series, from the submissions (SubmissionRow) and failures of the export; the
     result's "problems" (case keys of all LEs) are for the Rückfragen files only, not for the JSON
     """
+    if suppress_scope not in SUPPRESS_SCOPES:
+        raise ValueError(f"suppress_scope must be one of {SUPPRESS_SCOPES}: {suppress_scope}")
     if cutoff and reference_date > cutoff:
         raise ValueError(f"reference date {reference_date} after the cutoff {cutoff}")
     if cutoff:
@@ -1303,7 +1531,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
     periods = periods_between(first, last, resolution) if first and last and first <= last else []
     matrix = {(le, p): evaluate(le, p) for le in entities for p in [WHOLE] + periods}
     template = matrix[(TOTAL, WHOLE)]
-    values, suppressed_counts = suppress(matrix, entities, periods, min_cell)
+    values, suppressed_counts = suppress(matrix, entities, periods, min_cell, suppress_scope)
 
     def described(i, r, cells):
         return {"key": r.key, "section": r.section, "item": r.item, "unit": r.unit, "base_label": r.base_label,
@@ -1323,7 +1551,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
                   f"{max(initial_dates).strftime('%m.%Y')})" if initial_dates else "gesamter Export")
 
     def masked(n):
-        return f"<{min_cell}" if 0 < n < min_cell else n
+        return f"<{min_cell}" if suppress_scope == SUPPRESS_ALL and 0 < n < min_cell else n
 
     labels = {le: f"{le} ({', '.join(sorted(submitters[le]))})" if le in submitters else le for le in les}
     unit = "Monat" if resolution == MONTH else "Quartal"
@@ -1339,6 +1567,18 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
          f"({suppressed_counts[WHOLE]['complementary']} Zellen der Matrix zusätzlich zu {suppressed_counts[WHOLE]['primary']}); "
          f"eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr Fälle zählen. "
          "Die Tabellen sind für die Datenknoten und den jeweiligen LE bestimmt, nicht zur Veröffentlichung."
+         if min_cell > 1 and suppress_scope == SUPPRESS_ALL else
+         (f"Unterdrückt werden nur die Diagnosezeilen, die Abschnitte {', '.join(DIAGNOSIS_SECTIONS)} und die Zeilen "
+          f"{', '.join(f'{sec}: {item}' for sec, item in DIAGNOSIS_ITEMS)}. Dort sind "
+          f"Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso jeder Wert mit einer Basis unter "
+          f"{min_cell} (auch die 0; nicht in den Rückfragen). Ergänzend unterdrückt, ebenfalls als <{min_cell}, damit "
+          "sich keine unterdrückte Zelle aus Gesamt und den übrigen LE, aus der Basis und den übrigen Kategorien (auch "
+          "einer exakt gezeigten Summe wie GFK2 dokumentiert über die Tumorentitäten) oder aus dem Gesamtzeitraum und den "
+          "übrigen Zeiträumen ergibt, die kleinste weitere Zelle über 0, sonst eine 0; eine Basis, die die Zahl einer "
+          f"unterdrückten Diagnosezeile ist, mit ihr ({suppressed_counts[WHOLE]['complementary']} Zellen der Matrix "
+          f"zusätzlich zu {suppressed_counts[WHOLE]['primary']}); eine Zelle <{min_cell} kann daher auch 0 oder "
+          f"{min_cell} und mehr Fälle zählen. Alle anderen Zahlen und Kennzahlen sind exakt angegeben, auch unter "
+          f"{min_cell}. Die Tabellen sind für die Datenknoten und den jeweiligen LE bestimmt, nicht zur Veröffentlichung.")
          if min_cell > 1 else "Keine Zellen unterdrückt (--min-cell 1): nur für den internen Gebrauch der Datenknoten."),
         "Population: GFK2-Ergebnis, Umsetzung und molekulare Befunde beziehen sich auf die sequenzierten Fälle "
         "(decisionToInclude nicht false und libraryType wgs, wgs_lr, wes oder panel).",
@@ -1355,8 +1595,17 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
         "lastContactDate: das DIP-Mapping lässt followUp weg, wenn das letzte Follow-up 'lost to follow-up' ist; die "
         "Zeilen zu lastContactDate zählen nur früher verlorene Patienten, deren Kontakt wieder aufgenommen wurde.",
         f"Medizinische Bearbeitungsdauer unter {min_medical_days} Tagen wird als unplausibel kurz zurückgefragt.",
-        f"{TIMELINE}: je Meilenstein Datum minus GFK1 in Tagen, Fälle mit Datum sowie 1. Quartil, Median und 3. Quartil "
-        f"(ab {min_cell} Fällen). MV-Einwilligung: frühestes mvConsent.scope[mvSequencing].date; Erstdiagnose: "
+        FU_NOTE + f" Stichtag {reference_date.isoformat()}: Kategorie 1 (eine Empfehlung begonnen) und 2 (Therapie- oder "
+        f"Studienempfehlung, nicht begonnen) alle 3 Monate, Kategorie 3 (keine Empfehlung) und Kategorie 2 ab "
+        f"{FU_NOT_STARTED_MONTHS} Monaten nach GFK2 alle 12 Monate. Fällig ist ein Follow-up ab einem Intervall nach der "
+        "GFK2; aktuell, wenn ein followUpDate im Intervall vor dem Stichtag liegt, sonst überfällig; Verstorbene sind nicht "
+        f"mehr fällig. Lost to follow-up: kein followUpDate oder lastContactDate in den {FU_LOST_MONTHS} Monaten vor dem "
+        "Stichtag. Nicht aus dem Datenkranz: Kostenübernahme, Gründe für eine nicht begonnene Therapie, Therapiestatus, "
+        "Studieneinschluss, Beurteilungsmethode und radiologische Validierung des Ansprechens, frühere Staging-Termine "
+        "(nur das letzte Ansprechen je Therapie), der Status lost to follow-up selbst (das DIP-Mapping lässt das Follow-up dann weg).",
+        f"{TIMELINE}: je Meilenstein Datum minus GFK1 in Tagen, Fälle mit Datum sowie 1. Quartil, Median und 3. Quartil"
+        + (f" (ab {min_cell} Fällen). " if suppress_scope == SUPPRESS_ALL else ". ")
+        + "MV-Einwilligung: frühestes mvConsent.scope[mvSequencing].date; Erstdiagnose: "
         "mainDiagnosis.date; GFK2 (MTB) wie oben; Erstmeldung beim KDK: Datum der Erstmeldung; Beginn empfohlene "
         "Therapie: frühester therapyStartDate einer begonnenen Empfehlung; Erstes Follow-up: frühestes "
         "followUpOds[].followUpDate über alle Einreichungen. Monatsangaben (YYYY-MM) zählen als 15. des Monats. "
@@ -1378,6 +1627,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
         "title": f"AUSWERTUNG MTB {period}",
         "period": period,
         "min_cell": min_cell,
+        "suppress_scope": suppress_scope,
         "suppressed": suppressed_counts[WHOLE],
         "reference_date": reference_date.isoformat(),
         "cutoff": cutoff.isoformat() if cutoff else None,
@@ -1443,6 +1693,9 @@ def main(argv=None):
                              "the export (default: --cutoff, else today)")
     parser.add_argument("--resolution", choices=(MONTH, QUARTER), default=MONTH, help="of the time series (default: %(default)s)")
     parser.add_argument("--min-cell", type=int, default=5, help="counts below are suppressed, 1 disables (default: %(default)s)")
+    parser.add_argument("--suppress-scope", choices=SUPPRESS_SCOPES, default=SUPPRESS_DIAGNOSES,
+                        help="suppress small counts only in the diagnosis rows (DIAGNOSIS_SECTIONS), all other numbers "
+                             "exact, or in all rows (default: %(default)s)")
     parser.add_argument("--min-medical-days", type=int, default=14,
                         help="shorter durations from GFK1 to GFK2 are listed for clarification (default: %(default)s)")
     parser.add_argument("--delimiter", default=";", help="CSV delimiter (default: %(default)s, for Excel with German locale)")
@@ -1458,7 +1711,7 @@ def main(argv=None):
 
     rows, failures = load_submissions(args.input)
     result = run(rows, failures, args.start, args.end, args.reference_date, args.min_cell, args.min_medical_days,
-                 args.resolution, args.cutoff)
+                 args.resolution, args.cutoff, args.suppress_scope)
 
     with open(f"{args.output}.json", "w", encoding="utf-8") as f:     # without the case keys of the Rückfragen
         json.dump({k: v for k, v in result.items() if k != "problems"}, f, ensure_ascii=False, indent=1)

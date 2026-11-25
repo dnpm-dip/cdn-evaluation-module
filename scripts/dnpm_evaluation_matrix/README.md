@@ -110,7 +110,9 @@ date (the title gives the months of the first and last initial submission, or th
   rows that are equal when another count is 0 (`DIAGNOSIS_LINKED`: `TNM oder additionalClassification` and the
   TNM fill rate) are suppressed together; and a base that is the count of another diagnosis row
   (`DIAGNOSIS_BASES`, e.g. `sequenzierte Fälle <entity>`) is suppressed where that count is. `--suppress-scope all` suppresses every row; its output equals that of
-  the script before the option (only the JSON field `suppress_scope` is new).
+  the script before the option (only the JSON field `suppress_scope` is new). Known limitation: in a row where
+  only one LE counts, that LE's count is protected (as is Gesamt, which equals it), but the zeros of the other LEs
+  show where the cases are; this holds for the matrix and for its time series.
 - Robustness: `null` where a list or object is expected is read as empty; a case that still can't be read
   (no `metaData.molecularBoardDecisionDate`, no `birthDate`, no `case.diagnosisOd`, no dated initial)
   becomes a Rückfrage "Fall nicht auswertbar" instead of aborting the run. Each submission's dates are
@@ -130,7 +132,7 @@ Base "Fälle" = all cases of the entity and period unless stated otherwise.
 | Geschlecht / Alter bei Einschluss (GFK1) / Versicherung | m, w, d, unbekannt; Pädiatrisch 0-17, 18-39, 40-59, 60-79, 80+ (age at GFK1, birth month as its 1st day); GKV, PKV, andere | `metaData.gender` (male/female/other), `birthDate`, `coverageType` |
 | Sequenzierung (eingeschlossene Fälle) | wgs, wgs_lr, wes, panel, none, missing, other | `case.diagnosisOd.libraryType` |
 | Tumorentität (all / sequenced) | 18 entity groups + no C/D code + missing (table below) | `case.diagnosisOd.mainDiagnosis.code` (ICD-10-GM) |
-| Diagnose: Kodierung | histology with behaviour code; behaviour /0 /1 /2 /3 /6 /9; topography 3-char equal to main diagnosis (base: main diagnosis C00-C76, C80); germline diagnosis confirmed; germlineDiagnoses given (of confirmed) | `histology.code` (ICD-O-3-M), `topography.code` (ICD-O-3-T), `germlineDiagnosisConfirmed`, `germlineDiagnoses` |
+| Diagnose: Kodierung | histology with behaviour code (one of /0 /1 /2 /3 /6 /9 after the "/", so the codes add up to it); behaviour /0 /1 /2 /3 /6 /9; topography 3-char equal to main diagnosis (base: main diagnosis C00-C76, C80); germline diagnosis confirmed; germlineDiagnoses given (of confirmed) | `histology.code` (ICD-O-3-M), `topography.code` (ICD-O-3-T), `germlineDiagnosisConfirmed`, `germlineDiagnoses` |
 | Tumorstadium (M-Kategorie) | M0, M1, MX, TNM without recognisable M, no TNM | `tnmClassifications[].display/text/code` matched by `[cpyra]*M[01X]` (e.g. "cM1a (UICC)"); a heuristic, SNOMED codes themselves are not resolved |
 | ECOG bei Einschluss (+ zusammengefasst) | 0-5, unknown, notApplicable, missing, other; concrete value 0-5 | `case.diagnosisOd.ecogPerformanceStatusScore` (DIP default `unknown`) |
 | Grading | 0,1,2,3,4,5,X,L,M,H,B,U,T, missing, other | `case.diagnosisOd.grading` |

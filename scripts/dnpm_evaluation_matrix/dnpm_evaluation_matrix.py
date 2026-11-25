@@ -83,6 +83,16 @@ GRADING = (
 BEHAVIOUR = (("0", "/0 gutartig"), ("1", "/1 unsicheres Verhalten"), ("2", "/2 in situ"),
              ("3", "/3 bösartig (Primärtumor)"), ("6", "/6 bösartig (Metastase)"),
              ("9", "/9 bösartig, unklar ob primär"))
+BEHAVIOUR_CODES = frozenset(code for code, _ in BEHAVIOUR)
+
+
+def behaviour_code(histology):
+    """The ICD-O-3 behaviour code of a morphology code (8140/3 -> 3), None without one of BEHAVIOUR_CODES (no "/", or
+    an unknown character after it): the behaviour rows then add up to the cases with a behaviour code"""
+    code = histology.split("/")[-1].strip()[:1] if "/" in histology else None
+    return code if code in BEHAVIOUR_CODES else None
+
+
 M_STATES = ("M0", "M1 (Fernmetastasen)", "MX", "TNM ohne erkennbare M-Kategorie", "kein TNM")
 
 # Tumour entity groups by the ICD-10-GM code of case.diagnosisOd.mainDiagnosis: (label, letter, ranges
@@ -759,7 +769,7 @@ def evaluate_case(case, reference_date, min_medical_days):
         entity=entity_group(main.get("code")),
         topography_matches=(topography[:3].upper() == str(main.get("code") or "")[:3].upper()) if topography else None,
         topography=topography, main_code=str(main.get("code") or ""),
-        behaviour=histology.split("/")[-1][:1] if "/" in histology else None,
+        behaviour=behaviour_code(histology),
         ecog=diagnosis.get("ecogPerformanceStatusScore"),
         grading=diagnosis.get("grading"),
         m_state=m_state(tnm), tnm=bool(tnm), additional_classification=bool(items(diagnosis.get("additionalClassification"))),

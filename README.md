@@ -122,15 +122,26 @@ statistic is shown exactly, also below 5. The diagnosis rows (`DIAGNOSIS_SECTION
 - `Orphacode`, `Erkrankungsgruppen gesamt`, `Erkrankungsgruppen Adult (ab 18)`, `Erkrankungsgruppen Pädiatrisch (unter 18)`,
 
 and the row `Rückfragen an LE (…) | Diagnose ohne Erkrankungsgruppe`. Their bases are suppressed with them
-(closed cases, cases of a status or disease group, sequenced cases of an age group), except those that are
-counts of other rows or follow from exact ones (`EXACT_DIAGNOSIS_BASES`: the cases, the sequenced cases =
-cases − "davon nicht sequenziert", the age blocks of the disease groups). The complementary suppression stays
-closed within the diagnosis rows: per row over the LEs and Gesamt, and per partition of an LE column, also
-against an exact total (e.g. the status partition sums to the exactly shown sequenced cases). Where the only
-other parts of such a partition are zeros, a zero is suppressed instead (preferably one whose row has a nonzero
-Gesamt; a zero alone in a row of zeros takes the zero of Gesamt along), so that a suppressed count isn't the exact
-total minus shown zeros. A diagnosis cell's quantity is kept apart from an exact cell that happens to
-count the same cases. `--suppress-scope all` suppresses every row as before. The data owners decided that
+(closed cases, cases of a status or disease group), except those that are counts of other rows, follow from exact
+ones or count no diagnostic result (`EXACT_DIAGNOSIS_BASES`: the cases, the sequenced cases =
+cases − "davon nicht sequenziert", the age blocks of the disease groups, the sequenced cases of an age group). The
+complementary suppression stays closed within the diagnosis rows: per row over the LEs and Gesamt, and per sum
+relation of a column, also against an exact total (e.g. the status partition sums to the exactly shown sequenced
+cases). The relations are the partitions found from the counted sets and those of `sum_relations()`, which also
+run across sections: `Diagnosestatus nach Altersgruppe` per age group over the statuses and per status over the
+age groups (against `Diagnoserate`/`Diagnosestatus` and the sequenced cases), a disease group against its four
+status rows and their base, Adult + Pädiatrisch = gesamt, the prior findings against the status count, and
+relations a reader knows from the data where they hold (e.g. with no unsequenced case, the statuses over the
+disease groups are those of `Diagnosestatus`). Where the only other parts of such a relation are zeros, a zero is
+suppressed instead (preferably one whose row has a nonzero Gesamt), so that a suppressed count isn't the exact
+total minus shown zeros; a zero that is known to be 0 anyway (next to exact zeros, also through other relations,
+as all counts are ≥ 0) is never chosen, and where one side of a relation shows only zeros, a zero of that side is
+suppressed too (in a row the zero of Gesamt). Gesamt is suppressed where it is the count of a single LE, and then
+complementarily within the Gesamt column, also in rows with several LEs. A diagnosis cell's quantity is kept
+apart from an exact cell that happens to count the same cases. `--suppress-scope all` suppresses every row, with
+the same relations. Tested on random synthetic sets (`SumRelationTests`): no relation has exactly one suppressed
+cell. Known limitation: in a row where only one LE counts, its count is protected, but the zeros of the other LEs
+show where the cases are. The data owners decided that
 showing the small non-diagnosis counts per LE (sex, age group, insurance, consent, durations of single cases, …)
 is acceptable; `--suppress-scope all` remains as the opt-out.
 

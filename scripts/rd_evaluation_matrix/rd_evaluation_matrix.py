@@ -38,7 +38,7 @@ import re
 import statistics
 import sys
 import xml.etree.ElementTree as ET
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -265,9 +265,11 @@ DIAGNOSIS_SECTIONS = (
 DIAGNOSIS_ITEMS = ((PROBLEMS_SECTION, P_DIAGNOSIS_WITHOUT_GROUP),)
 # Bases of diagnosis rows that are shown exactly: they are counts of other rows or follow from exact ones (the
 # cases, the sequenced cases = cases - "davon nicht sequenziert", the age blocks of the disease groups = sums of
-# the age groups). Every other base of a diagnosis row (closed cases, cases of a status or a disease group,
-# sequenced cases of an age group) is suppressed with the row.
-EXACT_DIAGNOSIS_BASES = ("Fälle", "sequenzierte Fälle") + tuple(f"Fälle ({s})" for s in DISEASE_GROUP_BLOCKS)
+# the age groups), or count no diagnostic result (the sequenced cases of an age group, = the cases of the age group
+# where no case is left unsequenced; they sum to the sequenced cases). Every other base of a diagnosis row (closed
+# cases, cases of a status or a disease group) is suppressed with the row.
+EXACT_DIAGNOSIS_BASES = (("Fälle", "sequenzierte Fälle") + tuple(f"Fälle ({s})" for s in DISEASE_GROUP_BLOCKS)
+                         + tuple(f"Fälle {g}" for g in AGE_GROUPS))
 
 
 def is_diagnosis_row(row):
@@ -1053,18 +1055,25 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=(), follow_up
 # Primary: counts 1..min_cell-1 of an LE in scope. Complementary: a suppressed count must not be
 # recoverable as a difference, so in each group of counts with a known sum relation in which exactly one count is
 # suppressed, the smallest other nonzero count of an LE in scope is suppressed as well, until no group changes; a
-# Gesamt cell only where no LE cell is left (a row with a single nonzero LE: Gesamt is that LE's count). Groups:
+# Gesamt cell only where no LE cell is left (a row with a single nonzero LE: Gesamt is that LE's count), and then in
+# the relations of the Gesamt column too. Groups:
 #   (a) a row across the LE columns and Gesamt (Gesamt = sum of the LEs), for the counts and for the bases;
 #   (b) per column, a partition: disjoint counts that make up a set that is shown too (the base of the rows of a
-#       section, the bases of a section that make up another count, or a count and its complement).
+#       section, the bases of a section that make up another count, or a count and its complement);
+#   (c) per column, the sum relations of sum_relations(): across sections (Diagnosestatus nach Altersgruppe per
+#       status against Diagnosestatus and Diagnoserate, a disease group against its status rows and the base of
+#       these, Adult + Pädiatrisch = gesamt, ...), also between zeros, and those a reader knows from the data
+#       (e.g. no unsequenced case), where they hold.
 # A count is the set it counts (case keys, variant ids): the same set shown twice, e.g. the case count and the base
-# "Fälle", is one quantity and suppressed in both places. Each zero is a quantity of its own. With
-# SUPPRESS_DIAGNOSES the cells in scope are quantities apart from the exact ones, even of the same set, and a
-# partition of diagnosis rows can have an exact total (the sequenced cases, the cases): where exactly one part is
-# suppressed and the others are zeros, a zero part is suppressed instead (as <min_cell, which it is), so that the
-# suppressed part isn't the exact total minus the shown zeros; preferably one in a row with a nonzero Gesamt, and a
-# zero suppressed alone in its row next to zeros takes the zero of Gesamt along. Lean, not a full audit of all
-# linear relations.
+# "Fälle", is one quantity and suppressed in both places; in a group it stays two cells. Each zero is a quantity of
+# its own. With SUPPRESS_DIAGNOSES the cells in scope are quantities apart from the exact ones, even of the same
+# set, and a group of diagnosis rows can have an exact total (the sequenced cases, the cases): where exactly one part
+# is suppressed and the others are zeros, a zero part is suppressed instead (as <min_cell, which it is), so that the
+# suppressed part isn't the exact total minus the shown zeros; preferably one in a row with a nonzero Gesamt. A zero
+# is never chosen where it is known to be 0 anyway (beside exact zeros, also through other groups: all counts are
+# >= 0), and where one side of a group is shown zeros only, a suppressed cell on the other side is known to be 0:
+# a zero of that side is suppressed as well (in a row the zero of Gesamt). Lean, not a full audit of all linear
+# relations: it closes every single relation, not systems of them.
 
 def quantities(entities, in_scope=None):
     """
@@ -1096,30 +1105,115 @@ def disjoint(sets):
     return taken, union
 
 
-def suppression_groups(entities, cells):
-    """The groups (rule, quantities) of the complementary suppression, see above"""
+def sum_relations(rows):
+    """
+    The sum relations of the matrix that the sets of the rows don't show (rule c of the complementary suppression):
+    those across sections, and those of zeros, which are quantities of their own. Each is (always, lhs, rhs), cells
+    (row index, "value" | "base"), sum(lhs) = sum(rhs) in each column; always False: a relation that a reader knows
+    only from the data (no case left unsequenced, at most one prior finding per case as the DIP sends it, every
+    closed case a genome with its extent, no neuromuscular case without Orphacode), used in a column where it holds.
+    """
+    index = {(r.section, r.item): i for i, r in enumerate(rows)}
+    out = []
+
+    def rel(always, lhs, rhs):
+        if all((s, i) in index for s, i, _ in lhs + rhs):
+            out.append((always, [(index[s, i], f) for s, i, f in lhs], [(index[s, i], f) for s, i, f in rhs]))
+
+    status, rate, by_age = "Diagnosestatus (alle Fälle)", "Diagnoserate (abgeschlossene Fälle)", "Diagnosestatus nach Altersgruppe"
+    status_item = {s: f"{OPEN} (Undiagnostiziert, noch keine GFK2)" if s == OPEN else s for s in CASE_STATUSES}
+    sequenced, closed = (status, DIAGNOSED, "base"), (rate, DIAGNOSED, "base")
+    # a base shown in several rows of a section is one number
+    first = {}
+    for r in rows:
+        if r.unit == COUNT and r.base_label is not None:
+            cell = (r.section, r.item, "base")
+            if (r.section, r.base_label) in first:
+                rel(True, [first[r.section, r.base_label]], [cell])
+            else:
+                first[r.section, r.base_label] = cell
+    # Diagnosestatus and Diagnoserate
+    rel(True, [sequenced], [(status, status_item[s], "value") for s in CASE_STATUSES])
+    rel(True, [closed], [(rate, s, "value") for s in STATUSES])
+    rel(True, [sequenced], [closed, (status, status_item[OPEN], "value")])
+    for s in STATUSES:
+        rel(True, [(rate, s, "value")], [(status, s, "value")])
+    # Diagnosestatus nach Altersgruppe: per age group over the statuses, per status over the age groups
+    for g in AGE_GROUPS:
+        rel(True, [(by_age, f"{g}: {DIAGNOSED}", "base")], [(by_age, f"{g}: {s}", "value") for s in STATUSES])
+        rel(True, [(by_age, f"{g}: {OPEN}", "base")], [(by_age, f"{g}: {DIAGNOSED}", "base"), (by_age, f"{g}: {OPEN}", "value")])
+    for s in STATUSES:
+        rel(True, [(rate, s, "value")], [(by_age, f"{g}: {s}", "value") for g in AGE_GROUPS])
+    rel(True, [(status, status_item[OPEN], "value")], [(by_age, f"{g}: {OPEN}", "value") for g in AGE_GROUPS])
+    rel(True, [closed], [(by_age, f"{g}: {DIAGNOSED}", "base") for g in AGE_GROUPS])
+    rel(True, [sequenced], [(by_age, f"{g}: {OPEN}", "base") for g in AGE_GROUPS])
+    # Diagnoserate nach WGS-Seq. Art: the closed cases where all of them are genomes of a known extent
+    wgs = "Diagnoserate nach WGS-Seq. Art (abgeschlossene Fälle mit WGS/lrWGS)"
+    extents = ("Single", "Duo", "Trio")
+    rel(False, [closed], [(wgs, f"{x}: Diagnose", "base") for x in extents])
+    rel(False, [(rate, DIAGNOSED, "value")], [(wgs, f"{x}: Diagnose", "value") for x in extents])
+    rel(False, [(rate, "davon partiell (unter Unklar)", "value")],
+        [(wgs, f"{x}: davon partiell (unter Unklar)", "value") for x in extents])
+    # Vorbefunde: the base is the count of the status; one prior finding per case: a partition
+    for s in CASE_STATUSES:
+        prior, by_year = f"Vorbefunde, Status {s} (Mehrfachnennung möglich)", f"Vorbefunde nach Jahr, Status {s}"
+        base = (prior, PRIOR_TYPES[0], "base")
+        rel(True, [base], [(status, status_item[s], "value")])
+        rel(True, [(by_year, f"{PRIOR_TYPES[0]}: {YEAR_BUCKETS[0]}", "base")], [base])
+        rel(False, [base], [(prior, t, "value") for t in PRIOR_TYPES + (PRIOR_NONE_PERFORMED, PRIOR_NOT_DOCUMENTED)])
+        for t in PRIOR_TYPES:
+            rel(False, [(prior, t, "value")], [(by_year, f"{t}: {b}", "value") for b in YEAR_BUCKETS])
+    # Erkrankungsgruppen: a group is the sum of its statuses and the base of their rows, the blocks of the age
+    # groups sum to the total block; where no case is left unsequenced, the statuses over the groups are those of
+    # the sequenced cases (Diagnosestatus, and by age group)
+    whole, adult, paediatric = DISEASE_GROUP_BLOCKS
+    for block in DISEASE_GROUP_BLOCKS:
+        rel(True, [(block, DISEASE_GROUPS[0], "base")], [(block, g, "value") for g in DISEASE_GROUPS])
+        for g in DISEASE_GROUPS:
+            rel(True, [(block, g, "value")], [(block, f"{g}: {s}", "value") for s in CASE_STATUSES])
+            rel(True, [(block, g, "value")], [(block, f"{g}: {DIAGNOSED}", "base")])
+    for g in DISEASE_GROUPS:
+        for item in (g,) + tuple(f"{g}: {s}" for s in CASE_STATUSES):
+            rel(True, [(whole, item, "value")], [(adult, item, "value"), (paediatric, item, "value")])
+    for s in CASE_STATUSES:
+        rel(False, [(status, status_item[s], "value")], [(whole, f"{g}: {s}", "value") for g in DISEASE_GROUPS])
+        for block, ages in ((adult, (ADULTS, SENIORS)), (paediatric, (NEONATES, CHILDREN, ADOLESCENTS))):
+            rel(False, [(by_age, f"{a}: {s}", "value") for a in ages], [(block, f"{g}: {s}", "value") for g in DISEASE_GROUPS])
+    rel(True, [(PROBLEMS_SECTION, P_DIAGNOSIS_WITHOUT_GROUP, "value")],
+        [(whole, f"{g}: {DIAGNOSED}", "value") for g in UNKNOWN_GROUPS])
+    rel(False, [("Orphacode", "Erkr. ohne Orphacode (keine Orphanet-Kodierung)", "value")],
+        [(whole, UNKNOWN_NO_ORPHA, "value")])
+    return out
+
+
+def suppression_groups(entities, cells, size):
+    """
+    The groups (rule, whole, parts) of the complementary suppression, see above: sum(whole) = sum(parts), each a
+    tuple of the quantities of its cells. A quantity can be in a group twice, as two cells: a reader doesn't know
+    that they are the same number unless both are shown.
+    """
     groups = {}
 
-    def group(rule, members):
-        members = tuple(dict.fromkeys(members))
-        if len(members) > 1:
-            groups.setdefault(members, rule)
+    def group(rule, whole, parts):
+        whole, parts = tuple(whole), tuple(parts)
+        if len(whole) + len(parts) > 1:
+            groups.setdefault((whole, parts), (rule, whole, parts))
 
-    def each(rule, alternatives):
+    def each(rule, wholes, parts):
         """A group for every choice of the quantities of its sets (a set can be in and out of scope)"""
-        for members in product(*alternatives):
-            group(rule, members)
+        for members in product(wholes, *parts):
+            group(rule, members[:1], members[1:])
 
     for i, r in enumerate(entities[TOTAL]):
         for field_ in ("value", "base"):
             if (TOTAL, i, field_) in cells:
-                group("a", [cells[e, i, field_] for e in entities])
+                group("a", [cells[TOTAL, i, field_]], [cells[e, i, field_] for e in entities if e != TOTAL])
 
     for entity, rows in entities.items():
         known = {}      # nonempty set -> its quantities
         for q in cells.values():
             if q[0] == entity and isinstance(q[1], frozenset):
-                known.setdefault(q[1], []).append(q)
+                known.setdefault(q[1], {})[q] = None     # its distinct quantities: in and out of scope
         sections = {}   # section -> base set -> [(set, value quantity)], [base quantities]
         labelled = {}   # (section, base label, base set) -> the same: the structural partition, which in a small
         #                 column can share its base set with another partition of the section by chance
@@ -1136,7 +1230,7 @@ def suppression_groups(entities, cells):
                 chosen = [next(q for s, q in parts if s == t) for t in taken]
                 zeros = [q for s, q in parts if not s]
                 for b in dict.fromkeys(bases):
-                    group("b", chosen + zeros + [b])
+                    group("b", [b], chosen + zeros)
 
         for (_, _, base), (parts, bases) in labelled.items():
             partition(base, parts, bases)
@@ -1145,15 +1239,22 @@ def suppression_groups(entities, cells):
                 partition(base, parts, bases)
             taken, union = disjoint(by_base)
             if len(taken) > 1 and union in known:
-                each("b", [known[s] for s in taken] + [known[union]])
+                each("b", known[union], [known[s] for s in taken])
         sizes = {len(s) for s in known}
         for whole in known:
             for part in known:
                 if 0 < len(part) < len(whole) and len(whole) - len(part) in sizes and part < whole:
                     rest = whole - part
                     if rest in known:
-                        each("b", [known[whole], known[part], known[rest]])
-    return [(rule, members) for members, rule in groups.items()]
+                        each("b", known[whole], [known[part], known[rest]])
+    for always, lhs, rhs in sum_relations(entities[TOTAL]):
+        for entity in entities:
+            sides = [[cells.get((entity, i, f)) for i, f in side] for side in (lhs, rhs)]
+            if None in sides[0] + sides[1]:
+                continue
+            if always or sum(size[q] for q in sides[0]) == sum(size[q] for q in sides[1]):
+                group("c", *sides)
+    return list(groups.values())
 
 
 def suppressed_quantities(entities, min_cell, scope=SUPPRESS_ALL):
@@ -1164,31 +1265,70 @@ def suppressed_quantities(entities, min_cell, scope=SUPPRESS_ALL):
         return cells, size, hidden
     # the case count of all LEs only where the LE columns need it
     protected = cells.get((TOTAL, 0, "value"))
-    groups = suppression_groups(entities, cells)
+    groups = suppression_groups(entities, cells, size)
     # a zero hidden in a row whose Gesamt is 0 tells nothing: such zeros come last
     row_total = {q: size[cells[TOTAL, i, f]] for (_, i, f), q in cells.items() if (TOTAL, i, f) in cells}
+    # the zeros known to be 0 whatever is suppressed: exact zeros, and the cells of a side of a group whose other
+    # side are such zeros only (all counts are >= 0); never suppressed to protect another cell
+    pinned = {q for q in size if not q[2] and size[q] == 0}
     changed = True
     while changed:
         changed = False
-        for rule, members in groups:
-            if sum(q in hidden for q in members) != 1:
-                continue
-            open_ = [q for q in members if q[2] and q not in hidden]
+        for _, whole, parts in groups:
+            for side, other in ((whole, parts), (parts, whole)):
+                if all(o in pinned for o in other) and not all(q in pinned for q in side):
+                    pinned.update(side)
+                    changed = True
+
+    def zero(of):
+        """The zero to suppress of the quantities 'of' (open, in scope): not pinned, in a row with a nonzero Gesamt
+        if any"""
+        of = [q for q in of if size[q] == 0 and q not in pinned]
+        return min(of, key=lambda q: row_total.get(q, 0) == 0) if of else None
+
+    # a worklist of the groups: a group is looked at again when one of its quantities is suppressed
+    of_quantity = {}
+    for g, (_, whole, parts) in enumerate(groups):
+        for q in whole + parts:
+            of_quantity.setdefault(q, []).append(g)
+    queue, queued = deque(range(len(groups))), set(range(len(groups)))
+    while queue:
+        g = queue.popleft()
+        queued.discard(g)
+        rule, whole, parts = groups[g]
+        members = whole + parts
+        n = sum(q in hidden for q in members)
+        if n == 0:
+            continue
+        open_ = list(dict.fromkeys(q for q in members if q[2] and q not in hidden))
+        add = None
+        # a side of shown zeros: the suppressed cells of the other side are zeros as well; a zero of that side
+        # is suppressed too (in a row the zero of Gesamt)
+        for side, other in ((whole, parts), (parts, whole)):
+            if (add is None and any(q in hidden for q in other)
+                    and all(q not in hidden and size[q] == 0 for q in side)):
+                shown = [q for q in side if q[2]]
+                add = next((q for q in shown if q[0] == TOTAL and q not in pinned), None) if rule == "a" else None
+                add = add or zero(shown)
+        if add is None and n == 1:
             candidates = [q for q in open_ if size[q] > 0 and (rule == "a" or q != protected)]
             if candidates:
                 of_les = [q for q in candidates if q[0] != TOTAL]
-                hidden.add(min(of_les or candidates, key=lambda q: size[q]))
-                changed = True
+                add = min(of_les or candidates, key=lambda q: size[q])
             elif scope == SUPPRESS_DIAGNOSES and open_ and (any(not q[2] for q in members)
                                                             or any(size[q] == 0 for q in members if q in hidden)):
-                # the others are exact or zero, or the one suppressed is a zero beside zeros: a zero is suppressed
-                # as well, else the exact ones or the zeros would give the count away; in a row the zero of Gesamt,
-                # in a column one in a row with a nonzero Gesamt if any
+                # the others are exact or zero, or the one suppressed is a zero beside zeros: a zero is
+                # suppressed as well, else the exact ones or the zeros would give the count away; in a row the
+                # zero of Gesamt, in a column one in a row with a nonzero Gesamt if any
                 if rule == "a":
-                    hidden.add(next((q for q in open_ if q[0] == TOTAL), open_[0]))
-                else:
-                    hidden.add(min(open_, key=lambda q: row_total.get(q, 0) == 0))
-                changed = True
+                    add = next((q for q in open_ if q[0] == TOTAL and q not in pinned), None)
+                add = add or zero(open_)
+        if add is not None:
+            hidden.add(add)
+            for other in [g] + of_quantity[add]:
+                if other not in queued:
+                    queue.append(other)
+                    queued.add(other)
     return cells, size, hidden
 
 
@@ -1225,6 +1365,16 @@ def hidden_statistic(entities, name, i, min_cell):
     return sum(1 for e, rows in entities.items() if e != TOTAL and rows[i].support) <= 1
 
 
+RELATIONS_NOTE = ("Kategorien, die sich zu einer gezeigten Zahl summieren, auch über Abschnitte hinweg: Diagnosestatus "
+                  "nach Altersgruppe je Status gegen Diagnosestatus und Diagnoserate, eine Erkrankungsgruppe gegen ihre "
+                  "Statuszeilen, Adult + Pädiatrisch = gesamt")
+GESAMT_NOTE = ("Gesamt nur, wenn die Zahl allein von einer LE stammt, und dann ergänzend in den Summenbeziehungen der "
+               "Spalte Gesamt, dort auch Zellen mehrerer LEs")
+HEAD_NOTE = ("eine Zahl, die andere enthält (eine Erkrankungsgruppe, der Diagnosestatus Diagnose), kann {hidden} zeigen, "
+             "während Zahlen in ihr (die Statuszeilen der Gruppe, Diagnose je Erkrankungsgruppe) zweistellig sind; "
+             "{hidden} heißt dann nur, dass die Zahl nicht gezeigt wird.")
+
+
 def suppression_note(min_cell, scope, primary, complementary):
     """The note on the suppressed cells (sheet Hinweise)"""
     if min_cell <= 1:
@@ -1234,22 +1384,22 @@ def suppression_note(min_cell, scope, primary, complementary):
                 f"mit Basis unter {min_cell} und Kennzahlen der Bearbeitungsdauer aus weniger als {min_cell} Werten (nicht in "
                 "den Rückfragen); Gesamt (Summe über alle LEs) wird gezeigt. "
                 f"Ergänzend unterdrückt, ebenfalls als <{min_cell}: in jeder Zeile über die LEs und Gesamt und in jeder "
-                "Aufteilung einer Spalte (Kategorien, die sich zu einer gezeigten Zahl summieren), in der sonst genau eine Zelle "
+                f"Summenbeziehung einer Spalte ({RELATIONS_NOTE}), in der sonst genau eine Zelle "
                 "unterdrückt wäre, die kleinste weitere Zelle einer LE über 0, bis keine unterdrückte Zahl als Differenz "
-                "berechenbar ist; Gesamt nur, wenn die Zahl allein von einer LE stammt "
-                f"({complementary} Zellen zusätzlich zu {primary}); eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr Fälle zählen.")
+                f"berechenbar ist; {GESAMT_NOTE} "
+                f"({complementary} Zellen zusätzlich zu {primary}). Eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr "
+                f"Fälle zählen, auch weit mehr: {HEAD_NOTE.format(hidden=f'<{min_cell}')}")
     return (f"Unterdrückt werden nur die Diagnosezeilen: die Abschnitte {', '.join(DIAGNOSIS_SECTIONS)} und die Zeile "
             + ", ".join(f"{s}: {i}" for s, i in DIAGNOSIS_ITEMS) + ". "
             f"Dort sind in den Spalten der LEs Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso "
             f"Bezugszahlen unter {min_cell} (außer {', '.join(EXACT_DIAGNOSIS_BASES)}) und die Anteile dazu (nicht in den "
             f"Rückfragen); Gesamt (Summe über alle LEs) wird gezeigt. Ergänzend unterdrückt, ebenfalls als <{min_cell}: "
-            "in jeder Zeile über die LEs und Gesamt und in jeder Aufteilung einer Spalte (Kategorien, die sich zu einer "
-            "gezeigten Zahl summieren, auch zu einer exakt gezeigten wie den sequenzierten Fällen), in der sonst genau eine "
-            "Zelle unterdrückt wäre, die kleinste weitere Diagnosezelle einer LE über 0, sonst eine 0, bis keine "
-            "unterdrückte Zahl als Differenz berechenbar ist; Gesamt nur, wenn die Zahl allein von einer LE stammt "
-            f"({complementary} Zellen zusätzlich zu {primary}); eine Zelle <{min_cell} kann daher auch 0 oder {min_cell} "
-            "und mehr Fälle zählen. Alle anderen Zahlen, Anteile und Bearbeitungsdauern sind exakt angegeben, auch "
-            f"Fallzahlen unter {min_cell}.")
+            f"in jeder Zeile über die LEs und Gesamt und in jeder Summenbeziehung einer Spalte ({RELATIONS_NOTE}; die Summe "
+            "kann exakt gezeigt sein, z. B. die sequenzierten Fälle), in der sonst genau eine Zelle unterdrückt wäre, "
+            "die kleinste weitere Diagnosezelle einer LE über 0, sonst eine 0, bis keine unterdrückte Zahl als Differenz "
+            f"berechenbar ist; {GESAMT_NOTE} ({complementary} Zellen zusätzlich zu {primary}). Eine Zelle <{min_cell} "
+            f"kann daher auch 0 oder {min_cell} und mehr Fälle zählen, auch weit mehr: {HEAD_NOTE.format(hidden=f'<{min_cell}')} Alle anderen Zahlen, "
+            f"Anteile und Bearbeitungsdauern sind exakt angegeben, auch Fallzahlen unter {min_cell}.")
 
 
 def small(n, min_cell):

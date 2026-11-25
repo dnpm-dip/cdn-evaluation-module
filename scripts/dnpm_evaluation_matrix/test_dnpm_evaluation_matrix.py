@@ -246,6 +246,17 @@ class TumourTests(unittest.TestCase):
         self.assertEqual(get(result, "Diagnose: Kodierung", "Histologie /2 in situ"), 1)
         self.assertEqual(get(result, "Diagnose: Kodierung", "Topographie ICD-O-3-T dreistellig gleich der Hauptdiagnose"), 2)
 
+    def test_the_behaviour_codes_add_up_to_the_cases_with_one(self):
+        # a character after "/" that is no behaviour code (or nothing) is no behaviour code: before, such a case
+        # counted under "mit Verhaltenscode" but under no code
+        result = cases(*(datenkranz(f"t{i}", histology=h)
+                         for i, h in enumerate(("8140/3", "8140/32", "8500/2", "8140/?", "8140/", "8140", "8140/ 6"))))
+        s = "Diagnose: Kodierung"
+        self.assertEqual(get(result, s, "Histologie ICD-O-3-M mit Verhaltenscode"), 4)
+        self.assertEqual(sum(get(result, s, f"Histologie {label}") for _, label in dm.BEHAVIOUR), 4)
+        self.assertEqual(get(result, s, "Histologie /3 bösartig (Primärtumor)"), 2)
+        self.assertEqual(get(result, s, "Histologie /6 bösartig (Metastase)"), 1)
+
     def test_prior_therapies(self):
         procedure = {"treatmentType": "O", "intention": "P", "therapyStartDate": "2024-11-01"}
         result = cases(datenkranz("t1", procedures=[procedure, {**procedure, "intention": "K"}]), datenkranz("t2"),

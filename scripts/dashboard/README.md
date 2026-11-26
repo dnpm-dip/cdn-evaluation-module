@@ -86,8 +86,8 @@ time series blocks come from the data. Unknown matrices get generic key figures.
   and its months, the categories of a field and its fill count), until none is left. The use case MTB is exact. There
   is no use case `Alle` next to a suppressed use case: all use cases minus the exact MTB, or minus a separately
   suppressed unknown use case, would give the suppressed RD cells away. With several use cases the page has no
-  time series (it would show the months of one use case for all). Like the RD matrix, the closure is per single
-  relation (see the main README, *Limits of the protection*).
+  time series (it would show the months of one use case for all). The closure is per single relation; unlike the
+  RD matrix (see the main README, *Protection against the whole system*) it isn't checked against the whole system.
 - The file is labelled "Synthetische Daten" when the LE names look synthetic (`LE-A`, `SYN-…`), `--synthetic` /
   `--real` override. The header names the source files, data states and build time; the footer says
   "Aggregate je LE, nur intern". The tables are meant for the data nodes and the LEs, not for publication.

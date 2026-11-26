@@ -20,11 +20,12 @@ Output (<output> without extension):
                          with --rueckfragen-per-le (recommended) instead one <output>_rueckfragen_<LE>.csv per LE
 Counts of an LE below --min-cell (default 5) are suppressed ("<5") in all outputs except the Rückfragen (Gesamt is
 shown unless it is the count of a single LE), and complementary
-cells with the same marker so that no suppressed count is the difference of shown ones in a single relation (see
-suppressed_quantities); the audit of the whole linear system (derivable) reports the cells that still follow
-(stderr, <output>_audit.csv, for the KDK only).
+cells with the same marker until no suppressed count follows from the shown numbers, also not from several sum
+relations together (the whole linear system, see protect). If one still followed, nothing is written and the
+script exits with an error (blocked_message: the cells on stderr, for the KDK only).
 --suppress-scope diagnoses (default) suppresses only the diagnosis rows (DIAGNOSIS_SECTIONS, DIAGNOSIS_ITEMS) and
-shows every other count, share and duration exactly; --suppress-scope all suppresses every row.
+shows every other count, share and duration exactly, except in the LE columns where the exact numbers alone
+determine a suppressed diagnosis cell (suppressed there as with all); --suppress-scope all suppresses every row.
 Follow-up (FU_SECTIONS): cases with GFK2 due, current or overdue at --reference-date with the interval
 --follow-up-months (default 12), days from GFK2 to the first follow-up, mandatory fields of the follow-ups.
 The xlsx is written from the JSON by fill_template.py (needs openpyxl).
@@ -37,7 +38,9 @@ Example:
 
 import argparse
 import csv
+import heapq
 import json
+import os
 import re
 import statistics
 import sys
@@ -1115,10 +1118,12 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=(), follow_up
 # period counts 0). A count of a base known to be 0 (exact) is 0 as well and never chosen as a protecting zero.
 # The closure below is written over columns {column: [rows]}: (entity) for one matrix, (file, entity) in a joint run.
 
-def quantities(columns, count_unit, in_scope=None):
+def quantities(columns, count_unit, in_scope=None, original=None):
     """
-    The quantity of each count cell {(column, row index, "value" | "base"): (column, set or own id, in scope)} and
-    their sizes; in_scope(row, field) marks the cells that can be suppressed (None: all)
+    The quantity of each count cell {(column, row index, "value" | "base"): (column, set or own id, can be suppressed,
+    in the scope)} and their sizes; in_scope(column, row, field) marks the cells that can be suppressed (None: all),
+    original(row, field) those of the scope (None: all). A cell that can be suppressed only because its column is
+    escalated (see protect) is out of the scope, and so a quantity apart from a scope cell of the same set
     """
     cells, size = {}, {}
     for column, rows in columns.items():
@@ -1129,8 +1134,8 @@ def quantities(columns, count_unit, in_scope=None):
                                             ("base", r.base, getattr(r, "of", None), ("base", i))):
                 if n is None:
                     continue
-                scoped = in_scope is None or in_scope(r, field_)
-                q = (column, members if members else own, scoped)
+                scoped = in_scope is None or in_scope(column, r, field_)
+                q = (column, members if members else own, scoped, original is None or original(r, field_))
                 cells[column, i, field_] = q
                 size[q] = n
     return cells, size
@@ -1308,7 +1313,8 @@ def close(groups, cells, size, hidden, rank, zero_rank, protected=frozenset(), z
                 add = next((q for q in shown if q in whole and q not in pinned), None) if rule == "a" else None
                 add = add or zero(shown)
         if add is None and n == 1:
-            candidates = [q for q in open_ if size[q] > 0 and (rule == "a" or q not in protected)]
+            candidates = ([q for q in open_ if size[q] > 0 and (rule == "a" or q not in protected)]
+                          or [q for q in open_ if size[q] > 0])     # the case count of all LEs as a last resort
             if candidates:
                 add = min(candidates, key=lambda q: (rank(q), size[q]))
             elif zero_fallback and open_ and (any(not q[2] for q in members)
@@ -1330,107 +1336,398 @@ def close(groups, cells, size, hidden, rank, zero_rank, protected=frozenset(), z
 
 # The closure above closes every single relation, not systems of them: several relations, each with two or more
 # suppressed cells, can together still determine one (e.g. a period's LE cell from two quarter totals, two LE totals
-# and the shown zeros). The audit (derivable) takes the whole system: the relations of all groups as linear equations
-# in the suppressed quantities (the shown ones and the zeros a reader knows, known_zeros, are constants); a suppressed
-# quantity follows from the shown numbers exactly if its unit vector lies in the row space of these equations.
-# Computed by elimination modulo a 61-bit prime: a quantity that follows over the rationals follows modulo the prime
-# unless it divides a determinant of the 0/±1 system, which doesn't happen in practice. The audit only reports (stderr,
-# result["derivable"], not in the JSON, CSV or xlsx, see write_json): suppressing further cells until none follows
-# (a cell suppression problem, usually solved as an integer program) is not done, because a greedy extension
-# suppressed many times the cells and did not settle. Bounds are not audited either: all counts are >= 0, so a
-# suppressed cell can be bounded by shown ones (at most a shown count it is part of).
+# and the shown zeros). The protection (protect) therefore takes the whole system of all files of a run, between
+# single cells as a reader sees them (cell_relations: Gesamt = sum of the LEs, total = sum of the periods, the
+# categories of a section, sum_relations(), cells that count the same set everywhere), with the zeros a reader knows
+# (all counts are >= 0, cell_known_zeros) as constants. A suppressed count follows from the shown numbers exactly if
+# every solution of the homogeneous system is 0 in it; derivable_cells checks that with one pseudo-random solution
+# (kernel_vector, elimination modulo a 61-bit prime in the order of the fewest relations): a count that doesn't
+# follow is nonzero in it except with probability 2^-61, so the check errs, if at all, towards "follows". After the
+# closure, protect suppresses further cells until no count of 1 to min_cell - 1 follows: per such count the
+# cheapest allowed cell next to it through the suppressed ones (a nonzero LE cell of the smallest count first, zeros,
+# Gesamt and the total file last), more of them where a count stays computable, then the closure again. Where a
+# count follows even with every cell of the scope suppressed (with SUPPRESS_DIAGNOSES: from the exact numbers
+# alone, e.g. the closed cases where "noch keine GFK2" is 0), the columns involved are suppressed as with
+# SUPPRESS_ALL (escalated: the LE in that file, then in every file, with Gesamt), and so are those of a count that
+# stays computable for long. Deterministic: every choice is ordered by the cells, not by hashes. What still follows
+# afterwards (it shouldn't) is result["derivable"], and the scripts then write nothing (main, monthly_matrices).
+# Bounds are not checked: all counts are >= 0, so a suppressed cell can be bounded by shown ones (at most a shown
+# count it is part of).
 PRIME = 2 ** 61 - 1
+STUCK_ROUNDS = 9    # rounds a count may stay computable before its LE is escalated in every file
 
 
-def _echelon(equations):
-    """Row echelon form modulo PRIME of sparse equations {variable index: coefficient}: {pivot: row}, each row with
-    its pivot (its smallest variable) at 1"""
-    pivots = {}
-    for eq in equations:
-        row = {v: c % PRIME for v, c in eq.items() if c % PRIME}
-        while row:
-            v = min(row)
-            pivot = pivots.get(v)
-            if pivot is None:
-                inv = pow(row[v], PRIME - 2, PRIME)
-                pivots[v] = {u: c * inv % PRIME for u, c in row.items()}
-                break
-            f = row[v]
-            for u, c in pivot.items():
-                x = (row.get(u, 0) - f * c) % PRIME
-                if x:
-                    row[u] = x
+def cell_order(cell):
+    """Sort key of a cell (column, row index, field), column = (file tag, entity): deterministic"""
+    (tag, entity), i, field_ = cell
+    return (str(tag), str(entity), i, field_)
+
+
+def cell_count(columns, cell):
+    """The count of a cell (column, row index, field), None where it has none"""
+    c, i, field_ = cell
+    r = columns[c][i]
+    return (r.n if field_ == "value" else r.base) if r.unit == COUNT else None
+
+
+def cell_relations(files, columns, total=None):
+    """
+    The sum relations between the count cells (column, row index, field) of all files that a reader knows, each
+    (lhs, rhs) with sum(lhs) = sum(rhs): Gesamt = the sum of the LEs per row and field; with total, each cell of that
+    file = the sum of the same cell of the others (NOT_ADDITIVE: equal to each); per column the rows of a section
+    with one base label whose sets are disjoint and make up the base (the categories of a section) and the relations
+    of sum_relations() where they hold (always: in every column); two cells of a column that count the same set in
+    every column of all files (structurally the same number, e.g. the cases and the base "Fälle"), both diagnosis
+    cells or both not.
+    """
+    out = []
+    has = lambda cell: cell_count(columns, cell) is not None
+
+    def add(lhs, rhs):
+        if len(lhs) + len(rhs) > 1:
+            out.append((tuple(lhs), tuple(rhs)))
+
+    sums = [((tag, TOTAL), [(tag, e) for e in entities if e != TOTAL]) for tag, entities in files.items()]
+    across = [((total, e), [(tag, e) for tag in files if tag != total and e in files[tag]]) for e in files[total]] \
+        if total is not None else []
+    for (whole, parts), is_across in [(p, False) for p in sums] + [(p, True) for p in across]:
+        index = {p: {r.key: i for i, r in enumerate(columns[p])} for p in parts}
+        for i, r in enumerate(columns[whole]):
+            for field_ in ("value", "base"):
+                if not has((whole, i, field_)):
+                    continue
+                members = [(p, index[p][r.key], field_) for p in parts if r.key in index[p] and has((p, index[p][r.key], field_))]
+                if is_across and (r.section, r.item) in NOT_ADDITIVE:
+                    for m in members:
+                        add([(whole, i, field_)], [m])
                 else:
-                    del row[u]
-    return pivots
+                    add([(whole, i, field_)], members)
+    listed = {tag: sum_relations(entities[TOTAL]) for tag, entities in files.items()}
+    for c, rows in columns.items():
+        sections = {}
+        for i, r in enumerate(rows):
+            if r.members is not None and r.of is not None and has((c, i, "value")) and has((c, i, "base")):
+                sections.setdefault((r.section, r.base_label, r.of), []).append((r.members, i))
+        for (_, _, base), parts in sections.items():
+            taken, union = disjoint(s for s, _ in parts)
+            if base and union == base:
+                chosen = [next(i for s, i in parts if s == t) for t in taken]
+                add([(c, parts[0][1], "base")], [(c, i, "value") for i in chosen + [i for s, i in parts if not s]])
+        for always, lhs, rhs in listed[c[0]]:
+            sides = [[(c, i, f) for i, f in side] for side in (lhs, rhs)]
+            if all(has(k) for k in sides[0] + sides[1]) and (
+                    always or sum(cell_count(columns, k) for k in sides[0]) == sum(cell_count(columns, k) for k in sides[1])):
+                add(*sides)
+    positions = {}      # (row key, field) -> {column: row index}
+    for c, rows in columns.items():
+        for i, r in enumerate(rows):
+            for field_, s in (("value", r.members), ("base", r.of)):
+                if s is not None and has((c, i, field_)):
+                    positions.setdefault((r.key, field_, is_diagnosis_cell(r, field_)), {})[c] = i
+    classes = {}
+    for p, at in positions.items():
+        signature = (p[2],) + tuple((cell_order((c, 0, "")), columns[c][i].members if p[1] == "value" else columns[c][i].of)
+                                    for c, i in sorted(at.items(), key=lambda x: cell_order((x[0], 0, ""))))
+        classes.setdefault(signature, []).append(p)
+    for signature, ps in classes.items():
+        if len(ps) > 1 and any(s for _, s in signature[1:]):
+            first, *rest = sorted(ps)
+            for p in rest:
+                for c, i in positions[first].items():
+                    add([(c, i, first[1])], [(c, positions[p][c], p[1])])
+    return out
 
 
-def _follows(v, pivots):
-    """The unit vector of variable v lies in the row space of the echelon rows"""
-    row = {v: 1}
-    while row:
-        u = min(row)
-        pivot = pivots.get(u)
-        if pivot is None:
-            return False
-        f = row[u]
-        for w, c in pivot.items():
-            x = (row.get(w, 0) - f * c) % PRIME
-            if x:
-                row[w] = x
-            else:
-                del row[w]
-    return True
+def zero_rules(relations, cells, subsets=()):
+    """The rules of cell_known_zeros, indexed once: the sides of the relations (sets of cells), per cell the sides it
+    is on, and the implications part <- whole (the count of a base that is 0, a part of a set that is 0)"""
+    sides = []
+    on = {}
+    for lhs, rhs in relations:
+        n = len(sides)
+        sides += [frozenset(lhs), frozenset(rhs)]
+        for j in (n, n + 1):
+            for k in sides[j]:
+                on.setdefault(k, []).append(j)
+    implied = {}
+    for (c, i, f) in cells:
+        if f == "value" and (c, i, "base") in cells:
+            implied.setdefault((c, i, "base"), []).append((c, i, "value"))
+    for part, whole in subsets:
+        implied.setdefault(whole, []).append(part)
+    return sides, on, implied
 
 
-def known_zeros(groups, cells, size, hidden, subsets=()):
+def cell_known_zeros(relations, cells, size, hidden, subsets=(), rules=None):
     """
-    The suppressed quantities a reader knows to be 0 from the shown numbers alone (all counts are >= 0): the
-    count of a base that is 0, the cells of a side of a group whose other side are zeros only, the part of a set
-    that is 0 (subsets: (part, whole) quantities, e.g. the open cases and the cases without GFK2)
+    The cells a reader knows to be 0 (all counts are >= 0): a shown 0, the count of a base that is 0, the cells of a
+    side of a relation whose other side is zeros only, the part of a set that is 0 (subsets: (part, whole) cells,
+    e.g. the open cases and the cases without GFK2). rules: zero_rules() of the same arguments, if computed already
     """
-    zero = {q for q in size if size[q] == 0 and (q not in hidden or not q[2])}
-    of_base = [(q, cells[c, i, "base"]) for (c, i, f), q in cells.items() if f == "value" and (c, i, "base") in cells]
-    changed = True
-    while changed:
-        changed = False
-        for q, base in of_base:
-            if base in zero and q not in zero:
-                zero.add(q)
-                changed = True
-        for part, whole in subsets:
-            if whole in zero and part not in zero:
-                zero.add(part)
-                changed = True
-        for _, whole, parts in groups:
-            for side, other in ((whole, parts), (parts, whole)):
-                if all(o in zero for o in other) and not all(q in zero for q in side):
-                    zero.update(side)
-                    changed = True
-    return zero & hidden
+    sides, on, implied = rules or zero_rules(relations, cells, subsets)
+    left = [len(side) for side in sides]       # the cells of a side not known to be 0
+    zero, queue = set(), []
+
+    def add(k):
+        if k not in zero:
+            zero.add(k)
+            queue.append(k)
+    for j, n in enumerate(left):
+        if n == 0:
+            for k in sides[j ^ 1]:
+                add(k)
+    for k, q in cells.items():
+        if size[q] == 0 and q not in hidden:
+            add(k)
+    while queue:
+        k = queue.pop()
+        for part in implied.get(k, ()):
+            add(part)
+        for j in on.get(k, ()):
+            left[j] -= 1
+            if left[j] == 0:
+                for other in sides[j ^ 1]:
+                    add(other)
+    return zero
 
 
-def derivable(groups, cells, size, hidden, targets, order=repr, subsets=()):
+def kernel_vector(equations, n, seed=1):
     """
-    The quantities of targets (suppressed) that follow from the shown numbers: from the relations of all groups at
-    once, with the zeros a reader knows (known_zeros) as constants; order: a sort key of the quantities
+    A pseudo-random solution of the homogeneous equations ({variable: coefficient mod PRIME}) in the variables
+    0..n-1: sparse elimination, always of the variable in the fewest equations by its shortest one; the free
+    variables get pseudo-random values, the others follow by back substitution
     """
-    known = known_zeros(groups, cells, size, hidden, subsets)
-    index = {q: i for i, q in enumerate(sorted(hidden - known, key=order))}
+    rows = dict(enumerate(equations))
+    occurs = {}
+    for i, r in rows.items():
+        for v in r:
+            occurs.setdefault(v, set()).add(i)
+    heap = [(len(occurs[v]), v) for v in sorted(occurs)]
+    heapq.heapify(heap)
+    done, order = set(), []
+    while heap:
+        d, v = heapq.heappop(heap)
+        if v in done or d != len(occurs[v]):
+            continue
+        done.add(v)
+        if d == 0:
+            continue
+        pivot_id = min(occurs[v], key=lambda i: (len(rows[i]), i))
+        pivot = rows.pop(pivot_id)
+        for u in pivot:
+            occurs[u].discard(pivot_id)
+        inv = pow(pivot[v], PRIME - 2, PRIME)
+        pivot = {u: c * inv % PRIME for u, c in pivot.items()}
+        order.append((v, pivot))
+        changed = set(pivot)
+        for i in sorted(occurs[v]):
+            r = rows[i]
+            f = r[v]
+            for u, c in pivot.items():
+                x = r.get(u)
+                if x is None:
+                    r[u] = -f * c % PRIME
+                    occurs[u].add(i)
+                else:
+                    x = (x - f * c) % PRIME
+                    if x:
+                        r[u] = x
+                    else:
+                        del r[u]
+                        occurs[u].discard(i)
+            if not r:
+                del rows[i]
+        occurs[v] = set()
+        for u in changed:
+            if u not in done:
+                heapq.heappush(heap, (len(occurs[u]), u))
+    z, x = [0] * n, seed
+    eliminated = {v for v, _ in order}
+    for v in range(n):
+        if v not in eliminated:
+            x = (x * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+            z[v] = (x >> 11) % PRIME or 1
+    for v, pivot in reversed(order):
+        z[v] = -sum(c * z[u] for u, c in pivot.items() if u != v) % PRIME
+    return z
+
+
+def derivable_cells(relations, cells, size, hidden, targets, subsets=(), seed=1, rules=None):
+    """
+    The cells of targets (suppressed) that follow from the shown numbers: from all relations at once, the zeros a
+    reader knows (cell_known_zeros) and the shown cells as constants; and those known zeros. Returns (cells, zeros)
+    """
+    zero = cell_known_zeros(relations, cells, size, hidden, subsets, rules)
+    unknown = sorted((k for k, q in cells.items() if q in hidden and k not in zero), key=cell_order)
+    index = {k: n for n, k in enumerate(unknown)}
     equations = []
-    for _, whole, parts in groups:
-        eq = Counter()
-        for q in whole:
-            if q in index:
-                eq[index[q]] += 1
-        for q in parts:
-            if q in index:
-                eq[index[q]] -= 1
-        eq = {v: c for v, c in eq.items() if c}
+    for lhs, rhs in relations:
+        eq = {}
+        for side, sign in ((lhs, 1), (rhs, -1)):
+            for k in side:
+                n = index.get(k)
+                if n is not None:
+                    eq[n] = eq.get(n, 0) + sign
+        eq = {v: c % PRIME for v, c in eq.items() if c % PRIME}
         if eq:
             equations.append(eq)
-    pivots = _echelon(equations)
-    return {q for q in targets if q in known or (q in index and _follows(index[q], pivots))}
+    z = kernel_vector(equations, len(unknown), seed)
+    return [k for k in targets if k in zero or (k in index and z[index[k]] == 0)], zero
+
+
+def cells_of(columns):
+    """The count cells (column, row index, field) of the columns"""
+    return [(c, i, f) for c, rows in columns.items() for i, r in enumerate(rows) for f in ("value", "base")
+            if cell_count(columns, (c, i, f)) is not None]
+
+
+def subset_cells(files, cells):
+    """subset_relations() of every column as cells ((column, row, field) part, whole)"""
+    return [((c, i, f), (c, j, g)) for tag, entities in files.items()
+            for (i, f), (j, g) in subset_relations(entities[TOTAL])
+            for c in [(tag, e) for e in entities] if (c, i, f) in cells and (c, j, g) in cells]
+
+
+def closure(files, columns, min_cell, scope, total, escalated):
+    """The quantities, the primary suppression and the closure (close): cells, size, hidden, and a function that
+    closes hidden again. A quantity is (column, set or own id, can be suppressed, in the scope); escalated columns
+    are suppressed as with SUPPRESS_ALL"""
+    original = (lambda r, f: True) if scope == SUPPRESS_ALL else is_diagnosis_cell
+    cells, size = quantities(columns, COUNT, lambda c, r, f: original(r, f) or c in escalated, original)
+    hidden = {q for q in cells.values() if q[2] and q[0][1] != TOTAL and 0 < size[q] < min_cell}
+    groups = Groups()
+    sums = [((tag, TOTAL), [(tag, e) for e in entities if e != TOTAL]) for tag, entities in files.items()]
+    column_sums(columns, cells, sums, groups)
+    if total is not None:
+        across = [((total, e), [(tag, e) for tag in files if tag != total and e in files[tag]]) for e in files[total]]
+        column_sums(columns, cells, across, groups, same=NOT_ADDITIVE)
+    partitions(columns, cells, groups)
+    for tag, entities in files.items():
+        relations(cells, size, [(tag, e) for e in entities], sum_relations(entities[TOTAL]), groups)
+    groups = list(groups)
+    # Gesamt of a row: a zero hidden in a row whose Gesamt is 0 tells nothing, such zeros come last
+    row_total = {q: size[cells[(c[0], TOTAL), i, f]] for (c, i, f), q in cells.items() if ((c[0], TOTAL), i, f) in cells}
+    # the case count of all LEs only where the LE columns need it
+    protected = {cells[(tag, TOTAL), 0, "value"] for tag in files if ((tag, TOTAL), 0, "value") in cells}
+    subsets = [(cells[a], cells[b]) for a, b in subset_cells(files, cells)]
+
+    def close_again():
+        close(groups, cells, size, hidden, rank=lambda q: (q[0][1] == TOTAL, q[0][0] == total),
+              zero_rank=lambda q: row_total.get(q, 0) == 0, protected=protected,
+              zero_fallback=scope == SUPPRESS_DIAGNOSES, subsets=subsets)
+        return hidden
+
+    return cells, size, close_again(), close_again, protected
+
+
+def protect(files, min_cell, scope=SUPPRESS_ALL, total=None, extend=True):
+    """
+    The suppression of one or several files together (see above): the closure, then with extend further cells until
+    no suppressed count of 1 to min_cell - 1 follows from the shown numbers of all files. Returns cells, size,
+    hidden, the cells that still follow (empty unless extend is False or no cell is left to suppress) and the
+    escalated columns
+    """
+    columns = {(tag, e): rows for tag, entities in files.items() for e, rows in entities.items()}
+    relations_ = cell_relations(files, columns, total)
+    near = {}
+    for lhs, rhs in relations_:
+        for k in lhs + rhs:
+            near.setdefault(k, set()).update(lhs + rhs)
+    for a, b in subset_cells(files, {k: None for k in cells_of(columns)}) + [((c, i, "value"), (c, i, "base")) for c, rows in columns.items() for i, r in enumerate(rows) if r.unit == COUNT and r.n is not None and r.base is not None]:
+        near.setdefault(a, set()).add(b)
+        near.setdefault(b, set()).add(a)
+    near = {k: sorted(v, key=cell_order) for k, v in near.items()}
+    escalated, restart = set(), True
+    while restart:
+        restart = False
+        cells, size, hidden, close_again, protected = closure(files, columns, min_cell, scope, total, escalated)
+        subsets = subset_cells(files, cells)
+        rules = zero_rules(relations_, cells, subsets)
+        order = sorted(cells, key=cell_order)
+        targets = lambda: [k for k in order if cells[k] in hidden and 0 < size[cells[k]] < min_cell]
+        if not hidden:
+            return cells, size, hidden, [], escalated
+        if not extend:
+            return cells, size, hidden, derivable_cells(relations_, cells, size, hidden, targets(), subsets, rules=rules)[0], escalated
+        # the counts that follow even with every cell that can be suppressed suppressed: escalate their columns
+        scope_q = {q for q in cells.values() if q[2]}
+        fixed, pinned = derivable_cells(relations_, cells, size, scope_q, targets(), subsets, rules=rules)
+        more = escalation(fixed, files, columns, escalated)
+        if more:
+            escalated |= more
+            restart = True
+            continue
+        cost = lambda k: (not cells[k][3], size[cells[k]] == 0, cells[k][0][1] == TOTAL, cells[k][0][0] == total,
+                          size[cells[k]], cell_order(k))
+        # a zero only where the scope suppresses zeros anyway (diagnoses: the closure does)
+        allowed = lambda k: (cells[k][2] and k not in pinned and cells[k] not in protected
+                             and (size[cells[k]] > 0 or (scope == SUPPRESS_DIAGNOSES and cells[k][3])))
+        tried = {}
+        while True:
+            unprotected, zero = derivable_cells(relations_, cells, size, hidden, targets(), subsets, rules=rules)
+            if not unprotected:
+                break
+            added = set()
+            for t in unprotected:
+                candidates = nearest(t, near, cells, hidden, zero, pinned, allowed)
+                if not candidates or any(cells[k] in added for k in candidates):
+                    continue
+                n = tried[t] = tried.get(t, 0) + 1
+                if n > STUCK_ROUNDS:
+                    more = escalation([t], files, columns, escalated, every_file=True)
+                    if more:
+                        escalated |= more
+                        restart = True
+                        break
+                candidates.sort(key=cost)
+                added.update(cells[k] for k in candidates[:1 if n <= 3 else 4 if n <= 6 else 16 if n <= STUCK_ROUNDS else None])
+            if not added and not restart:
+                more = escalation(unprotected, files, columns, escalated)
+                if more:
+                    escalated |= more
+                    restart = True
+            if restart or not added:
+                break
+            hidden |= added
+            close_again()
+    return cells, size, hidden, unprotected, escalated
+
+
+def escalation(cells_, files, columns, escalated, every_file=False):
+    """The columns to suppress as with SUPPRESS_ALL for counts that follow: the cell's column and Gesamt of its file,
+    where these are escalated already (or every_file) the LE and Gesamt in every file, then all columns"""
+    more = set()
+    if not every_file:
+        for (c, _, _) in cells_:
+            more.update([c, (c[0], TOTAL)])
+        more -= escalated
+    if not more:
+        for (c, _, _) in cells_:
+            more.update((tag, c[1]) for tag in files if (tag, c[1]) in columns)
+            more.update((tag, TOTAL) for tag in files)
+        more -= escalated
+    if not more and cells_ and not every_file:
+        more = set(columns) - escalated
+    return more
+
+
+def nearest(t, near, cells, hidden, zero, pinned, allowed):
+    """The allowed cells nearest to t through the suppressed cells (and their relations)"""
+    found, seen, frontier = [], {t}, [t]
+    while frontier and not found:
+        following = []
+        for c in frontier:
+            for k in near.get(c, ()):
+                if k in seen:
+                    continue
+                seen.add(k)
+                if cells[k] in hidden:
+                    if k not in zero or k not in pinned:
+                        following.append(k)
+                elif allowed(k):
+                    found.append(k)
+        frontier = following
+    return found
 
 
 def subset_relations(rows):
@@ -1477,6 +1774,17 @@ def sum_relations(rows):
                 rel(True, [first[r.section, r.base_label]], [cell])
             else:
                 first[r.section, r.base_label] = cell
+    # the cases: the unsequenced ones and the sequenced ones (the base of Diagnosestatus)
+    rel(True, [("Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "value")],
+        [("Fälle", "davon nicht sequenziert (keine Indikation oder libraryType none, nicht im Diagnosestatus)", "value"), sequenced])
+    # the cases without a transmitted Broad Consent over the months of their initial submission
+    reasons = "Broad Consent nicht übermittelt: Grund laut DIP"
+    by_month = {}
+    for r in rows:
+        if r.section == f"{reasons}, nach Monat der Erstmeldung":
+            by_month.setdefault(r.item.split(": ", 1)[0], (r.section, r.item, "base"))
+    if by_month:
+        rel(False, [(reasons, REASON_LABELS[0], "base")], list(by_month.values()))
     # Diagnosestatus and Diagnoserate
     rel(True, [sequenced], [(status, status_item[s], "value") for s in CASE_STATUSES])
     rel(True, [closed], [(rate, s, "value") for s in STATUSES])
@@ -1487,6 +1795,8 @@ def sum_relations(rows):
     for g in AGE_GROUPS:
         rel(True, [(by_age, f"{g}: {DIAGNOSED}", "base")], [(by_age, f"{g}: {s}", "value") for s in STATUSES])
         rel(True, [(by_age, f"{g}: {OPEN}", "base")], [(by_age, f"{g}: {DIAGNOSED}", "base"), (by_age, f"{g}: {OPEN}", "value")])
+        # the sequenced cases of an age group are its cases where none is left unsequenced
+        rel(False, [(by_age, f"{g}: {OPEN}", "base")], [("Alter bei Einschluss (GFK1)", g, "value")])
     for s in STATUSES:
         rel(True, [(rate, s, "value")], [(by_age, f"{g}: {s}", "value") for g in AGE_GROUPS])
     rel(True, [(status, status_item[OPEN], "value")], [(by_age, f"{g}: {OPEN}", "value") for g in AGE_GROUPS])
@@ -1531,58 +1841,26 @@ def sum_relations(rows):
     return out
 
 
-def suppressed_files(files, min_cell, scope=SUPPRESS_ALL, total=None, audit=True):
+def suppressed_files(files, min_cell, scope=SUPPRESS_ALL, total=None, extend=True):
     """
-    The complementary suppression of one or several matrices together (close): files {tag: entities}
-    ({entity: [Row]} each, Gesamt the sum of the LEs). total: the tag of the file whose every column is the sum of
-    the same column of the other files, row by row (the total matrix and the matrices per quarter or month of its
-    period), else None. Returns {tag: (cells, size, hidden)}, cells keyed by (entity, row index, field) of that file.
+    The suppression of one or several matrices together (protect): files {tag: entities} ({entity: [Row]} each,
+    Gesamt the sum of the LEs). total: the tag of the file whose every column is the sum of the same column of the
+    other files, row by row (the total matrix and the matrices per quarter of its period), else None. Returns
+    {tag: (cells, size, hidden, unprotected, escalated)}, cells keyed by (entity, row index, field) of that file,
+    unprotected the cells that still follow (see protect), escalated the entities suppressed as with SUPPRESS_ALL.
     """
-    columns = {(tag, e): rows for tag, entities in files.items() for e, rows in entities.items()}
-    cells, size = quantities(columns, COUNT, None if scope == SUPPRESS_ALL else is_diagnosis_cell)
-    hidden = {q for q in cells.values() if q[2] and q[0][1] != TOTAL and 0 < size[q] < min_cell}
-    unprotected = set()
-    if hidden:
-        groups = Groups()
-        sums = [((tag, TOTAL), [(tag, e) for e in entities if e != TOTAL]) for tag, entities in files.items()]
-        column_sums(columns, cells, sums, groups)
-        if total is not None:
-            across = [((total, e), [(tag, e) for tag in files if tag != total and e in files[tag]]) for e in files[total]]
-            column_sums(columns, cells, across, groups, same=NOT_ADDITIVE)
-        partitions(columns, cells, groups)
-        for tag, entities in files.items():
-            relations(cells, size, [(tag, e) for e in entities], sum_relations(entities[TOTAL]), groups)
-        # Gesamt of a row: a zero hidden in a row whose Gesamt is 0 tells nothing, such zeros come last
-        row_total = {q: size[cells[(c[0], TOTAL), i, f]] for (c, i, f), q in cells.items() if ((c[0], TOTAL), i, f) in cells}
-        # the case count of all LEs only where the LE columns need it
-        protected = {cells[(tag, TOTAL), 0, "value"] for tag in files if ((tag, TOTAL), 0, "value") in cells}
-        subsets = [(cells[c, i, f], cells[c, j, g]) for tag, entities in files.items()
-                   for (i, f), (j, g) in subset_relations(entities[TOTAL])
-                   for c in [(tag, e) for e in entities] if (c, i, f) in cells and (c, j, g) in cells]
-        rank = lambda q: (q[0][1] == TOTAL, q[0][0] == total)
-        # the order of the quantities by their first cell (deterministic, whatever the hash of the sets)
-        first = {}
-        for key in sorted(cells, key=lambda k: (str(k[0][0]), str(k[0][1]), k[1], k[2])):
-            first.setdefault(cells[key], (str(key[0][0]), str(key[0][1]), key[1], key[2]))
-        order = first.__getitem__
-
-        def close_again():
-            close(groups, cells, size, hidden, rank=rank, zero_rank=lambda q: row_total.get(q, 0) == 0,
-                  protected=protected, zero_fallback=scope == SUPPRESS_DIAGNOSES)
-
-        close_again()
-        if audit:
-            small_ = {q for q in hidden if 0 < size[q] < min_cell}     # also Gesamt where it is a single LE's count
-            unprotected = derivable(list(groups), cells, size, hidden, small_, order, subsets)
+    cells, size, hidden, unprotected, escalated = protect(files, min_cell, scope, total, extend)
+    unprotected = set(unprotected)
     return {tag: ({(c[1], i, f): q for (c, i, f), q in cells.items() if c[0] == tag}, size, hidden,
-                  {(c[1], i, f) for (c, i, f), q in cells.items() if c[0] == tag and q in unprotected})
+                  {(c[1], i, f) for (c, i, f) in unprotected if c[0] == tag},
+                  {c[1] for c in escalated if c[0] == tag and c[1] != TOTAL})
             for tag in files}
 
 
-def suppressed_quantities(entities, min_cell, scope=SUPPRESS_ALL, audit=True):
-    """The quantity of each count cell, the sizes, the quantities to suppress (primary and complementary), and the
-    cells of suppressed counts that still follow (audit)"""
-    return suppressed_files({None: entities}, min_cell, scope, audit=audit)[None]
+def suppressed_quantities(entities, min_cell, scope=SUPPRESS_ALL, extend=True):
+    """The quantity of each count cell, the sizes, the quantities to suppress, the cells of suppressed counts that
+    still follow and the escalated entities (suppressed_files)"""
+    return suppressed_files({None: entities}, min_cell, scope, extend=extend)[None]
 
 
 def suppressed(row, min_cell, hide_value=None, hide_base=None):
@@ -1655,6 +1933,21 @@ def suppression_note(min_cell, scope, primary, complementary):
             f"Anteile und Bearbeitungsdauern sind exakt angegeben, auch Fallzahlen unter {min_cell}.")
 
 
+def protection_note(min_cell, scope, escalated, beyond):
+    """The note on the check of the whole system (protect), for the sheet Hinweise"""
+    if min_cell <= 1:
+        return ""
+    note = (" Geprüft am ganzen linearen Gleichungssystem aller gezeigten Summenbeziehungen (auch mehrere zusammen, "
+            "mit den Nullen, die sich daraus ergeben) und, wo nötig, weitere Zellen unterdrückt: keine unterdrückte "
+            f"Zahl von 1 bis {min_cell - 1} ist aus den gezeigten Zahlen exakt berechenbar (Schranken sind möglich, "
+            "da alle Zahlen ≥ 0 sind).")
+    if scope == SUPPRESS_DIAGNOSES and escalated:
+        note += (f" In {escalated} LE-Spalten bestimmten die exakt gezeigten Zahlen außerhalb der Diagnosezeilen eine "
+                 "unterdrückte Diagnosezelle; dort ist wie mit --suppress-scope all in allen Zeilen unterdrückt "
+                 f"({beyond} Zellen außerhalb der Diagnosezeilen).")
+    return note
+
+
 def small(n, min_cell):
     """A count for the notes, suppressed as in the matrix"""
     return f"<{min_cell}" if 0 < n < min_cell else n
@@ -1665,14 +1958,15 @@ def small(n, min_cell):
 # ---------------------------------------------------------------------------------------------
 
 def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medical_days=14,
-        suppress_scope=SUPPRESS_DIAGNOSES, follow_up_months=FU_MONTHS, audit=True):
-    """The matrix of the cases with initial submission in [start, end) (None: open); audit: see derivable"""
+        suppress_scope=SUPPRESS_DIAGNOSES, follow_up_months=FU_MONTHS):
+    """The matrix of the cases with initial submission in [start, end) (None: open), suppressed (protect);
+    result["derivable"]: the suppressed counts that still follow (then nothing may be written, see main)"""
     ev = evaluate(rows, failures, heads, start, end, reference_date, min_medical_days, suppress_scope, follow_up_months)
-    return render(ev, *suppressed_quantities(ev.entities, min_cell, suppress_scope, audit), min_cell)
+    return render(ev, *suppressed_files({None: ev.entities}, min_cell, suppress_scope)[None], min_cell)
 
 
 def run_joint(rows, failures, heads, periods, reference_date, min_cell=5, min_medical_days=14,
-              suppress_scope=SUPPRESS_DIAGNOSES, follow_up_months=FU_MONTHS, start=None, end=None, audit=True):
+              suppress_scope=SUPPRESS_DIAGNOSES, follow_up_months=FU_MONTHS, start=None, end=None):
     """
     The total matrix over [start, end) and one matrix per period (start, end) of periods, suppressed together:
     besides the relations within each matrix, every cell of the total matrix is the sum of the same cell of the
@@ -1689,10 +1983,10 @@ def run_joint(rows, failures, heads, periods, reference_date, min_cell=5, min_me
     parts = [evaluate(rows, failures, heads, s, e, reference_date, min_medical_days, suppress_scope, follow_up_months)
              for s, e in periods]
     files = {"total": total.entities, **{i: p.entities for i, p in enumerate(parts)}}
-    out = suppressed_files(files, min_cell, suppress_scope, total="total", audit=audit)
+    out = suppressed_files(files, min_cell, suppress_scope, total="total")
     note = (f"Gemeinsam unterdrückt mit den {len(parts)} Matrizen je Zeitraum (Gesamtmatrix = Summe der Zeiträume, "
-            "je Zeile, LE und Gesamt): keine unterdrückte Zelle ergibt sich aus einer einzelnen Summenbeziehung der Gesamtmatrix "
-            "und der übrigen Zeiträume (Systeme mehrerer Beziehungen prüft der KDK getrennt, siehe README).")
+            "je Zeile, LE und Gesamt): keine unterdrückte Zelle ergibt sich aus der Gesamtmatrix und den Zeiträumen, "
+            "auch nicht aus mehreren Summenbeziehungen zusammen (geprüft am ganzen Gleichungssystem aller Dateien).")
     return (render(total, *out["total"], min_cell, note),
             [render(p, *out[i], min_cell, note.replace(f"mit den {len(parts)} Matrizen je Zeitraum", "mit der Gesamtmatrix "
                                                        f"und den {len(parts)} Matrizen je Zeitraum"))
@@ -1779,23 +2073,26 @@ def evaluate(rows, failures, heads, start, end, reference_date, min_medical_days
     return SimpleNamespace(**{k: v for k, v in locals().items() if not callable(v) or k in ("losses", "counts")})
 
 
-def render(ev, cells, size, hidden, unprotected, min_cell, joint_note=None):
+def render(ev, cells, size, hidden, unprotected, escalated, min_cell, joint_note=None):
     """The result (JSON) of an evaluation with the suppressed quantities; unprotected: the cells (entity, row index,
-    field) of suppressed counts of 1 to min_cell - 1 that follow from the shown numbers (derivable), as
-    result["derivable"] (entity, section, item, field), which write_json and write_csv leave out"""
+    field) of suppressed counts of 1 to min_cell - 1 that still follow from the shown numbers (protect), as
+    result["derivable"] (entity, section, item, field), which write_json and write_csv leave out (with any of them
+    nothing may be written, see main); escalated: the LEs whose column is suppressed as with SUPPRESS_ALL"""
     entities, suppress_scope, reference_date = ev.entities, ev.suppress_scope, ev.reference_date
     les, submitters, tests, period, start, end, heads = ev.les, ev.submitters, ev.tests, ev.period, ev.start, ev.end, ev.heads
     min_medical_days, follow_up_months, problems = ev.min_medical_days, ev.follow_up_months, ev.problems
     reasons_exported, unmapped_heads = ev.reasons_exported, ev.unmapped_heads
     primary = sum(1 for q in cells.values() if q in hidden and 0 < size[q] < min_cell)
     complementary = sum(1 for q in cells.values() if q in hidden) - primary
+    beyond = sum(1 for q in cells.values() if q in hidden and not q[3])     # outside the scope (escalated columns)
     template_rows = entities[TOTAL]
     result_rows = []
     for i, r in enumerate(template_rows):
         values = {}
         for name, entity_rows in entities.items():
             if r.unit == VALUE:     # the durations aren't diagnosis rows
-                hide_value = suppress_scope == SUPPRESS_ALL and hidden_statistic(entities, name, i, min_cell)
+                hide_value = (suppress_scope == SUPPRESS_ALL or name in escalated or (escalated and name == TOTAL)) \
+                    and hidden_statistic(entities, name, i, min_cell)
             else:
                 hide_value = cells.get((name, i, "value")) in hidden
             n, base, pct = suppressed(entity_rows[i], min_cell, hide_value, cells.get((name, i, "base")) in hidden)
@@ -1809,7 +2106,8 @@ def render(ev, cells, size, hidden, unprotected, min_cell, joint_note=None):
         f"{result_rows[0]['values'][TOTAL]['value']} Fälle (Episoden mit Erstmeldung) ausgewertet, Stand je Fall aus der "
         "letzten Nicht-Test-Einreichung; Spezifikation: docs/rd-evaluation-matrix.txt.",
         f"{tests} Testeinreichungen verworfen.",
-        suppression_note(min_cell, suppress_scope, primary, complementary) + (f" {joint_note}" if joint_note else ""),
+        suppression_note(min_cell, suppress_scope, primary, complementary) + (f" {joint_note}" if joint_note else "")
+        + protection_note(min_cell, suppress_scope, len(escalated), beyond),
         "Diagnosestatus 'offen': Undiagnostiziert und noch keine Fallkonferenz nach dem Indikationsboard (GFK2); "
         "die Diagnoserate bezieht sich auf die abgeschlossenen Fälle. 'Undiagnostiziert' zählt daher nur Fälle mit GFK2: "
         "alle Fälle mit noGeneticDiagnosis sind Undiagnostiziert + offen; LEs mit unterschiedlichem Anteil offener Fälle "
@@ -1848,7 +2146,7 @@ def render(ev, cells, size, hidden, unprotected, min_cell, joint_note=None):
         "period": period,
         "min_cell": min_cell,
         "suppress_scope": suppress_scope,
-        "suppressed": {"primary": primary, "complementary": complementary},
+        "suppressed": {"primary": primary, "complementary": complementary, "beyond_scope": beyond},
         "derivable": sorted((e, template_rows[i].section, template_rows[i].item, f) for e, i, f in unprotected),
         "entities": [TOTAL] + les,
         "labels": {TOTAL: TOTAL, **labels},
@@ -1908,30 +2206,46 @@ def per_le_paths(output, les):
 
 def write_json(path, result, per_le=False):
     """The result JSON; with per_le without the Rückfragen (case keys of all LEs), so the xlsx has none either; never
-    with the audit (derivable: which suppressed cells follow, for the KDK only, see write_audit)"""
+    with "derivable" (which suppressed cells follow: then nothing is written, see blocked_message)"""
     with open(path, "w", encoding="utf-8") as f:
         json.dump({k: v for k, v in result.items() if not (per_le and k == "problems") and k != "derivable"}, f,
                   ensure_ascii=False, indent=2)
 
 
-def write_audit(path, result, delimiter=";"):
-    """The suppressed counts that follow from the shown numbers (derivable), for the KDK only, not to hand out: they
-    point at the cells. Written only if there are any; returns the path or None"""
-    if not result.get("derivable"):
+def blocked_message(results):
+    """The error where suppressed counts still follow from the shown numbers ({name: result}), or None. Names the
+    cells (LE, section, item, field), not their counts: for the KDK only"""
+    found = [(name, c) for name, result in results.items() for c in result.get("derivable") or ()]
+    if not found:
         return None
-    with open(path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f, delimiter=delimiter)
-        writer.writerow(["LE", "Abschnitt", "Kategorie", "Feld"])
-        writer.writerows(result["derivable"])
-    return path
+    lines = [f"  {name}: {' | '.join(map(str, c))}" for name, c in found[:20]]
+    return ("FEHLER: Ausgabe gesperrt, nichts geschrieben: {} unterdrückte Zellen (1 bis {}) folgen aus den gezeigten "
+            "Zahlen (lineares Gleichungssystem aller Beziehungen, auch über die Dateien des Laufs):\n".format(
+                len(found), next(iter(results.values()))["min_cell"] - 1)
+            + "\n".join(lines) + ("\n  …" if len(found) > 20 else ""))
 
 
-def audit_message(name, result):
-    """The warning on stderr where suppressed counts follow from the shown numbers"""
-    n = len(result.get("derivable") or ())
-    return (f"WARNUNG {name}: {n} unterdrückte Zellen (1 bis {result['min_cell'] - 1}) folgen aus den gezeigten Zahlen "
-            "(lineares Gleichungssystem aller Beziehungen, auch über Dateien); nicht weitergeben, siehe *_audit.csv"
-            if n else None)
+def write_outputs(output, result, delimiter=";", per_le=False):
+    """The JSON, the CSV and the Rückfragen of a result, as main writes them; a file of them written before an error
+    is removed again. Returns the paths"""
+    paths = [f"{output}.json", f"{output}.csv"] + (list(per_le_paths(output, result["entities"][1:]).values())
+                                                   if per_le else [f"{output}_rueckfragen.csv"])
+    try:
+        write_json(paths[0], result, per_le)
+        write_csv(paths[1], result, delimiter)
+        write_rueckfragen(output, result, delimiter, per_le)
+    except BaseException:
+        remove_files(paths)
+        raise
+    return paths
+
+
+def remove_files(paths):
+    for path in paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
 
 def main(argv=None):
@@ -1964,19 +2278,16 @@ def main(argv=None):
     result = run(rows, failures, heads, args.start, args.end, args.reference_date, args.min_cell, args.min_medical_days,
                  args.suppress_scope, args.follow_up_months)
 
-    write_json(f"{args.output}.json", result, args.rueckfragen_per_le)
-    write_csv(f"{args.output}.csv", result, args.delimiter)
-    written = write_rueckfragen(args.output, result, args.delimiter, args.rueckfragen_per_le)
-    audit = write_audit(f"{args.output}_audit.csv", result, args.delimiter)
-    if audit:
-        written.append(audit)
-        print(audit_message(args.output, result), file=sys.stderr)
+    blocked = blocked_message({args.output: result})
+    if blocked:
+        raise SystemExit(blocked)
+    written = write_outputs(args.output, result, args.delimiter, args.rueckfragen_per_le)
 
     for note in result["notes"]:
         print(note, file=sys.stderr)
     n_problems = len(result["problems"])
     print(f"{small(n_problems, result['min_cell']) if args.suppress_scope == SUPPRESS_ALL else n_problems} Rückfragen an LEs, siehe {args.output}_rueckfragen*.csv", file=sys.stderr)
-    print(f"Written: {args.output}.json, {args.output}.csv, " + ", ".join(written), file=sys.stderr)
+    print("Written: " + ", ".join(written), file=sys.stderr)
 
 
 if __name__ == "__main__":

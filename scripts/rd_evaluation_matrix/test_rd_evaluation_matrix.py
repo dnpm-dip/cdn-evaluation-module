@@ -477,8 +477,8 @@ class FollowUpTests(unittest.TestCase):
         self.assertEqual(get(result, s, "diagnosisEstablished angegeben (true/false)"), 2)
         self.assertEqual(get(result, s, "deathDate, von Einträgen mit vitalStatus deceased"), 0)
         self.assertEqual(get(result, s, "deathDate, von Einträgen mit vitalStatus deceased", field="base"), 1)
-        # with an interval of 24 months no case is due yet; the rows are exact in the diagnosis scope
-        longer = rdm.run(rows, [], HEADS, None, None, REFERENCE, min_cell=5, follow_up_months=24)
+        # with an interval of 24 months no case is due yet
+        longer = rdm.run(rows, [], HEADS, None, None, REFERENCE, min_cell=1, follow_up_months=24)
         self.assertEqual(get(longer, rdm.FU_SECTION, f"Stand am Stichtag (Intervall 24 Monate): {rdm.FU_NOT_DUE}"), 3)
         self.assertTrue(any(n.startswith(rdm.FU_NOTE) for n in longer["notes"]))
 
@@ -757,9 +757,12 @@ def sum_relations(result):
 
 def recoverable(full, result):
     """
-    The suppressed cells that follow from shown ones by a single sum relation: a row (Gesamt = sum of the LEs) or a
-    relation of a column (sum_relations) with exactly one suppressed cell, or a suppressed cell on one side of a
-    relation whose other side is shown and 0 (all counts are >= 0). Each finding as text.
+    The suppressed counts of 1 to min_cell - 1 that follow from shown ones by a single sum relation: a row (Gesamt =
+    sum of the LEs) or a relation of a column (sum_relations) with exactly one suppressed cell, or a suppressed cell
+    on one side of a relation whose other side is shown and 0 (all counts are >= 0). Each finding as text. (A
+    complementary cell of min_cell or more, or 0, that follows protects nothing but gives nothing away either: where
+    the closure has no cell left to suppress beside it, e.g. the closed cases beside the exact sequenced cases and an
+    open count known to be 0.)
     """
     hidden = f"<{result['min_cell']}"
     rows = {(r["section"], r["item"]): r for r in result["rows"]}
@@ -788,13 +791,16 @@ def recoverable(full, result):
     def shown(c):
         return rows[c[1], c[2]]["values"][c[0]][c[3]]
 
+    def small(c):
+        return shown(c) == hidden and 0 < true[c[1], c[2]]["values"][c[0]][c[3]] < result["min_cell"]
+
     for where, sides in relations:
         cells = sides[0] + sides[1]
         n = sum(shown(c) == hidden for c in cells)
-        if n == 1:
+        if n == 1 and any(small(c) for c in cells):
             found.append(f"one suppressed cell in {where}: {cells}")
         for side, other in ((sides[0], sides[1]), (sides[1], sides[0])):
-            if all(shown(c) != hidden for c in side) and sum(shown(c) for c in side) == 0 and any(shown(c) == hidden for c in other):
+            if all(shown(c) != hidden for c in side) and sum(shown(c) for c in side) == 0 and any(small(c) for c in other):
                 found.append(f"suppressed beside a shown 0 in {where}: {cells}")
     return found
 
@@ -979,13 +985,13 @@ class ComplementarySuppressionTests(unittest.TestCase):
                     else:
                         self.assertEqual(shown, true, (r["key"], entity, field))
         self.assertGreater(complementary, 0)
-        self.assertEqual(self.result["suppressed"], {"primary": primary, "complementary": complementary})
+        self.assertEqual(self.result["suppressed"], {"primary": primary, "complementary": complementary, "beyond_scope": 0})
         # the case count of all LEs stays
         self.assertEqual(self.cell(self.result, rdm.TOTAL, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "value"), 60)
         self.assertTrue(any(f"{complementary} Zellen zusätzlich zu {primary}" in n for n in self.result["notes"]))
 
     def test_without_suppression_nothing_is_added(self):
-        self.assertEqual(self.full["suppressed"], {"primary": 0, "complementary": 0})
+        self.assertEqual(self.full["suppressed"], {"primary": 0, "complementary": 0, "beyond_scope": 0})
 
 
 class DiagnosisScopeTests(unittest.TestCase):
@@ -1012,10 +1018,15 @@ class DiagnosisScopeTests(unittest.TestCase):
         self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", rdm.UNDIAGNOSED, "LE-A"), "<5")
         self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", rdm.DIAGNOSED, "LE-A"), "<5")
         self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", rdm.DIAGNOSED, "LE-A", "base"), 8)
-        # a duration statistic from one value is shown exactly
-        few = cases(datenkranz("t1"), min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-        self.assertEqual(get(few, "Bearbeitungsdauer medizinisch", "Median (Tage)"), 31.0)
+        self.assertEqual(result["suppressed"]["beyond_scope"], 0)
         self.assertTrue(any(n.startswith("Unterdrückt werden nur die Diagnosezeilen") for n in result["notes"]))
+        # a single case: the exact rows give its diagnosis away (the sequenced, open and closed cases, the disease
+        # group block), so its column is suppressed as with --suppress-scope all, the duration of one value too
+        few = cases(datenkranz("t1"), min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
+        self.assertEqual(get(few, "Bearbeitungsdauer medizinisch", "Median (Tage)", few["entities"][1]), "<5")
+        self.assertGreater(few["suppressed"]["beyond_scope"], 0)
+        self.assertTrue(any("wie mit --suppress-scope all" in n for n in few["notes"]))
+        self.assertEqual(few["derivable"], [])
 
     def test_a_diagnosis_cell_is_not_the_exact_total_minus_shown_zeros(self):
         # LE B: 3 sequenced cases, all with a diagnosis, 1 not sequenced. "Fälle" and "davon nicht sequenziert" are
@@ -1027,15 +1038,19 @@ class DiagnosisScopeTests(unittest.TestCase):
                 + [row("b9", datenkranz("b9", library="none"), site="B")])
         result = run(rows, min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
         status = "Diagnosestatus (alle Fälle)"
-        self.assertEqual(get(result, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "B"), 4)
-        self.assertEqual(get(result, status, rdm.DIAGNOSED, "B", "base"), 3)
         items = [r["item"] for r in result["rows"] if r["section"] == status]
         shown = [get(result, status, item, "B") for item in items]
         self.assertEqual(shown[0], "<5")
-        self.assertGreaterEqual(shown.count("<5"), 2, shown)
+        # with its base (the sequenced cases, suppressed here): never a single suppressed cell
+        self.assertGreaterEqual((shown + [get(result, status, items[0], "B", "base")]).count("<5"), 2, shown)
         self.assertTrue(all(v in ("<5", 0) for v in shown), shown)
         # the closed cases (base of the rate) are a diagnosis quantity: suppressed with it
         self.assertEqual(get(result, "Diagnoserate", rdm.DIAGNOSED, "B", "base"), "<5")
+        # with the exact rows of B (4 cases, 3 sequenced, every case with GFK2) its statuses follow from the whole
+        # system: B's column is suppressed in all rows, and nothing follows any more
+        self.assertEqual(get(result, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "B"), "<5")
+        self.assertEqual(get(result, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "A"), 20)
+        self.assertEqual((result["derivable"], derivable_cells([(run(rows, min_cell=1), result)])), ([], []))
 
     def test_the_same_holds_for_gesamt(self):
         # one sequenced case of a single LE, still open: Gesamt is that LE's count, and the sequenced cases of
@@ -1045,32 +1060,40 @@ class DiagnosisScopeTests(unittest.TestCase):
         result = run(rows, min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
         status = "Diagnosestatus (alle Fälle)"
         items = [r["item"] for r in result["rows"] if r["section"] == status]
-        self.assertEqual(get(result, status, items[0], field="base"), 1)
         shown = [get(result, status, item) for item in items]
         self.assertEqual(shown[-1], "<5")      # offen
-        self.assertEqual(shown.count("<5"), 2, shown)
+        self.assertGreaterEqual((shown + [get(result, status, items[0], field="base")]).count("<5"), 2, shown)
+        # the exact rows (one case without GFK2, sequenced) would give it away: also the sequenced cases of Gesamt
+        # are suppressed, and nothing follows
+        self.assertEqual(get(result, status, items[0], field="base"), "<5")
+        self.assertEqual((result["derivable"], derivable_cells([(run(rows, min_cell=1), result)])), ([], []))
 
     def test_non_diagnosis_cells_exact_and_no_suppressed_cell_follows_from_shown_ones(self):
         # a set with larger LEs, and one with tiny LEs, where partitions of zeros next to an exact total occur
-        for rows in (synthetic(), synthetic(seed=14, sizes=(("LE-A", 2), ("LE-B", 1)))):
+        # (the larger set keeps every non-diagnosis cell exact, the tiny one needs its columns escalated)
+        for rows, exact in ((synthetic(), True), (synthetic(seed=14, sizes=(("LE-A", 2), ("LE-B", 1))), False)):
             with self.subTest(cases=len(rows)):
-                self.check_scope(rows)
+                beyond = self.check_scope(rows)
+                if exact:
+                    self.assertEqual(beyond, 0)
 
     def check_scope(self, rows):
         full = run(rows, min_cell=1)
         result = run(rows, min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-        hidden = 0
+        hidden = beyond = 0
         for r, f in zip(result["rows"], full["rows"]):
             for entity in result["entities"]:
                 for field in ("value", "base"):
                     shown, true = r["values"][entity][field], f["values"][entity][field]
-                    if shown == "<5":
+                    if shown == "<5" and r["unit"] == rdm.VALUE:
+                        self.assertGreater(result["suppressed"]["beyond_scope"], 0, r["key"])   # escalated column
+                    elif shown == "<5":
                         hidden += 1
-                        self.assertTrue(self.diag(result, r), r["key"])
-                        self.assertTrue(field == "value" or r["base_label"] not in rdm.EXACT_DIAGNOSIS_BASES, r["key"])
+                        if not (self.diag(result, r) and (field == "value" or r["base_label"] not in rdm.EXACT_DIAGNOSIS_BASES)):
+                            beyond += 1     # only in an LE column that the exact rows would give away (escalated)
                     else:
                         self.assertEqual(shown, true, (r["key"], entity, field))
-                if not self.diag(result, r):
+                if not self.diag(result, r) and r["values"][entity]["value"] != "<5" and r["values"][entity]["base"] != "<5":
                     self.assertEqual(r["values"][entity]["percent"], f["values"][entity]["percent"], r["key"])
             for field in ("value", "base"):
                 cells = [v[field] for v in r["values"].values()]
@@ -1080,7 +1103,10 @@ class DiagnosisScopeTests(unittest.TestCase):
             for total, parts in partitions(result):
                 shown = [ComplementarySuppressionTests.cell(self, result, entity, *c) for c in [total] + parts]
                 self.assertNotEqual(shown.count("<5"), 1, (entity, total, parts, shown))
-        self.assertEqual(sum(result["suppressed"].values()), hidden)
+        self.assertEqual(result["suppressed"]["primary"] + result["suppressed"]["complementary"], hidden)
+        self.assertEqual(result["suppressed"]["beyond_scope"], beyond)
+        self.assertEqual((result["derivable"], derivable_cells([(full, result)])), ([], []))
+        return beyond
 
     def test_the_scopes_differ_and_an_unknown_one_is_refused(self):
         rows = synthetic()
@@ -1130,7 +1156,7 @@ class SumRelationTests(unittest.TestCase):
         result = run(rows, min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
         block = "Erkrankungsgruppen Adult (ab 18)"
         heads = [g for g in rdm.DISEASE_GROUPS if get(result, block, g, "B") == "<5"]
-        self.assertGreaterEqual(len(heads), 2)
+        self.assertGreaterEqual(len(heads), 1)
         for g in heads:
             statuses = [get(result, block, f"{g}: {s}", "B") for s in rdm.CASE_STATUSES]
             self.assertNotEqual(statuses.count("<5"), 0, (g, statuses))
@@ -1165,43 +1191,112 @@ class SumRelationTests(unittest.TestCase):
         self.assertIn("Diagnosestatus nach Altersgruppe je Status", note)
 
 
-class AuditTests(unittest.TestCase):
-    """The audit of the whole linear system (rdm.derivable) reports every suppressed count that the independent solver
-    derivable_cells() finds; it only reports (result["derivable"], <output>_audit.csv), the JSON and CSV don't have it"""
+def unextended(rows, scope, min_cell=5):
+    """The matrix with the closure only, without the extension against the whole system (protect, extend=False): a
+    configuration where suppressed counts still follow"""
+    ev = rdm.evaluate(rows, [], HEADS, None, None, REFERENCE, 14, scope)
+    return rdm.render(ev, *rdm.suppressed_files({None: ev.entities}, min_cell, scope, extend=False)[None], min_cell)
 
-    def test_the_audit_finds_what_the_independent_solver_finds(self):
-        import ast
+
+def follows(full, result):
+    """The cells (entity, section, item, field) the independent solver finds"""
+    import ast
+    return {ast.literal_eval(f.split(": ", 1)[1])[1:] for f in derivable_cells([(full, result)]) if f.startswith("follows")}
+
+
+class ProtectionTests(unittest.TestCase):
+    """
+    The suppression is extended against the whole linear system (rdm.protect) until no suppressed count of 1 to
+    min_cell - 1 follows; checked with the independent exact solver derivable_cells() on random sets, also with tiny
+    LEs. Without the extension (the closure alone) such cells remain, and the audit finds at least what the
+    independent solver finds; the command line then writes nothing.
+    """
+
+    def test_no_suppressed_count_follows_on_random_sets(self):
+        sets = [(f"varied {seed}", varied(seed)) for seed in range(10)]
+        sets += [(f"tiny {seed}", synthetic(seed=seed, sizes=(("LE-A", 3), ("LE-B", 1), ("LE-C", 2)))) for seed in range(40, 46)]
+        for name, rows in sets:
+            full = run(rows, min_cell=1)
+            for scope in rdm.SUPPRESS_SCOPES:
+                for min_cell in (5, 3):
+                    with self.subTest(set=name, scope=scope, min_cell=min_cell):
+                        result = run(rows, min_cell=min_cell, scope=scope)
+                        self.assertEqual(result["derivable"], [])
+                        self.assertEqual(follows(full, result), set())
+                        self.assertEqual(recoverable(full, result), [])
+
+    def test_without_the_extension_cells_follow_and_the_audit_finds_them(self):
         found_any = False
         for seed in range(6):
             for scope in rdm.SUPPRESS_SCOPES:
                 with self.subTest(seed=seed, scope=scope):
                     rows = varied(seed)
-                    result, full = run(rows, min_cell=5, scope=scope), run(rows, min_cell=1, scope=scope)
-                    independent = {ast.literal_eval(f.split(": ", 1)[1])[1:] for f in derivable_cells([(full, result)])
-                                   if f.startswith("follows")}
-                    reported = {tuple(c) for c in result["derivable"]}
-                    self.assertLessEqual(independent, reported)
-                    found_any = found_any or bool(reported)
-        self.assertTrue(found_any)      # the single-relation closure leaves such cells on these sets
+                    result, full = unextended(rows, scope), run(rows, min_cell=1, scope=scope)
+                    independent = follows(full, result)
+                    self.assertLessEqual(independent, {tuple(c) for c in result["derivable"]})
+                    found_any = found_any or bool(independent)
+        self.assertTrue(found_any)      # the single-relation closure alone leaves such cells on these sets
 
-    def test_the_command_line_writes_the_audit_apart(self):
-        rows = varied(0)
+    def main(self, rows, tmp, *args):
         data = [{"case": r.case, "submittedAt": r.submitted_at, "content": r.content, "site": r.site} for r in rows]
+        src, out = os.path.join(tmp, "in.json"), os.path.join(tmp, "out", "m")
+        os.makedirs(os.path.dirname(out))
+        with open(src, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        from contextlib import redirect_stderr
+        from io import StringIO
+        err = StringIO()
+        with redirect_stderr(err):
+            rdm.main([src, "--output", out, "--reference-date", "2026-10-30", *args])
+        return out, err.getvalue()
+
+    def test_the_command_line_writes_nothing_where_a_count_follows(self):
+        from unittest import mock
+        rows = varied(0)
+        original = rdm.suppressed_files
         with tempfile.TemporaryDirectory() as tmp:
-            src, out = os.path.join(tmp, "in.json"), os.path.join(tmp, "m")
-            with open(src, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-            from contextlib import redirect_stderr
-            from io import StringIO
-            err = StringIO()
-            with redirect_stderr(err):
-                rdm.main([src, "--output", out, "--reference-date", "2026-10-30"])
-            result = run(rows, min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-            if result["derivable"]:
-                self.assertTrue(os.path.exists(f"{out}_audit.csv"))
-                self.assertIn("WARNUNG", err.getvalue())
+            with mock.patch.object(rdm, "suppressed_files", lambda *a, **k: original(*a, **{**k, "extend": False})):
+                with self.assertRaises(SystemExit) as raised:
+                    self.main(rows, tmp, "--rueckfragen-per-le")
+            self.assertIn("Ausgabe gesperrt", str(raised.exception.code))
+            self.assertEqual(os.listdir(os.path.join(tmp, "out")), [])
+        # protected, the same run writes its files, and no audit
+        with tempfile.TemporaryDirectory() as tmp:
+            out, err = self.main(rows, tmp)
+            files = sorted(os.listdir(os.path.join(tmp, "out")))
+            self.assertEqual(files, ["m.csv", "m.json", "m_rueckfragen.csv"])
             with open(f"{out}.json", encoding="utf-8") as f:
                 self.assertNotIn("derivable", json.load(f))
+            self.assertIn("ganzen linearen Gleichungssystem", err)
+
+    def test_a_failed_write_leaves_no_file(self):
+        from unittest import mock
+        result = run(varied(1), min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "m")
+            with mock.patch.object(rdm, "write_rueckfragen", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    rdm.write_outputs(out, result)
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_deterministic_whatever_the_hash_seed(self):
+        import subprocess
+        import sys
+        rows = varied(3)
+        data = [{"case": r.case, "submittedAt": r.submitted_at, "content": r.content, "site": r.site} for r in rows]
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "in.json")
+            with open(src, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            outputs = []
+            for seed in ("1", "2"):
+                out = os.path.join(tmp, f"m{seed}")
+                subprocess.run([sys.executable, os.path.join(HERE, "rd_evaluation_matrix.py"), src, "--output", out,
+                                "--reference-date", "2026-10-30"], check=True, capture_output=True,
+                               env={**os.environ, "PYTHONHASHSEED": seed})
+                with open(f"{out}.json", encoding="utf-8") as f:
+                    outputs.append(json.load(f)["rows"])
+            self.assertEqual(outputs[0], outputs[1])
 
 
 if __name__ == "__main__":

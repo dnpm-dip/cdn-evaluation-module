@@ -13,9 +13,11 @@ Input, either
     one entry per submission, for KDKs with their own export.
 
 Output (<output> without extension):
-  <output>.json          every value, in total and per LE, the cases to clarify with the LEs, notes
+  <output>.json          every value, in total and per LE, the cases to clarify with the LEs (not with
+                         --rueckfragen-per-le), notes
   <output>.csv           long table LE | Abschnitt | Kategorie | Einheit | Wert | Bezug | Basis | Anteil
-  <output>_rueckfragen.csv  cases to clarify with their LE (contains case keys: only for the LEs)
+  <output>_rueckfragen.csv  cases to clarify with their LE (contains case keys of all LEs: only for the KDK);
+                         with --rueckfragen-per-le (recommended) instead one <output>_rueckfragen_<LE>.csv per LE
 Counts of an LE below --min-cell (default 5) are suppressed ("<5") in all outputs except the Rückfragen (Gesamt is
 shown unless it is the count of a single LE), and complementary
 cells with the same marker so that no suppressed count is the difference of shown ones (see suppressed_quantities).
@@ -43,6 +45,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from itertools import product
+from types import SimpleNamespace
 
 
 # ---------------------------------------------------------------------------------------------
@@ -501,8 +504,8 @@ def permits_research_use(research_consents, reference_date):
         start, end = parse_date(period.get("start")), parse_date(period.get("end"))
         return (
             provision.get("type") == "permit"
-            and start is not None and start > minus_years(reference_date, 5)
-            and (end is None or end > reference_date)
+            and start is not None and minus_years(reference_date, 5) < start <= reference_date
+            and (end is None or end >= reference_date)
         )
 
     decisions = {}
@@ -623,7 +626,8 @@ def follow_up_state(gfk2, fu_dates, deceased, reference_date, months=FU_MONTHS):
         return FU_DECEASED
     if add_months(gfk2, months) > reference_date:
         return FU_NOT_DUE
-    current = any(d <= reference_date and add_months(d, months) > reference_date for d in fu_dates)
+    since = add_months(reference_date, -months)     # counted back, so that a month end doesn't shorten the window
+    current = any(since < d <= reference_date for d in fu_dates)
     return FU_CURRENT if current else FU_OVERDUE
 
 
@@ -1074,23 +1078,30 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=(), follow_up
 # >= 0), and where one side of a group is shown zeros only, a suppressed cell on the other side is known to be 0:
 # a zero of that side is suppressed as well (in a row the zero of Gesamt). Lean, not a full audit of all linear
 # relations: it closes every single relation, not systems of them.
+#
+# Joint suppression (run_joint, suppressed_files): the same closure over the columns of several matrices, the total
+# matrix and the matrices per quarter or month of its period; then (a) also has the column sums across the files:
+# each column of the total matrix is the sum of the same column of the period matrices, row by row (a missing LE of a
+# period counts 0). A count of a base known to be 0 (exact) is 0 as well and never chosen as a protecting zero.
+# The closure below is written over columns {column: [rows]}: (entity) for one matrix, (file, entity) in a joint run.
 
-def quantities(entities, in_scope=None):
+def quantities(columns, count_unit, in_scope=None):
     """
-    The quantity of each count cell {(entity, row index, "value" | "base"): (entity, set or cell id, in scope)}, and
+    The quantity of each count cell {(column, row index, "value" | "base"): (column, set or own id, in scope)} and
     their sizes; in_scope(row, field) marks the cells that can be suppressed (None: all)
     """
     cells, size = {}, {}
-    for entity, rows in entities.items():
+    for column, rows in columns.items():
         for i, r in enumerate(rows):
-            if r.unit != COUNT:
+            if r.unit != count_unit:
                 continue
-            for field_, n, members, own in (("value", r.n, r.members, ("row", i)), ("base", r.base, r.of, ("base", i))):
+            for field_, n, members, own in (("value", r.n, getattr(r, "members", None), ("row", i)),
+                                            ("base", r.base, getattr(r, "of", None), ("base", i))):
                 if n is None:
                     continue
                 scoped = in_scope is None or in_scope(r, field_)
-                q = (entity, members if members else own, scoped)
-                cells[entity, i, field_] = q
+                q = (column, members if members else own, scoped)
+                cells[column, i, field_] = q
                 size[q] = n
     return cells, size
 
@@ -1103,6 +1114,179 @@ def disjoint(sets):
             taken.append(s)
             union |= s
     return taken, union
+
+
+class Groups:
+    """The groups (rule, whole, parts) of the closure, each once"""
+
+    def __init__(self):
+        self.groups = {}
+
+    def add(self, rule, whole, parts):
+        whole, parts = tuple(whole), tuple(parts)
+        if len(whole) + len(parts) > 1:
+            self.groups.setdefault((whole, parts), (rule, whole, parts))
+
+    def each(self, rule, wholes, parts):
+        """A group for every choice of the quantities of its sets (a set can be in and out of scope)"""
+        for members in product(wholes, *parts):
+            self.add(rule, members[:1], members[1:])
+
+    def __iter__(self):
+        return iter(self.groups.values())
+
+    def __len__(self):
+        return len(self.groups)
+
+
+def column_sums(columns, cells, sums, groups):
+    """(a) for each (whole column, part columns) of sums, per row (matched by its key) and field"""
+    for whole, parts in sums:
+        index = {p: {r.key: i for i, r in enumerate(columns[p])} for p in parts}
+        for i, r in enumerate(columns[whole]):
+            for field_ in ("value", "base"):
+                if (whole, i, field_) not in cells:
+                    continue
+                members = [cells[p, index[p][r.key], field_] for p in parts
+                           if r.key in index[p] and (p, index[p][r.key], field_) in cells]
+                groups.add("a", [cells[whole, i, field_]], members)
+
+
+def partitions(columns, cells, groups):
+    """(b) per column, the partitions of the sets: within a section the parts of a base, the bases of a section that
+    make up a shown set, a set and its complement"""
+    by_column = {}
+    for q in cells.values():
+        if isinstance(q[1], frozenset):
+            by_column.setdefault(q[0], {}).setdefault(q[1], {})[q] = None     # distinct quantities, in and out of scope
+    for column, rows in columns.items():
+        known = by_column.get(column, {})
+        sections = {}   # section -> base set -> [(set, value quantity)], [base quantities]
+        labelled = {}   # (section, base label, base set) -> the same: the structural partition, which in a small
+        #                 column can share its base set with another partition of the section by chance
+        for i, r in enumerate(rows):
+            members, of = getattr(r, "members", None), getattr(r, "of", None)
+            if members is not None and of is not None and (column, i, "value") in cells and (column, i, "base") in cells:
+                for parts, bases in (sections.setdefault(r.section, {}).setdefault(of, ([], [])),
+                                     labelled.setdefault((r.section, r.base_label, of), ([], []))):
+                    parts.append((members, cells[column, i, "value"]))
+                    bases.append(cells[column, i, "base"])
+
+        def partition(base, parts, bases):
+            taken, union = disjoint(s for s, _ in parts)
+            if base and union == base:
+                chosen = [next(q for s, q in parts if s == t) for t in taken]
+                zeros = [q for s, q in parts if not s]
+                for b in dict.fromkeys(bases):
+                    groups.add("b", [b], chosen + zeros)
+
+        for (_, _, base), (parts, bases) in labelled.items():
+            partition(base, parts, bases)
+        for by_base in sections.values():
+            for base, (parts, bases) in by_base.items():
+                partition(base, parts, bases)
+            taken, union = disjoint(by_base)
+            if len(taken) > 1 and union in known:
+                groups.each("b", known[union], [known[s] for s in taken])
+        by_size = {}
+        for s in known:
+            by_size.setdefault(len(s), []).append(s)
+        for whole in known:
+            for n, parts in by_size.items():
+                if 0 < n < len(whole) and len(whole) - n in by_size and 2 * n <= len(whole):
+                    for part in parts:
+                        if part < whole:
+                            rest = whole - part
+                            if rest in known:
+                                groups.each("b", known[whole], [known[part], known[rest]])
+
+
+def relations(cells, size, columns, listed, groups):
+    """(c) the relations listed for these columns, (always, lhs, rhs) with cells (row index, field): in each column
+    where all cells exist, always or where it holds"""
+    for always, lhs, rhs in listed:
+        for column in columns:
+            sides = [[cells.get((column, i, f)) for i, f in side] for side in (lhs, rhs)]
+            if None in sides[0] + sides[1]:
+                continue
+            if always or sum(size[q] for q in sides[0]) == sum(size[q] for q in sides[1]):
+                groups.add("c", *sides)
+
+
+def close(groups, cells, size, hidden, rank, zero_rank, protected=frozenset(), zero_fallback=True):
+    """
+    The complementary suppression (see above): adds to the set hidden (the quantities suppressed so far, in scope)
+    until no group has exactly one of them. rank(q): the order in which nonzero quantities are chosen (with the size;
+    a summary column last), zero_rank(q) that of the zeros; protected: quantities chosen only in a column sum (rule
+    a); zero_fallback: choose a zero where the others are exact or zeros (the diagnosis scope, where the totals are
+    exact). Returns hidden.
+    """
+    groups = list(groups)
+    # the zeros known to be 0 whatever is suppressed: exact zeros, the count of a base known to be 0, and the cells of
+    # a side of a group whose other side are such zeros only (all counts are >= 0); never suppressed to protect
+    # another cell
+    pinned = {q for q in size if not q[2] and size[q] == 0}
+    of_base = [(q, cells[c, i, "base"]) for (c, i, f), q in cells.items() if f == "value" and (c, i, "base") in cells]
+    changed = True
+    while changed:
+        changed = False
+        for q, base in of_base:
+            if base in pinned and q not in pinned:
+                pinned.add(q)
+                changed = True
+        for _, whole, parts in groups:
+            for side, other in ((whole, parts), (parts, whole)):
+                if all(o in pinned for o in other) and not all(q in pinned for q in side):
+                    pinned.update(side)
+                    changed = True
+
+    def zero(of):
+        """The zero to suppress of the quantities 'of' (open, in scope), not pinned"""
+        of = [q for q in of if size[q] == 0 and q not in pinned]
+        return min(of, key=zero_rank) if of else None
+
+    of_quantity = {}
+    for g, (_, whole, parts) in enumerate(groups):
+        for q in whole + parts:
+            of_quantity.setdefault(q, []).append(g)
+    queue, queued = deque(range(len(groups))), set(range(len(groups)))
+    while queue:
+        g = queue.popleft()
+        queued.discard(g)
+        rule, whole, parts = groups[g]
+        members = whole + parts
+        n = sum(q in hidden for q in members)
+        if n == 0:
+            continue
+        open_ = list(dict.fromkeys(q for q in members if q[2] and q not in hidden))
+        add = None
+        # a side of shown zeros: the suppressed cells of the other side are zeros as well; a zero of that side
+        # is suppressed too (in a column sum the zero of the whole)
+        for side, other in ((whole, parts), (parts, whole)):
+            if (add is None and any(q in hidden for q in other)
+                    and all(q not in hidden and size[q] == 0 for q in side)):
+                shown = [q for q in side if q[2]]
+                add = next((q for q in shown if q in whole and q not in pinned), None) if rule == "a" else None
+                add = add or zero(shown)
+        if add is None and n == 1:
+            candidates = [q for q in open_ if size[q] > 0 and (rule == "a" or q not in protected)]
+            if candidates:
+                add = min(candidates, key=lambda q: (rank(q), size[q]))
+            elif zero_fallback and open_ and (any(not q[2] for q in members)
+                                              or any(size[q] == 0 for q in members if q in hidden)):
+                # the others are exact or zero, or the one suppressed is a zero beside zeros: a zero is suppressed
+                # as well, else the exact ones or the zeros would give the count away; in a column sum the zero of
+                # the whole, else by zero_rank
+                if rule == "a":
+                    add = next((q for q in open_ if q in whole and q not in pinned), None)
+                add = add or zero(open_)
+        if add is not None:
+            hidden.add(add)
+            for other in [g] + of_quantity.get(add, []):
+                if other not in queued:
+                    queue.append(other)
+                    queued.add(other)
+    return hidden
 
 
 def sum_relations(rows):
@@ -1186,150 +1370,39 @@ def sum_relations(rows):
     return out
 
 
-def suppression_groups(entities, cells, size):
+def suppressed_files(files, min_cell, scope=SUPPRESS_ALL, total=None):
     """
-    The groups (rule, whole, parts) of the complementary suppression, see above: sum(whole) = sum(parts), each a
-    tuple of the quantities of its cells. A quantity can be in a group twice, as two cells: a reader doesn't know
-    that they are the same number unless both are shown.
+    The complementary suppression of one or several matrices together (close): files {tag: entities}
+    ({entity: [Row]} each, Gesamt the sum of the LEs). total: the tag of the file whose every column is the sum of
+    the same column of the other files, row by row (the total matrix and the matrices per quarter or month of its
+    period), else None. Returns {tag: (cells, size, hidden)}, cells keyed by (entity, row index, field) of that file.
     """
-    groups = {}
-
-    def group(rule, whole, parts):
-        whole, parts = tuple(whole), tuple(parts)
-        if len(whole) + len(parts) > 1:
-            groups.setdefault((whole, parts), (rule, whole, parts))
-
-    def each(rule, wholes, parts):
-        """A group for every choice of the quantities of its sets (a set can be in and out of scope)"""
-        for members in product(wholes, *parts):
-            group(rule, members[:1], members[1:])
-
-    for i, r in enumerate(entities[TOTAL]):
-        for field_ in ("value", "base"):
-            if (TOTAL, i, field_) in cells:
-                group("a", [cells[TOTAL, i, field_]], [cells[e, i, field_] for e in entities if e != TOTAL])
-
-    for entity, rows in entities.items():
-        known = {}      # nonempty set -> its quantities
-        for q in cells.values():
-            if q[0] == entity and isinstance(q[1], frozenset):
-                known.setdefault(q[1], {})[q] = None     # its distinct quantities: in and out of scope
-        sections = {}   # section -> base set -> [(set, value quantity)], [base quantities]
-        labelled = {}   # (section, base label, base set) -> the same: the structural partition, which in a small
-        #                 column can share its base set with another partition of the section by chance
-        for i, r in enumerate(rows):
-            if r.members is not None and r.of is not None and (entity, i, "value") in cells:
-                for parts, bases in (sections.setdefault(r.section, {}).setdefault(r.of, ([], [])),
-                                     labelled.setdefault((r.section, r.base_label, r.of), ([], []))):
-                    parts.append((r.members, cells[entity, i, "value"]))
-                    bases.append(cells[entity, i, "base"])
-
-        def partition(base, parts, bases):
-            taken, union = disjoint(s for s, _ in parts)
-            if base and union == base:
-                chosen = [next(q for s, q in parts if s == t) for t in taken]
-                zeros = [q for s, q in parts if not s]
-                for b in dict.fromkeys(bases):
-                    group("b", [b], chosen + zeros)
-
-        for (_, _, base), (parts, bases) in labelled.items():
-            partition(base, parts, bases)
-        for by_base in sections.values():
-            for base, (parts, bases) in by_base.items():
-                partition(base, parts, bases)
-            taken, union = disjoint(by_base)
-            if len(taken) > 1 and union in known:
-                each("b", known[union], [known[s] for s in taken])
-        sizes = {len(s) for s in known}
-        for whole in known:
-            for part in known:
-                if 0 < len(part) < len(whole) and len(whole) - len(part) in sizes and part < whole:
-                    rest = whole - part
-                    if rest in known:
-                        each("b", known[whole], [known[part], known[rest]])
-    for always, lhs, rhs in sum_relations(entities[TOTAL]):
-        for entity in entities:
-            sides = [[cells.get((entity, i, f)) for i, f in side] for side in (lhs, rhs)]
-            if None in sides[0] + sides[1]:
-                continue
-            if always or sum(size[q] for q in sides[0]) == sum(size[q] for q in sides[1]):
-                group("c", *sides)
-    return list(groups.values())
+    columns = {(tag, e): rows for tag, entities in files.items() for e, rows in entities.items()}
+    cells, size = quantities(columns, COUNT, None if scope == SUPPRESS_ALL else is_diagnosis_cell)
+    hidden = {q for q in cells.values() if q[2] and q[0][1] != TOTAL and 0 < size[q] < min_cell}
+    if hidden:
+        groups = Groups()
+        sums = [((tag, TOTAL), [(tag, e) for e in entities if e != TOTAL]) for tag, entities in files.items()]
+        if total is not None:
+            sums += [((total, e), [(tag, e) for tag in files if tag != total and e in files[tag]]) for e in files[total]]
+        column_sums(columns, cells, sums, groups)
+        partitions(columns, cells, groups)
+        for tag, entities in files.items():
+            relations(cells, size, [(tag, e) for e in entities], sum_relations(entities[TOTAL]), groups)
+        # Gesamt of a row: a zero hidden in a row whose Gesamt is 0 tells nothing, such zeros come last
+        row_total = {q: size[cells[(c[0], TOTAL), i, f]] for (c, i, f), q in cells.items() if ((c[0], TOTAL), i, f) in cells}
+        # the case count of all LEs only where the LE columns need it
+        protected = {cells[(tag, TOTAL), 0, "value"] for tag in files if ((tag, TOTAL), 0, "value") in cells}
+        close(groups, cells, size, hidden,
+                          rank=lambda q: (q[0][1] == TOTAL, q[0][0] == total),
+                          zero_rank=lambda q: row_total.get(q, 0) == 0,
+                          protected=protected, zero_fallback=scope == SUPPRESS_DIAGNOSES)
+    return {tag: ({(c[1], i, f): q for (c, i, f), q in cells.items() if c[0] == tag}, size, hidden) for tag in files}
 
 
 def suppressed_quantities(entities, min_cell, scope=SUPPRESS_ALL):
     """The quantity of each count cell, the sizes, and the quantities to suppress (primary and complementary)"""
-    cells, size = quantities(entities, None if scope == SUPPRESS_ALL else is_diagnosis_cell)
-    hidden = {q for q in cells.values() if q[2] and q[0] != TOTAL and 0 < size[q] < min_cell}
-    if not hidden:
-        return cells, size, hidden
-    # the case count of all LEs only where the LE columns need it
-    protected = cells.get((TOTAL, 0, "value"))
-    groups = suppression_groups(entities, cells, size)
-    # a zero hidden in a row whose Gesamt is 0 tells nothing: such zeros come last
-    row_total = {q: size[cells[TOTAL, i, f]] for (_, i, f), q in cells.items() if (TOTAL, i, f) in cells}
-    # the zeros known to be 0 whatever is suppressed: exact zeros, and the cells of a side of a group whose other
-    # side are such zeros only (all counts are >= 0); never suppressed to protect another cell
-    pinned = {q for q in size if not q[2] and size[q] == 0}
-    changed = True
-    while changed:
-        changed = False
-        for _, whole, parts in groups:
-            for side, other in ((whole, parts), (parts, whole)):
-                if all(o in pinned for o in other) and not all(q in pinned for q in side):
-                    pinned.update(side)
-                    changed = True
-
-    def zero(of):
-        """The zero to suppress of the quantities 'of' (open, in scope): not pinned, in a row with a nonzero Gesamt
-        if any"""
-        of = [q for q in of if size[q] == 0 and q not in pinned]
-        return min(of, key=lambda q: row_total.get(q, 0) == 0) if of else None
-
-    # a worklist of the groups: a group is looked at again when one of its quantities is suppressed
-    of_quantity = {}
-    for g, (_, whole, parts) in enumerate(groups):
-        for q in whole + parts:
-            of_quantity.setdefault(q, []).append(g)
-    queue, queued = deque(range(len(groups))), set(range(len(groups)))
-    while queue:
-        g = queue.popleft()
-        queued.discard(g)
-        rule, whole, parts = groups[g]
-        members = whole + parts
-        n = sum(q in hidden for q in members)
-        if n == 0:
-            continue
-        open_ = list(dict.fromkeys(q for q in members if q[2] and q not in hidden))
-        add = None
-        # a side of shown zeros: the suppressed cells of the other side are zeros as well; a zero of that side
-        # is suppressed too (in a row the zero of Gesamt)
-        for side, other in ((whole, parts), (parts, whole)):
-            if (add is None and any(q in hidden for q in other)
-                    and all(q not in hidden and size[q] == 0 for q in side)):
-                shown = [q for q in side if q[2]]
-                add = next((q for q in shown if q[0] == TOTAL and q not in pinned), None) if rule == "a" else None
-                add = add or zero(shown)
-        if add is None and n == 1:
-            candidates = [q for q in open_ if size[q] > 0 and (rule == "a" or q != protected)]
-            if candidates:
-                of_les = [q for q in candidates if q[0] != TOTAL]
-                add = min(of_les or candidates, key=lambda q: size[q])
-            elif scope == SUPPRESS_DIAGNOSES and open_ and (any(not q[2] for q in members)
-                                                            or any(size[q] == 0 for q in members if q in hidden)):
-                # the others are exact or zero, or the one suppressed is a zero beside zeros: a zero is
-                # suppressed as well, else the exact ones or the zeros would give the count away; in a row the
-                # zero of Gesamt, in a column one in a row with a nonzero Gesamt if any
-                if rule == "a":
-                    add = next((q for q in open_ if q[0] == TOTAL and q not in pinned), None)
-                add = add or zero(open_)
-        if add is not None:
-            hidden.add(add)
-            for other in [g] + of_quantity[add]:
-                if other not in queued:
-                    queue.append(other)
-                    queued.add(other)
-    return cells, size, hidden
+    return suppressed_files({None: entities}, min_cell, scope)[None]
 
 
 def suppressed(row, min_cell, hide_value=None, hide_base=None):
@@ -1413,6 +1486,35 @@ def small(n, min_cell):
 
 def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medical_days=14,
         suppress_scope=SUPPRESS_DIAGNOSES, follow_up_months=FU_MONTHS):
+    """The matrix of the cases with initial submission in [start, end) (None: open)"""
+    ev = evaluate(rows, failures, heads, start, end, reference_date, min_medical_days, suppress_scope, follow_up_months)
+    return render(ev, *suppressed_quantities(ev.entities, min_cell, suppress_scope), min_cell)
+
+
+def run_joint(rows, failures, heads, periods, reference_date, min_cell=5, min_medical_days=14,
+              suppress_scope=SUPPRESS_DIAGNOSES, follow_up_months=FU_MONTHS, start=None, end=None):
+    """
+    The total matrix over [start, end) and one matrix per period (start, end) of periods, suppressed together:
+    besides the relations within each matrix, every cell of the total matrix is the sum of the same cell of the
+    periods (per LE and Gesamt, values and bases), so that no suppressed cell of a period follows from the total and
+    the other periods, nor one of the total from the periods. Returns (total result, [result per period]).
+    """
+    total = evaluate(rows, failures, heads, start, end, reference_date, min_medical_days, suppress_scope, follow_up_months)
+    parts = [evaluate(rows, failures, heads, s, e, reference_date, min_medical_days, suppress_scope, follow_up_months)
+             for s, e in periods]
+    files = {"total": total.entities, **{i: p.entities for i, p in enumerate(parts)}}
+    out = suppressed_files(files, min_cell, suppress_scope, total="total")
+    note = (f"Gemeinsam unterdrückt mit den {len(parts)} Matrizen je Zeitraum (Gesamtmatrix = Summe der Zeiträume, "
+            "je Zeile, LE und Gesamt): keine unterdrückte Zelle ergibt sich aus der Gesamtmatrix und den übrigen Zeiträumen.")
+    return (render(total, *out["total"], min_cell, note),
+            [render(p, *out[i], min_cell, note.replace(f"mit den {len(parts)} Matrizen je Zeitraum", "mit der Gesamtmatrix "
+                                                       f"und den {len(parts)} Matrizen je Zeitraum"))
+             for i, p in enumerate(parts)])
+
+
+def evaluate(rows, failures, heads, start, end, reference_date, min_medical_days=14, suppress_scope=SUPPRESS_DIAGNOSES,
+             follow_up_months=FU_MONTHS):
+    """The rows of every LE and Gesamt (entities) and what the notes need, before the suppression"""
     if suppress_scope not in SUPPRESS_SCOPES:
         raise ValueError(f"suppress_scope must be one of {SUPPRESS_SCOPES}: {suppress_scope}")
     cases, tests, without_initial, submitters = build_cases(rows, start, end)
@@ -1485,7 +1587,16 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         period = (f"gesamter Export (Erstmeldungen {min(dates).strftime('%d.%m.%Y')} - {max(dates).strftime('%d.%m.%Y')})"
                   if dates else "gesamter Export")
 
-    cells, size, hidden = suppressed_quantities(entities, min_cell, suppress_scope)
+    del rows, failures
+    return SimpleNamespace(**{k: v for k, v in locals().items() if not callable(v) or k in ("losses", "counts")})
+
+
+def render(ev, cells, size, hidden, min_cell, joint_note=None):
+    """The result (JSON) of an evaluation with the suppressed quantities"""
+    entities, suppress_scope, reference_date = ev.entities, ev.suppress_scope, ev.reference_date
+    les, submitters, tests, period, start, end, heads = ev.les, ev.submitters, ev.tests, ev.period, ev.start, ev.end, ev.heads
+    min_medical_days, follow_up_months, problems = ev.min_medical_days, ev.follow_up_months, ev.problems
+    reasons_exported, unmapped_heads = ev.reasons_exported, ev.unmapped_heads
     primary = sum(1 for q in cells.values() if q in hidden and 0 < size[q] < min_cell)
     complementary = sum(1 for q in cells.values() if q in hidden) - primary
     template_rows = entities[TOTAL]
@@ -1508,9 +1619,11 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         f"{result_rows[0]['values'][TOTAL]['value']} Fälle (Episoden mit Erstmeldung) ausgewertet, Stand je Fall aus der "
         "letzten Nicht-Test-Einreichung; Spezifikation: docs/rd-evaluation-matrix.txt.",
         f"{tests} Testeinreichungen verworfen.",
-        suppression_note(min_cell, suppress_scope, primary, complementary),
+        suppression_note(min_cell, suppress_scope, primary, complementary) + (f" {joint_note}" if joint_note else ""),
         "Diagnosestatus 'offen': Undiagnostiziert und noch keine Fallkonferenz nach dem Indikationsboard (GFK2); "
-        "die Diagnoserate bezieht sich auf die abgeschlossenen Fälle.",
+        "die Diagnoserate bezieht sich auf die abgeschlossenen Fälle. 'Undiagnostiziert' zählt daher nur Fälle mit GFK2: "
+        "alle Fälle mit noGeneticDiagnosis sind Undiagnostiziert + offen; LEs mit unterschiedlichem Anteil offener Fälle "
+        "nur so oder über die Diagnoserate vergleichen.",
         f"Broad Consent bewertet zum Datum der letzten Einreichung und zum Stichtag {reference_date.isoformat()}.",
         "Therapieempfehlungen: Zuordnung Strategie -> Kategorie (offen, mit den Stakeholdern abzustimmen): "
         + ", ".join(f"{k} -> {v}" for k, v in THERAPY_KIND.items()) + ". Ein Fall zählt je Zeile einmal, "
@@ -1577,6 +1690,25 @@ def write_problems_csv(path, result, delimiter=";"):
             writer.writerow([result["labels"].get(p["le"], p["le"]), p["problem"], p["case"], p["tan"] or "", p["detail"]])
 
 
+def write_rueckfragen(output, result, delimiter=";", per_le=False):
+    """The Rückfragen: <output>_rueckfragen.csv of all LEs, or per_le only <output>_rueckfragen_<LE>.csv per LE (each
+    LE gets only its own case keys). Returns the paths written"""
+    if not per_le:
+        write_problems_csv(f"{output}_rueckfragen.csv", result, delimiter)
+        return [f"{output}_rueckfragen.csv"]
+    paths = []
+    for le in result["entities"][1:]:
+        paths.append(f"{output}_rueckfragen_{re.sub(r'[^A-Za-z0-9._-]', '_', le)}.csv")
+        write_problems_csv(paths[-1], {**result, "problems": [p for p in result["problems"] if p["le"] == le]}, delimiter)
+    return paths
+
+
+def write_json(path, result, per_le=False):
+    """The result JSON; with per_le without the Rückfragen (case keys of all LEs), so the xlsx has none either"""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({k: v for k, v in result.items() if not (per_le and k == "problems")}, f, ensure_ascii=False, indent=2)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input", help="result JSON of export-datenkranz, or a JSON list of submissions")
@@ -1597,6 +1729,9 @@ def main(argv=None):
                              "before the reference date (default: %(default)s)")
     parser.add_argument("--delimiter", default=";", help="CSV delimiter (default: %(default)s, for Excel with German locale)")
     parser.add_argument("--output", default="rd-evaluation-matrix", help="output path without extension (default: %(default)s)")
+    parser.add_argument("--rueckfragen-per-le", action="store_true",
+                        help="write the Rückfragen only per LE, <output>_rueckfragen_<LE>.csv, not the file of all LEs, "
+                             "and leave them out of the JSON (and so of the xlsx); recommended")
     args = parser.parse_args(argv)
 
     rows, failures = load_submissions(args.input)
@@ -1604,16 +1739,15 @@ def main(argv=None):
     result = run(rows, failures, heads, args.start, args.end, args.reference_date, args.min_cell, args.min_medical_days,
                  args.suppress_scope, args.follow_up_months)
 
-    with open(f"{args.output}.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+    write_json(f"{args.output}.json", result, args.rueckfragen_per_le)
     write_csv(f"{args.output}.csv", result, args.delimiter)
-    write_problems_csv(f"{args.output}_rueckfragen.csv", result, args.delimiter)
+    written = write_rueckfragen(args.output, result, args.delimiter, args.rueckfragen_per_le)
 
     for note in result["notes"]:
         print(note, file=sys.stderr)
     n_problems = len(result["problems"])
-    print(f"{small(n_problems, result['min_cell']) if args.suppress_scope == SUPPRESS_ALL else n_problems} Rückfragen an LEs, siehe {args.output}_rueckfragen.csv", file=sys.stderr)
-    print(f"Written: {args.output}.json, {args.output}.csv, {args.output}_rueckfragen.csv", file=sys.stderr)
+    print(f"{small(n_problems, result['min_cell']) if args.suppress_scope == SUPPRESS_ALL else n_problems} Rückfragen an LEs, siehe {args.output}_rueckfragen*.csv", file=sys.stderr)
+    print(f"Written: {args.output}.json, {args.output}.csv, " + ", ".join(written), file=sys.stderr)
 
 
 if __name__ == "__main__":

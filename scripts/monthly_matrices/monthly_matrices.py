@@ -1,27 +1,38 @@
 #!/usr/bin/env python3
 """
 The evaluation matrices (Auswertematrix) of rare diseases (rd_evaluation_matrix.py) and oncology
-(dnpm_evaluation_matrix.py) for each quarter (--period quarter, the default) or month (--period month) of a
-period: one evaluation per period, the cases selected by the calendar quarter or month of their initial
+(dnpm_evaluation_matrix.py) for a whole period and for each quarter (--period quarter, the default) or month
+(--period month) in it, in one run: the single entry point for a total matrix together with its period
+matrices. Per period one evaluation, the cases selected by the calendar quarter or month of their initial
 submission (Erstmeldung; --from/--until of the scripts set to the period, Q4/2025 = 2025-10-01 to before
 2026-01-01). The first period is that of the earliest initial submission in the export (or --from, if later),
-the last one that of the latest initial submission (or the one before --until): no empty leading periods.
+the last one that of the latest initial submission (or the one before --until): no empty leading periods. The
+total matrix ("gesamt") covers exactly these periods, from the first day of the first one to the end of the last.
+
+RD: the total and the period matrices are suppressed together (rd_evaluation_matrix.run_joint): besides the
+relations within each matrix, each cell of the total matrix is the sum of the same cell of the period matrices
+(per LE and Gesamt), so that no suppressed cell follows from the total and the other periods. Hand out only total
+and period matrices of the same run: a total matrix from a separate run of rd_evaluation_matrix.py is suppressed
+on its own and, together with these period matrices, can make suppressed cells computable.
+Oncology: not suppressed (decision of the data holders), every value exact; the total matrix has the time
+series by the same periods.
 
 Standard library only, so it runs where the export is (PRO); the xlsx are written from the results
 by fill_monthly.py next to this script, outside of PRO (needs openpyxl).
 
-The export is read once, the periods are evaluated one after the other, each written as the
-respective script writes it (<period> = YYYY-Qn or YYYY-MM):
+The export is read once and written as the respective script writes it (<period> = YYYY-Qn or YYYY-MM, the
+total matrix as <period> = gesamt):
   <output-dir>/rd/rd_<period>.json, .csv, _rueckfragen.csv
   <output-dir>/dnpm/dnpm_<period>.json, .csv, _zeitreihe.csv, _rueckfragen.csv
-Small counts are suppressed only in the diagnosis rows (--suppress-scope diagnoses, the default of both
-scripts; their DIAGNOSIS_SECTIONS), --suppress-scope all suppresses every row.
+with --rueckfragen-per-le (recommended) instead of _rueckfragen.csv one _rueckfragen_<LE>.csv per LE, and the RD
+JSON (so the xlsx) without the Rückfragen. RD: small counts are suppressed only in the diagnosis rows
+(--suppress-scope diagnoses, the default; DIAGNOSIS_SECTIONS), --suppress-scope all suppresses every row.
 The Rückfragen contain case keys: only for the respective LEs. The RD JSON contains them as well
-(as written by rd_evaluation_matrix.py), the oncology JSON doesn't.
+(as written by rd_evaluation_matrix.py, unless --rueckfragen-per-le), the oncology JSON doesn't.
 
-Examples (all quarters of the export; months July 2025 to October 2026):
+Examples (all quarters of the export and their total; months July 2025 to October 2026 and their total):
   python3 monthly_matrices.py export-datenkranz_2026-11-01_10-00-00.json \\
-    --orphanet en_product7.xml --reference-date 2026-11-01 --output-dir quarterly
+    --orphanet en_product7.xml --reference-date 2026-11-01 --rueckfragen-per-le --output-dir quarterly
   python3 monthly_matrices.py export-datenkranz_2026-11-01_10-00-00.json --period month \\
     --from 2025-07 --until 2026-11 --orphanet en_product7.xml --reference-date 2026-11-01 --output-dir monthly
   uv run fill_monthly.py quarterly
@@ -103,7 +114,7 @@ def rd_initial_dates(rows):
 def dnpm_initial_dates(rows):
     """The dates of the initial submissions of the oncology cases (as dnpm_evaluation_matrix selects them)"""
     cases, *_ = dnpm.build_cases(rows)
-    dates = (dnpm.submission_date(next(r for r in c.rows if dnpm.submission_type(r.content) == "initial")) for c in cases)
+    dates = (dnpm.submission_date(dnpm.initial_submission(c)) for c in cases)
     return [d for d in dates if d]
 
 
@@ -111,43 +122,52 @@ def periods_of(dates, args):
     return periods(min(dates, default=None), max(dates, default=None), args.period, args.start, args.end)
 
 
+TOTAL_LABEL = "gesamt"
+
+
 def run_rd(path, args):
+    """The RD total matrix and the period matrices, suppressed together; the number of periods"""
     rows, failures = rd.load_submissions(path)
     heads = rd.load_linearisation(args.orphanet) if args.orphanet else None
     out_dir = os.path.join(args.output_dir, RD)
     os.makedirs(out_dir, exist_ok=True)
     periods_ = periods_of(rd_initial_dates(rows), args)
-    for start in periods_:
-        output = os.path.join(out_dir, f"{RD}_{label(start, args.period)}")
-        result = rd.run(rows, failures, heads, start, next_period(start, args.period), args.reference_date, args.min_cell,
-                        args.min_medical_days, args.suppress_scope, args.follow_up_months)
+    if not periods_:
+        return 0
+    ranges = [(start, next_period(start, args.period)) for start in periods_]
+    total, parts = rd.run_joint(rows, failures, heads, ranges, args.reference_date, args.min_cell, args.min_medical_days,
+                                args.suppress_scope, args.follow_up_months, start=ranges[0][0], end=ranges[-1][1])
+    for name, result in [(TOTAL_LABEL, total)] + [(label(start, args.period), r) for start, r in zip(periods_, parts)]:
+        output = os.path.join(out_dir, f"{RD}_{name}")
         # as rd_evaluation_matrix.main writes it
-        with open(f"{output}.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
+        rd.write_json(f"{output}.json", result, args.rueckfragen_per_le)
         rd.write_csv(f"{output}.csv", result, args.delimiter)
-        rd.write_problems_csv(f"{output}_rueckfragen.csv", result, args.delimiter)
-        print(f"RD   {label(start, args.period)}: {output}.json ({cases(result)} Fälle)", file=sys.stderr)
+        rd.write_rueckfragen(output, result, args.delimiter, args.rueckfragen_per_le)
+        print(f"RD   {name}: {output}.json ({cases(result)} Fälle)", file=sys.stderr)
     return len(periods_)
 
 
 def run_dnpm(path, args):
+    """The oncology total matrix (time series by the periods) and the period matrices; the number of periods"""
     rows, failures = dnpm.load_submissions(path)
     out_dir = os.path.join(args.output_dir, DNPM)
     os.makedirs(out_dir, exist_ok=True)
     reference_date = args.reference_date or args.cutoff or date.today()
     periods_ = periods_of(dnpm_initial_dates(rows), args)
+    if not periods_:
+        return 0
     resolution = dnpm.MONTH if args.period == MONTH else dnpm.QUARTER
-    for start in periods_:
-        output = os.path.join(out_dir, f"{DNPM}_{label(start, args.period)}")
-        result = dnpm.run(rows, failures, start, next_period(start, args.period), reference_date, args.min_cell,
-                          args.min_medical_days, resolution, args.cutoff, args.suppress_scope)
+    ranges = [(start, next_period(start, args.period)) for start in periods_]
+    for name, (start, end) in [(TOTAL_LABEL, (ranges[0][0], ranges[-1][1]))] + [(label(s, args.period), (s, e)) for s, e in ranges]:
+        output = os.path.join(out_dir, f"{DNPM}_{name}")
+        result = dnpm.run(rows, failures, start, end, reference_date, args.min_medical_days, resolution, args.cutoff)
         # as dnpm_evaluation_matrix.main writes it
         with open(f"{output}.json", "w", encoding="utf-8") as f:     # without the case keys of the Rückfragen
             json.dump({k: v for k, v in result.items() if k != "problems"}, f, ensure_ascii=False, indent=1)
         dnpm.write_csv(f"{output}.csv", result, args.delimiter)
         dnpm.write_series_csv(f"{output}_zeitreihe.csv", result, args.delimiter)
-        dnpm.write_problems_csv(f"{output}_rueckfragen.csv", result["problems"], result["labels"], args.delimiter)
-        print(f"DNPM {label(start, args.period)}: {output}.json ({cases(result)} Fälle)", file=sys.stderr)
+        dnpm.write_rueckfragen(output, result, args.delimiter, args.rueckfragen_per_le)
+        print(f"DNPM {name}: {output}.json ({cases(result)} Fälle)", file=sys.stderr)
     return len(periods_)
 
 
@@ -174,15 +194,19 @@ def main(argv=None):
                              "date of the export (default: RD today, oncology --cutoff, else today)")
     parser.add_argument("--cutoff", type=date.fromisoformat,
                         help="oncology: data as of this date, later submissions are ignored")
-    parser.add_argument("--min-cell", type=int, default=5, help="counts below are suppressed, 1 disables (default: %(default)s)")
+    parser.add_argument("--min-cell", type=int, default=5,
+                        help="RD: counts below are suppressed, 1 disables (default: %(default)s; oncology: not suppressed)")
     parser.add_argument("--suppress-scope", choices=rd.SUPPRESS_SCOPES, default=rd.SUPPRESS_DIAGNOSES,
-                        help="suppress small counts only in the diagnosis rows or in all rows (default: %(default)s)")
+                        help="RD: suppress small counts only in the diagnosis rows or in all rows (default: %(default)s)")
     parser.add_argument("--min-medical-days", type=int, default=14,
                         help="shorter GFK1-GFK2 durations are listed for clarification (default: %(default)s)")
     parser.add_argument("--follow-up-months", type=int, default=rd.FU_MONTHS,
                         help="RD: follow-up interval after GFK2 (oncology: the intervals of the follow-up SOP) "
                              "(default: %(default)s)")
     parser.add_argument("--delimiter", default=";", help="CSV delimiter (default: %(default)s)")
+    parser.add_argument("--rueckfragen-per-le", action="store_true",
+                        help="the Rückfragen only per LE (<period>_rueckfragen_<LE>.csv), no file of all LEs, and none in "
+                             "the RD JSON; recommended")
     parser.add_argument("--output-dir", default="monthly", help="default: %(default)s")
     args = parser.parse_args(argv)
     if args.start and args.end and args.start >= args.end:
@@ -200,7 +224,8 @@ def main(argv=None):
     if args.matrix in (DNPM, "both"):
         written.append(f"oncology {run_dnpm(args.input, args)}")
     unit = "quarters" if args.period == QUARTER else "months"
-    print(f"Written: {', '.join(written)} {unit} into {args.output_dir}; xlsx with fill_monthly.py", file=sys.stderr)
+    print(f"Written: {', '.join(written)} {unit} and their total ({TOTAL_LABEL}) into {args.output_dir}; xlsx with "
+          "fill_monthly.py", file=sys.stderr)
 
 
 if __name__ == "__main__":

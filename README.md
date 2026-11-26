@@ -106,8 +106,10 @@ uv run --with openpyxl python scripts/rd_evaluation_matrix/fill_template.py matr
   scripts/rd_evaluation_matrix/Auswertmatrix_Template.xlsx --output matrix.xlsx
 ```
 This writes `matrix.json`, `matrix.csv` (long table LE | Abschnitt | Kategorie | ... for per-LE
-analyses), `matrix_rueckfragen.csv` (case keys: only for the respective LE) and `matrix.xlsx` (one
-value column per LE). `--orphanet` is the Orphadata linearisation
+analyses), `matrix_rueckfragen.csv` (case keys of all LEs: for the KDK only) and `matrix.xlsx` (one
+value column per LE). Recommended: `--rueckfragen-per-le`, which writes only `matrix_rueckfragen_<LE>.csv` per LE
+and leaves the Rückfragen out of the JSON and so of the xlsx, so that each LE gets only its own case keys. For a
+total matrix together with matrices per quarter or month, use `monthly_matrices.py` (below), not separate runs. `--orphanet` is the Orphadata linearisation
 (https://www.orphadata.com/data/xml/en_product7.xml), needed for the disease groups.
 Tests: `python3 -m unittest discover -s scripts/rd_evaluation_matrix`.
 
@@ -140,7 +142,11 @@ suppressed too (in a row the zero of Gesamt). Gesamt is suppressed where it is t
 complementarily within the Gesamt column, also in rows with several LEs. A diagnosis cell's quantity is kept
 apart from an exact cell that happens to count the same cases. `--suppress-scope all` suppresses every row, with
 the same relations. Tested on random synthetic sets (`SumRelationTests`): no relation has exactly one suppressed
-cell. Known limitation: in a row where only one LE counts, its count is protected, but the zeros of the other LEs
+cell. Several files of the same cases (a total matrix and the matrices per quarter or month) are only safe
+together if they are suppressed together (`run_joint`, used by `monthly_matrices.py`): each cell of the total is
+then also the sum of the same cell of the periods (per LE and Gesamt), so that no period follows from the total and
+the other periods (tested in `scripts/monthly_matrices`, `JointSuppressionTests`). Separate runs are each closed on
+their own but not together. Known limitation: in a row where only one LE counts, its count is protected, but the zeros of the other LEs
 show where the cases are. The data owners decided that
 showing the small non-diagnosis counts per LE (sex, age group, insurance, consent, durations of single cases, …)
 is acceptable; `--suppress-scope all` remains as the opt-out.
@@ -153,7 +159,8 @@ schedule logic as the follow-up SOP metrics of the oncology matrix, with one int
 - Base: the cases with GFK2. `mit Follow-up`: at least one follow-up entry.
 - `Stand am Stichtag`, a partition of the base: `verstorben` (`vitalStatus` deceased in a follow-up, no further
   follow-up due); `noch nicht fällig` (GFK2 less than one interval before the reference date); `fällig, aktuell`
-  (a `followUpDate` in the interval before the reference date); `fällig, überfällig` (none). `Follow-up aktuell,
+  (a `followUpDate` in the interval before the reference date, counted back from it: after the reference date
+  minus the interval, up to the reference date); `fällig, überfällig` (none). `Follow-up aktuell,
   von fälligen` = current / (current + overdue).
 - `Dauer GFK2 bis erstes Follow-up`: days from GFK2 to the earliest `followUpDate` on or after GFK2; count,
   mean, median, quartiles (QUARTILE.INC), minimum, maximum.
@@ -237,24 +244,34 @@ python3 scripts/data_quality_mvh/data_quality_mvh.py /out/export-datenkranz_<tim
 ```
 Tests: `python3 -m unittest discover -s scripts/data_quality_mvh`.
 
-The RD and oncology matrices per calendar quarter (default) or month (`--period quarter|month`; one
-evaluation per period of initial submission, one xlsx each, Q4/2025 = Erstmeldung 2025-10-01 to before
-2026-01-01) are computed in two steps. `scripts/monthly_matrices/monthly_matrices.py` (standard library only,
-on PROD) reads the export once and writes the results of both scripts per period into `<dir>/rd/rd_<period>.json`
-and `<dir>/dnpm/dnpm_<period>.json` (`<period>` = `YYYY-Qn` or `YYYY-MM`). The first period is that of the
-earliest initial submission in the export, so there are no empty leading periods; `--from`/`--until`
-(`YYYY-MM` or `YYYY-Qn`) narrow the range. `--suppress-scope` (default `diagnoses`, see above and
-`scripts/dnpm_evaluation_matrix/README.md`) applies to both, `--follow-up-months` to the RD matrices. `--reference-date` is the same for all periods. `scripts/monthly_matrices/fill_monthly.py` (openpyxl, outside of PROD) writes an xlsx next
-to each result by `fill_template.py`. For oncology, a template is created from the rows on the first run
+The RD and oncology matrices for a whole period together with one matrix per calendar quarter (default) or month
+(`--period quarter|month`; one evaluation per period of initial submission, one xlsx each, Q4/2025 = Erstmeldung
+2025-10-01 to before 2026-01-01) come from one run of `scripts/monthly_matrices/monthly_matrices.py` (standard
+library only, on PROD). It reads the export once and writes `<dir>/rd/rd_<period>.json` and
+`<dir>/dnpm/dnpm_<period>.json` (`<period>` = `YYYY-Qn` or `YYYY-MM`), and the total matrix of exactly these
+periods as `<period>` = `gesamt`. The first period is that of the earliest initial submission in the export, so
+there are no empty leading periods; `--from`/`--until` (`YYYY-MM` or `YYYY-Qn`) narrow the range.
+- RD: the total and the period matrices are **suppressed together** (`rd_evaluation_matrix.run_joint`): no
+  suppressed cell follows from the total and the other periods. `--min-cell`, `--suppress-scope` (default
+  `diagnoses`) and `--follow-up-months` apply to the RD matrices. Hand out only the total and the period matrices
+  of one run; a total from a separate run of `rd_evaluation_matrix.py` is suppressed on its own, and together with
+  these period matrices suppressed cells can become computable.
+- Oncology: **not suppressed** (decision of the data holders, see `scripts/dnpm_evaluation_matrix/README.md`); the
+  total matrix carries the time series by the same periods.
+
+`--reference-date` is the same for all periods. `--rueckfragen-per-le` (recommended) writes the Rückfragen only per
+LE (`<period>_rueckfragen_<LE>.csv`), no file of all LEs, and leaves them out of the RD JSON.
+`scripts/monthly_matrices/fill_monthly.py` (openpyxl, outside of PROD) writes an xlsx next to each result (also
+`gesamt`) by `fill_template.py`. For oncology, a template is created from the rows on the first run
 (`<dir>/Auswertmatrix_MTB_Template.xlsx`, or `--dnpm-template`); its sheet "Rückfragen an LE" stays empty,
-since the oncology JSON contains no case keys (see `dnpm_<period>_rueckfragen.csv`).
+since the oncology JSON contains no case keys (see `dnpm_<period>_rueckfragen*.csv`).
 ```
 python3 scripts/monthly_matrices/monthly_matrices.py /out/export-datenkranz_<time>.json \
-  --orphanet en_product7.xml --reference-date 2026-11-01 --output-dir quarterly
+  --orphanet en_product7.xml --reference-date 2026-11-24 --rueckfragen-per-le --output-dir quarterly
 uv run scripts/monthly_matrices/fill_monthly.py quarterly
 ```
-`--until` is exclusive (the periods starting before it), `--period month` writes one matrix per month as
-before; `--matrix rd|dnpm` restricts to one of them. Tests: `python3 -m unittest discover -s scripts/monthly_matrices`.
+`--until` is exclusive (the periods starting before it), `--period month` writes one matrix per month and their
+total; `--matrix rd|dnpm` restricts to one of them. Tests: `python3 -m unittest discover -s scripts/monthly_matrices`.
 
 ### Running the scripts on the host
 

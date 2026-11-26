@@ -37,7 +37,7 @@ DEFAULT_DNPM_TEMPLATE = "Auswertmatrix_MTB_Template.xlsx"
 
 def results(directory, kind):
     """The result JSONs of a kind per quarter or month, by period"""
-    pattern = re.compile(rf"{kind}_\d{{4}}-(\d{{2}}|Q[1-4])\.json$")
+    pattern = re.compile(rf"{kind}_(\d{{4}}-(\d{{2}}|Q[1-4])|gesamt)\.json$")
     return sorted(p for p in glob.glob(os.path.join(directory, kind, f"{kind}_*.json"))
                   if pattern.search(os.path.basename(p)))
 

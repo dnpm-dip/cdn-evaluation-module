@@ -161,7 +161,10 @@ def fill_matrix(ws, result, field):
 
 
 def suppression_line(result):
-    """The line on the suppressed cells above the matrix (RD and oncology; a JSON without suppress_scope: all rows)"""
+    """The line on the suppressed cells above the matrix (RD; the oncology JSON has no min_cell: not suppressed;
+    a JSON without suppress_scope: all rows)"""
+    if "min_cell" not in result:
+        return "Keine Zellen unterdrückt: alle Zahlen exakt."
     if result["min_cell"] <= 1:
         return ""
     k = result["min_cell"]
@@ -202,7 +205,7 @@ def fill_by_month(wb, result):
     ws["A1"].font = Font(bold=True, size=12)
     ws["A2"] = ("Anzahl der Fälle ohne übermittelten Broad Consent je Grund laut DIP; in Klammern Anteil an diesen Fällen "
                 "des Monats in %." + (f" Zellen mit weniger als {result['min_cell']} Fällen unterdrückt."
-                                     if result["min_cell"] > 1 and result.get("suppress_scope", "all") == "all" else ""))
+                                     if result.get("min_cell", 1) > 1 and result.get("suppress_scope", "all") == "all" else ""))
     header = ["Monat", "Grund"] + [result["labels"][e] for e in result["entities"]]
     for col, text in enumerate(header, 1):
         cell = ws.cell(4, col, text)

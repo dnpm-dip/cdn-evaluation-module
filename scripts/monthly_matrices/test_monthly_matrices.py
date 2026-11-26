@@ -246,5 +246,164 @@ class JointSuppressionTests(unittest.TestCase):
         self.assertEqual(rdt.get(alone, status, rd.UNDIAGNOSED, "B"), 11)
 
 
+class OutputTests(unittest.TestCase):
+    """Reruns into the same directory, colliding LE file names, an initial submission without date"""
+
+    def entries(self, dates, site="LE-A"):
+        return [{"case": f"c{site}{i}", "submittedAt": f"{d}T10:00:00", "site": site,
+                 "content": rdt.datenkranz(f"t{i}", submitted=d, gfk1="2025-11-10", plan_date="2025-11-11")}
+                for i, d in enumerate(dates)]
+
+    def main(self, tmp, entries, *args):
+        path = os.path.join(tmp, "export.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(entries, f)
+        with redirect_stderr(StringIO()):
+            mm.main([path, "--matrix", "rd", "--reference-date", "2026-11-01", "--output-dir", os.path.join(tmp, "out"), *args])
+        return sorted(os.listdir(os.path.join(tmp, "out", "rd")))
+
+    def test_a_second_run_into_the_same_directory_is_refused_or_replaces_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            files = self.main(tmp, self.entries(["2025-11-03", "2026-02-03"]))
+            self.assertIn("rd_2025-Q4_rueckfragen.csv", files)
+            with self.assertRaises(SystemExit):
+                self.main(tmp, self.entries(["2026-02-03"]), "--rueckfragen-per-le")
+            files = self.main(tmp, self.entries(["2026-02-03"]), "--rueckfragen-per-le", "--replace")
+            self.assertFalse([f for f in files if "2025-Q4" in f or f.endswith("_rueckfragen.csv")], files)
+            with open(os.path.join(tmp, "out", "rd", "rd_2026-Q1.json"), encoding="utf-8") as f:
+                self.assertNotIn("problems", json.load(f))
+
+    def test_les_with_the_same_file_name_are_refused(self):
+        with self.assertRaises(SystemExit):
+            rd.per_le_paths("m", ["LE A", "LE_A"])
+        with self.assertRaises(SystemExit):
+            dnt.dm.per_le_paths("m", ["le-a", "LE-A"])
+        self.assertEqual(len(rd.per_le_paths("m", ["LE-A", "LE-B"])), 2)
+
+    def test_an_initial_submission_without_date_doesnt_abort_the_run(self):
+        entries = self.entries(["2025-11-03", "2026-02-03", "2026-02-04"])
+        del entries[2]["content"]["metaData"]["submission"]["date"]
+        with tempfile.TemporaryDirectory() as tmp:
+            files = self.main(tmp, entries)
+            self.assertIn("rd_gesamt.json", files)
+            with open(os.path.join(tmp, "out", "rd", "rd_gesamt.json"), encoding="utf-8") as f:
+                result = json.load(f)
+        self.assertEqual(rdt.get(result, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)"), 2)
+        self.assertEqual(rdt.get(result, "Fälle", "Episoden ohne Erstmeldung (nicht in den Fällen)"), 1)
+
+
+class JointAuditTests(unittest.TestCase):
+    """
+    The closure closes every single relation, not systems of them; the audit (rd.derivable) finds the suppressed counts
+    that follow from the whole linear system of all files and reports them (result["derivable"], *_audit.csv, never in
+    the JSON, CSV or xlsx). Checked against an independent solver over the published numbers (rdt.derivable_cells).
+    """
+
+    def files(self, rows, scope, ranges=None, min_cell=5):
+        ranges = ranges or [(s, mm.next_period(s, mm.QUARTER)) for s in
+                            (date(2026, 1, 1), date(2026, 4, 1), date(2026, 7, 1), date(2026, 10, 1))]
+        run = lambda m: rd.run_joint(rows, [], rdt.HEADS, ranges, date(2026, 12, 31), m, suppress_scope=scope)
+        (t, ps), (ft, fps) = run(min_cell), run(1)
+        return [t] + ps, [ft] + fps
+
+    def reported(self, results):
+        return {(n,) + tuple(c) for n, r in enumerate(results) for c in r["derivable"]}
+
+    def independent(self, results, fulls):
+        import ast
+        return {ast.literal_eval(f.split(": ", 1)[1]) for f in rdt.derivable_cells(list(zip(fulls, results)))
+                if f.startswith("follows")}
+
+    @staticmethod
+    def quarters(counts, assessment="confirmedGeneticDiagnosis"):
+        rows = []
+        for qi, cs in enumerate(counts):
+            for le, n in zip("ABCD", cs):
+                for i in range(n):
+                    d = f"2026-{3 * qi + 2:02d}-05"
+                    rows.append(rd.SubmissionRow(f"{le}{qi}{i}", f"{d}T10:00:00",
+                                                 rdt.datenkranz(f"{le}{qi}{i}", submitted=d, assessment=assessment), le, None))
+        return rows
+
+    def test_a_system_of_relations_gives_a_cell_away_and_is_reported(self):
+        # quarters (A, B, C, D): (3,3,1,0), (3,3,0,0), (0,0,3,3), (0,0,3,3), all suppressed in the LE columns; the
+        # quarter totals, the totals of A and B and the zeros give C in Q1 = 7 + 6 - 6 - 6 = 1, although every single
+        # relation has two suppressed cells
+        results, fulls = self.files(self.quarters([(3, 3, 1, 0), (3, 3, 0, 0), (0, 0, 3, 3), (0, 0, 3, 3)]), rd.SUPPRESS_ALL)
+        reported = self.reported(results)
+        self.assertTrue(reported)
+        self.assertLessEqual(self.independent(results, fulls), reported)
+        # the single-relation checks find nothing: the closure itself is as before
+        self.assertEqual(across_files(results[0], results[1:], fulls[0], fulls[1:]), [])
+
+    def test_open_cases_are_known_to_be_zero_where_every_case_has_a_gfk2(self):
+        # one LE, three undiagnosed cases with GFK2 in each of two quarters: "noch keine GFK2" is exact and 0, so the
+        # open cases are 0 and the closed cases (3) follow from the exact sequenced cases
+        results, fulls = self.files(self.quarters([(3,), (3,)], "noGeneticDiagnosis"), rd.SUPPRESS_DIAGNOSES,
+                                    ranges=[(date(2026, 1, 1), date(2026, 4, 1)), (date(2026, 4, 1), date(2026, 7, 1))])
+        self.assertIn((1, "A", "Diagnoserate (abgeschlossene Fälle)", rd.DIAGNOSED, "base"), self.reported(results))
+        self.assertLessEqual(self.independent(results, fulls), self.reported(results))
+
+    def test_seven_cases_at_two_les(self):
+        rows = rdt.synthetic(seed=0, sizes=(("A", 2), ("B", 5)))
+        rnd = random.Random(0)
+        for r in rows:
+            r.content["metaData"]["submission"]["date"] = f"{rnd.choice(['2025-11', '2025-12', '2026-02', '2026-05'])}-0{rnd.randint(1, 9)}"
+        ranges = [(s, mm.next_period(s, mm.QUARTER)) for s in (date(2025, 10, 1), date(2026, 1, 1), date(2026, 4, 1))]
+        results, fulls = self.files(rows, rd.SUPPRESS_DIAGNOSES, ranges)
+        self.assertIn((0, "A", "Diagnosestatus (alle Fälle)", rd.UNCLEAR, "value"), self.reported(results))
+        self.assertLessEqual(self.independent(results, fulls), self.reported(results))
+
+    def test_the_audit_agrees_with_the_independent_solver_on_random_sets(self):
+        for seed in range(4):
+            for scope in rd.SUPPRESS_SCOPES:
+                with self.subTest(seed=seed, scope=scope):
+                    total, parts = joint(spread(rdt.varied(seed), seed), scope=scope)
+                    full_total, full_parts = joint(spread(rdt.varied(seed), seed), min_cell=1, scope=scope)
+                    results, fulls = [total] + parts, [full_total] + full_parts
+                    self.assertLessEqual(self.independent(results, fulls), self.reported(results))
+
+    def test_the_audit_is_written_apart_from_the_shared_files(self):
+        results, _ = self.files(self.quarters([(3, 3, 1, 0), (3, 3, 0, 0), (0, 0, 3, 3), (0, 0, 3, 3)]), rd.SUPPRESS_ALL)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "m")
+            rd.write_json(f"{out}.json", results[1])
+            rd.write_csv(f"{out}.csv", results[1])
+            self.assertEqual(rd.write_audit(f"{out}_audit.csv", results[1]), f"{out}_audit.csv")
+            with open(f"{out}.json", encoding="utf-8") as f:
+                self.assertNotIn("derivable", json.load(f))
+            self.assertIn("WARNUNG", rd.audit_message("Q1", results[1]))
+        self.assertIsNone(rd.audit_message("x", {**results[1], "derivable": []}))
+
+
+class NotAdditiveTests(unittest.TestCase):
+    """Conversion failures and episodes without initial submission have no date: every matrix of a run counts all of
+    them, so they are equal in the total and each period (rd.NOT_ADDITIVE), not a sum"""
+
+    def test_losses_are_equal_in_every_file_and_suppressed_alike(self):
+        def r(case, d, type_="initial", le="A"):
+            return rd.SubmissionRow(case, f"{d}T10:00:00", rdt.datenkranz(case, submitted=d, type_=type_), le, None)
+        rows = [r(f"a{i}", ["2026-02-03", "2026-05-03"][i % 2]) for i in range(20)] + [r("x", "2026-02-04", "followup")]
+        rows += [r(f"b{i}", ["2026-02-03", "2026-05-03"][i % 2], le="B") for i in range(20)]
+        failures = [rd.Failure("A", "f1", "tan", "error"), rd.Failure("B", "f2", "tan", "error"), rd.Failure("B", "f3", "tan", "error")]
+        ranges = [(date(2026, 1, 1), date(2026, 4, 1)), (date(2026, 4, 1), date(2026, 7, 1))]
+        for min_cell in (1, 5):
+            total, parts = rd.run_joint(rows, failures, rdt.HEADS, ranges, date(2026, 12, 31), min_cell, suppress_scope=rd.SUPPRESS_ALL)
+            for section, item in rd.NOT_ADDITIVE:
+                for le in ("A", "B"):
+                    cells = [rdt.get(x, section, item, le) for x in [total] + parts]
+                    self.assertEqual(len(set(map(str, cells))), 1, (section, item, le, cells))
+            if min_cell == 1:
+                self.assertEqual(rdt.get(total, "Fälle", "Episoden ohne Erstmeldung (nicht in den Fällen)", "A"), 1)
+
+    def test_the_total_must_cover_exactly_the_periods(self):
+        ranges = [(date(2026, 1, 1), date(2026, 4, 1)), (date(2026, 4, 1), date(2026, 7, 1))]
+        for kwargs in ({"start": date(2025, 1, 1)}, {"end": date(2027, 1, 1)}):
+            with self.assertRaises(ValueError):
+                rd.run_joint([], [], rdt.HEADS, ranges, date(2026, 12, 31), **kwargs)
+        with self.assertRaises(ValueError):
+            rd.run_joint([], [], rdt.HEADS, [ranges[1], ranges[0]], date(2026, 12, 31))
+
+
 if __name__ == "__main__":
     unittest.main()

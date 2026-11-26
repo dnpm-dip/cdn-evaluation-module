@@ -142,11 +142,26 @@ suppressed too (in a row the zero of Gesamt). Gesamt is suppressed where it is t
 complementarily within the Gesamt column, also in rows with several LEs. A diagnosis cell's quantity is kept
 apart from an exact cell that happens to count the same cases. `--suppress-scope all` suppresses every row, with
 the same relations. Tested on random synthetic sets (`SumRelationTests`): no relation has exactly one suppressed
-cell. Several files of the same cases (a total matrix and the matrices per quarter or month) are only safe
-together if they are suppressed together (`run_joint`, used by `monthly_matrices.py`): each cell of the total is
-then also the sum of the same cell of the periods (per LE and Gesamt), so that no period follows from the total and
-the other periods (tested in `scripts/monthly_matrices`, `JointSuppressionTests`). Separate runs are each closed on
-their own but not together. Known limitation: in a row where only one LE counts, its count is protected, but the zeros of the other LEs
+cell. Several files of the same cases (a total matrix and the matrices per quarter or month) are suppressed
+together (`run_joint`, used by `monthly_matrices.py`): each cell of the total is then also the sum of the same cell
+of the periods (per LE and Gesamt), so that no period follows from the total and the other periods by a single
+relation (tested in `scripts/monthly_matrices`, `JointSuppressionTests`). The losses that have no date (submissions
+that couldn't be converted, episodes without a readable initial submission) are counted in every matrix of a run
+and are equal there, not added up (`NOT_ADDITIVE`). Separate runs are each closed on their own but not together.
+
+**Limits of the protection.** The closure closes every single relation, not systems of them: several relations,
+each with two or more suppressed cells, can together still determine a suppressed count (e.g. an LE's quarter from
+two quarter totals, two LE totals and shown zeros; also where every case has a GFK2, the exact row "noch keine GFK2"
+= 0 makes the open cases 0 and the closed cases the exact sequenced cases). Every run therefore audits the whole
+linear system (`derivable`: all relations of all files at once, with the zeros a reader knows) and reports the
+suppressed counts of 1 to `--min-cell − 1` that still follow: a warning on stderr and `<output>_audit.csv` (cells
+by LE, section, item; for the KDK only, never in the JSON, CSV or xlsx). On the synthetic test sets such cells
+remain, mostly at LEs with few cases; check the audit before handing out. Suppressing further cells until none
+follows (a cell suppression problem, usually solved as an integer program, e.g. τ-ARGUS) is not implemented.
+Not audited: bounds (all counts are ≥ 0, so a suppressed cell is at most a shown count it is part of, e.g. the
+open cases at most "noch keine GFK2") and, with `--suppress-scope all`, the duration statistics, which are hidden
+per file: the extrema and quartiles of the total bound the hidden ones of the periods (all equal where minimum =
+maximum). Known limitation: in a row where only one LE counts, its count is protected, but the zeros of the other LEs
 show where the cases are. The data owners decided that
 showing the small non-diagnosis counts per LE (sex, age group, insurance, consent, durations of single cases, …)
 is acceptable; `--suppress-scope all` remains as the opt-out.
@@ -252,7 +267,8 @@ library only, on PROD). It reads the export once and writes `<dir>/rd/rd_<period
 periods as `<period>` = `gesamt`. The first period is that of the earliest initial submission in the export, so
 there are no empty leading periods; `--from`/`--until` (`YYYY-MM` or `YYYY-Qn`) narrow the range.
 - RD: the total and the period matrices are **suppressed together** (`rd_evaluation_matrix.run_joint`): no
-  suppressed cell follows from the total and the other periods. `--min-cell`, `--suppress-scope` (default
+  suppressed cell follows from the total and the other periods by a single relation; the audit of the whole system
+  (see *Limits of the protection* above) writes `rd_<period>_audit.csv` and warns where cells still follow. `--min-cell`, `--suppress-scope` (default
   `diagnoses`) and `--follow-up-months` apply to the RD matrices. Hand out only the total and the period matrices
   of one run; a total from a separate run of `rd_evaluation_matrix.py` is suppressed on its own, and together with
   these period matrices suppressed cells can become computable.
@@ -260,7 +276,10 @@ there are no empty leading periods; `--from`/`--until` (`YYYY-MM` or `YYYY-Qn`) 
   total matrix carries the time series by the same periods.
 
 `--reference-date` is the same for all periods. `--rueckfragen-per-le` (recommended) writes the Rückfragen only per
-LE (`<period>_rueckfragen_<LE>.csv`), no file of all LEs, and leaves them out of the RD JSON.
+LE (`<period>_rueckfragen_<LE>.csv`), no file of all LEs, and leaves them out of the RD JSON; two LEs whose names
+give the same file name are refused. An `--output-dir` with files of an earlier run is refused (`--replace` deletes
+the old `rd_*`/`dnpm_*` files first): an old period's JSON with the Rückfragen of all LEs would otherwise end up in
+the xlsx of `fill_monthly.py` next to the new ones.
 `scripts/monthly_matrices/fill_monthly.py` (openpyxl, outside of PROD) writes an xlsx next to each result (also
 `gesamt`) by `fill_template.py`. For oncology, a template is created from the rows on the first run
 (`<dir>/Auswertmatrix_MTB_Template.xlsx`, or `--dnpm-template`); its sheet "Rückfragen an LE" stays empty,

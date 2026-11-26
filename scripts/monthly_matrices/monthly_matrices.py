@@ -100,15 +100,10 @@ def periods(first, last, period, start=None, end=None):
 
 
 def rd_initial_dates(rows):
-    """The dates of the initial submissions of the RD cases (as rd_evaluation_matrix selects them)"""
+    """The dates of the initial submissions of the RD cases (as rd_evaluation_matrix selects them; build_cases leaves
+    out an initial submission without a readable date)"""
     cases, *_ = rd.build_cases(rows)
-    dates = []
-    for case in cases:
-        try:
-            dates.append(rd.submission_date(case.initial))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return [d for d in dates if d]
+    return [rd.submission_date(case.initial) for case in cases]
 
 
 def dnpm_initial_dates(rows):
@@ -116,6 +111,19 @@ def dnpm_initial_dates(rows):
     cases, *_ = dnpm.build_cases(rows)
     dates = (dnpm.submission_date(dnpm.initial_submission(c)) for c in cases)
     return [d for d in dates if d]
+
+
+def prepare_dir(out_dir, kind, replace):
+    """The output directory of a kind (rd, dnpm), refused if it has files of an earlier run (with --replace they are
+    deleted): an old period's JSON with the Rückfragen of all LEs would otherwise go into the xlsx with the new ones
+    (fill_monthly.py takes every <kind>_<period>.json), and old _rueckfragen.csv of all LEs would stay beside them"""
+    os.makedirs(out_dir, exist_ok=True)
+    old = sorted(f for f in os.listdir(out_dir) if f.startswith(f"{kind}_"))
+    if old and not replace:
+        raise SystemExit(f"{out_dir} has files of an earlier run ({', '.join(old[:3])}{', …' if len(old) > 3 else ''}); "
+                         "use a new --output-dir or --replace (deletes them)")
+    for f in old:
+        os.remove(os.path.join(out_dir, f))
 
 
 def periods_of(dates, args):
@@ -130,7 +138,7 @@ def run_rd(path, args):
     rows, failures = rd.load_submissions(path)
     heads = rd.load_linearisation(args.orphanet) if args.orphanet else None
     out_dir = os.path.join(args.output_dir, RD)
-    os.makedirs(out_dir, exist_ok=True)
+    prepare_dir(out_dir, RD, args.replace)
     periods_ = periods_of(rd_initial_dates(rows), args)
     if not periods_:
         return 0
@@ -144,6 +152,8 @@ def run_rd(path, args):
         rd.write_csv(f"{output}.csv", result, args.delimiter)
         rd.write_rueckfragen(output, result, args.delimiter, args.rueckfragen_per_le)
         print(f"RD   {name}: {output}.json ({cases(result)} Fälle)", file=sys.stderr)
+        if rd.write_audit(f"{output}_audit.csv", result, args.delimiter):
+            print(rd.audit_message(f"RD {name}", result), file=sys.stderr)
     return len(periods_)
 
 
@@ -151,7 +161,7 @@ def run_dnpm(path, args):
     """The oncology total matrix (time series by the periods) and the period matrices; the number of periods"""
     rows, failures = dnpm.load_submissions(path)
     out_dir = os.path.join(args.output_dir, DNPM)
-    os.makedirs(out_dir, exist_ok=True)
+    prepare_dir(out_dir, DNPM, args.replace)
     reference_date = args.reference_date or args.cutoff or date.today()
     periods_ = periods_of(dnpm_initial_dates(rows), args)
     if not periods_:
@@ -208,6 +218,8 @@ def main(argv=None):
                         help="the Rückfragen only per LE (<period>_rueckfragen_<LE>.csv), no file of all LEs, and none in "
                              "the RD JSON; recommended")
     parser.add_argument("--output-dir", default="monthly", help="default: %(default)s")
+    parser.add_argument("--replace", action="store_true",
+                        help="delete the rd_*/dnpm_* files of an earlier run in --output-dir first (else refused)")
     args = parser.parse_args(argv)
     if args.start and args.end and args.start >= args.end:
         parser.error("--from must be before --until")

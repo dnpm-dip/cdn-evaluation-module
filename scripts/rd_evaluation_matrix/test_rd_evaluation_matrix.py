@@ -787,6 +787,138 @@ def recoverable(full, result):
                 found.append(f"suppressed beside a shown 0 in {where}: {cells}")
     return found
 
+
+def derivable_cells(files, additive_across=True):
+    """
+    Independently of the implementation, with exact fractions: the suppressed counts of 1 to min_cell - 1 that
+    follow from what a reader of all files sees, solving the whole linear system at once (not one relation at a
+    time): per file the rows (Gesamt = sum of the LEs), the relations of sum_relations() and partitions(), a base
+    shown in several rows of a section as one number; across files, with additive_across and the first file the
+    total, each cell of the total = the sum of the same cell of the other files (a missing LE or row counts 0; the
+    losses that every period repeats, see rdm.NOT_ADDITIVE, equal in all files). Shown zeros, the cells of a side of a
+    relation whose other side is zeros, and the open cases where a row "noch keine GFK2" shows 0 are known zeros.
+    files: [(full, result)], full the same matrix unsuppressed. Findings as text.
+    """
+    from fractions import Fraction
+    hidden_mark = f"<{files[0][1]['min_cell']}"
+    min_cell = files[0][1]["min_cell"]
+    value = {}      # (file, entity, section, item, field) -> shown value or None (suppressed)
+    true = {}
+    for n, (full, result) in enumerate(files):
+        for fr, r in zip(full["rows"], result["rows"]):
+            if r["unit"] != rdm.COUNT:
+                continue
+            for e in result["entities"]:
+                for f in ("value", "base"):
+                    t = fr["values"][e][f]
+                    if t is None:
+                        continue
+                    shown = r["values"][e][f]
+                    value[n, e, r["section"], r["item"], f] = None if shown == hidden_mark else shown
+                    true[n, e, r["section"], r["item"], f] = t
+    relations = []      # (lhs, rhs) of keys of value
+    for n, (full, result) in enumerate(files):
+        ents = result["entities"]
+        les = [e for e in ents if e != rdm.TOTAL]
+        rows = [r for r in full["rows"] if r["unit"] == rdm.COUNT]
+        for r in rows:
+            for f in ("value", "base"):
+                if (n, rdm.TOTAL, r["section"], r["item"], f) in value:
+                    relations.append(([(n, rdm.TOTAL, r["section"], r["item"], f)],
+                                      [(n, e, r["section"], r["item"], f) for e in les if (n, e, r["section"], r["item"], f) in value]))
+        bases = {}
+        for r in rows:
+            if r["base_label"] is not None:
+                bases.setdefault((r["section"], r["base_label"]), []).append(r["item"])
+        listed = [(a, rest) for a, rest in [([(s_, i, f)], [c]) for (s_, _), items in bases.items()
+                                             for i, c in [(items[0], (s_, it, "base")) for it in items[1:]] for f in ("base",)]]
+        listed += [(lhs, rhs) for always, lhs, rhs in sum_relations(full)]
+        listed += [([t], parts) for t, parts in partitions(full)]
+        for e in ents:
+            for lhs, rhs in listed:
+                keys = [[(n, e) + c for c in side] for side in (lhs, rhs)]
+                if any(k not in value for k in keys[0] + keys[1]):
+                    continue
+                if sum(true[k] for k in keys[0]) == sum(true[k] for k in keys[1]):     # holds in this column
+                    relations.append(tuple(keys))
+    if additive_across and len(files) > 1:
+        for k in [k for k in value if k[0] == 0]:
+            parts = [(m,) + k[1:] for m in range(1, len(files)) if (m,) + k[1:] in value]
+            if (k[2], k[3]) in rdm.NOT_ADDITIVE:
+                relations += [([k], [p]) for p in parts]
+            else:
+                relations.append(([k], parts))
+    # known zeros
+    zero = {k for k, v in value.items() if v == 0}
+    subsets = []
+    for n, (full, result) in enumerate(files):
+        for e in result["entities"]:
+            wholes = [(n, e, s_, "nicht berechenbar: noch keine GFK2", "value") for s_ in
+                      ("Bearbeitungsdauer medizinisch (GFK1 bis GFK2)", "Bearbeitungsdauer dokumentarisch (GFK2 bis Einreichung beim KDK)")]
+            parts = [k for k in value if k[:2] == (n, e) and k[4] == "value" and (
+                (k[2] == "Diagnosestatus (alle Fälle)" and k[3].startswith(f"{rdm.OPEN} "))
+                or ((k[2] == "Diagnosestatus nach Altersgruppe" or k[2] in rdm.DISEASE_GROUP_BLOCKS) and k[3].endswith(f": {rdm.OPEN}")))]
+            subsets += [(pt, w) for pt in parts for w in wholes if w in value]
+    changed = True
+    while changed:
+        changed = False
+        for pt, w in subsets:
+            if w in zero and pt not in zero:
+                zero.add(pt)
+                changed = True
+        for lhs, rhs in relations:
+            for side, other in ((lhs, rhs), (rhs, lhs)):
+                if all(o in zero for o in other) and not all(k in zero for k in side):
+                    zero.update(side)
+                    changed = True
+        for k in list(value):
+            if k[4] == "value" and k[:4] + ("base",) in zero and k not in zero:
+                zero.add(k)
+                changed = True
+    unknown = sorted(k for k, v in value.items() if v is None and k not in zero)
+    index = {k: i for i, k in enumerate(unknown)}
+    pivots = {}
+    for lhs, rhs in relations:
+        row = {}
+        for side, sign in ((lhs, 1), (rhs, -1)):
+            for k in side:
+                if k in index:
+                    row[index[k]] = row.get(index[k], 0) + sign
+        row = {v: Fraction(c) for v, c in row.items() if c}
+        while row:
+            v = min(row)
+            if v not in pivots:
+                c = row[v]
+                pivots[v] = {u: x / c for u, x in row.items()}
+                break
+            f = row[v]
+            for u, x in pivots[v].items():
+                y = row.get(u, 0) - f * x
+                if y:
+                    row[u] = y
+                else:
+                    row.pop(u, None)
+
+    def follows(v):
+        row = {v: Fraction(1)}
+        while row:
+            u = min(row)
+            if u not in pivots:
+                return False
+            f = row[u]
+            for w, x in pivots[u].items():
+                y = row.get(w, 0) - f * x
+                if y:
+                    row[w] = y
+                else:
+                    row.pop(w, None)
+        return True
+
+    found = [f"follows from the shown numbers: {k}" for k in unknown if 0 < true[k] < min_cell and follows(index[k])]
+    found += [f"known zero although suppressed and small: {k}" for k in sorted(zero) if value[k] is None and 0 < true[k] < min_cell]
+    return found
+
+
 class ComplementarySuppressionTests(unittest.TestCase):
     """No suppressed count can be recovered as a difference of shown counts"""
 
@@ -1020,6 +1152,45 @@ class SumRelationTests(unittest.TestCase):
         note = next(n for n in result["notes"] if n.startswith("Unterdrückt werden nur"))
         self.assertIn("auch weit mehr", note)
         self.assertIn("Diagnosestatus nach Altersgruppe je Status", note)
+
+
+class AuditTests(unittest.TestCase):
+    """The audit of the whole linear system (rdm.derivable) reports every suppressed count that the independent solver
+    derivable_cells() finds; it only reports (result["derivable"], <output>_audit.csv), the JSON and CSV don't have it"""
+
+    def test_the_audit_finds_what_the_independent_solver_finds(self):
+        import ast
+        found_any = False
+        for seed in range(6):
+            for scope in rdm.SUPPRESS_SCOPES:
+                with self.subTest(seed=seed, scope=scope):
+                    rows = varied(seed)
+                    result, full = run(rows, min_cell=5, scope=scope), run(rows, min_cell=1, scope=scope)
+                    independent = {ast.literal_eval(f.split(": ", 1)[1])[1:] for f in derivable_cells([(full, result)])
+                                   if f.startswith("follows")}
+                    reported = {tuple(c) for c in result["derivable"]}
+                    self.assertLessEqual(independent, reported)
+                    found_any = found_any or bool(reported)
+        self.assertTrue(found_any)      # the single-relation closure leaves such cells on these sets
+
+    def test_the_command_line_writes_the_audit_apart(self):
+        rows = varied(0)
+        data = [{"case": r.case, "submittedAt": r.submitted_at, "content": r.content, "site": r.site} for r in rows]
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = os.path.join(tmp, "in.json"), os.path.join(tmp, "m")
+            with open(src, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            from contextlib import redirect_stderr
+            from io import StringIO
+            err = StringIO()
+            with redirect_stderr(err):
+                rdm.main([src, "--output", out, "--reference-date", "2026-10-30"])
+            result = run(rows, min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
+            if result["derivable"]:
+                self.assertTrue(os.path.exists(f"{out}_audit.csv"))
+                self.assertIn("WARNUNG", err.getvalue())
+            with open(f"{out}.json", encoding="utf-8") as f:
+                self.assertNotIn("derivable", json.load(f))
 
 
 if __name__ == "__main__":

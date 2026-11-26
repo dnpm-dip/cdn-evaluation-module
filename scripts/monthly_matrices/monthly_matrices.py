@@ -29,8 +29,9 @@ total matrix as <period> = gesamt):
   <output-dir>/rd/rd_<period>.json, .csv, _rueckfragen.csv
   <output-dir>/dnpm/dnpm_<period>.json, .csv, _zeitreihe.csv, _rueckfragen.csv
 with --rueckfragen-per-le (recommended) instead of _rueckfragen.csv one _rueckfragen_<LE>.csv per LE, and the RD
-JSON (so the xlsx) without the Rückfragen. RD: small counts are suppressed only in the diagnosis rows
-(--suppress-scope diagnoses, the default; DIAGNOSIS_SECTIONS), --suppress-scope all suppresses every row.
+JSON (so the xlsx) without the Rückfragen. RD: small counts are suppressed only in the rows derived from the
+diagnosis codes (--suppress-scope codes, the default; rd.CODE_SECTIONS: Orphacode, the disease groups, "Diagnose ohne
+Erkrankungsgruppe"), every other number exact, also the diagnosis status; --suppress-scope all suppresses every row.
 The Rückfragen contain case keys: only for the respective LEs. The RD JSON contains them as well
 (as written by rd_evaluation_matrix.py, unless --rueckfragen-per-le), the oncology JSON doesn't.
 
@@ -227,8 +228,9 @@ def main(argv=None):
                         help="oncology: data as of this date, later submissions are ignored")
     parser.add_argument("--min-cell", type=int, default=5,
                         help="RD: counts below are suppressed, 1 disables (default: %(default)s; oncology: not suppressed)")
-    parser.add_argument("--suppress-scope", choices=rd.SUPPRESS_SCOPES, default=rd.SUPPRESS_DIAGNOSES,
-                        help="RD: suppress small counts only in the diagnosis rows or in all rows (default: %(default)s)")
+    parser.add_argument("--suppress-scope", type=rd.scope_argument, choices=rd.SUPPRESS_SCOPES, default=rd.SUPPRESS_CODES,
+                        help="RD: suppress small counts only in the rows derived from the diagnosis codes or in all rows "
+                             "(default: %(default)s)")
     parser.add_argument("--min-medical-days", type=int, default=14,
                         help="shorter GFK1-GFK2 durations are listed for clarification (default: %(default)s)")
     parser.add_argument("--follow-up-months", type=int, default=rd.FU_MONTHS,

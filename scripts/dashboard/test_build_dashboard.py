@@ -176,7 +176,8 @@ class OncologyNotSuppressedTests(Base):
         cases = lambda zr: db.execute("SELECT le, wert_text FROM wert_stand w JOIN kennzahl k USING (zeile) JOIN zeitraum z USING (zeitraum) "
                                       "WHERE z.kurz = ? AND k.kategorie LIKE 'Fallzahl%' ORDER BY le", [zr]).fetchall()
         self.assertEqual(cases("MTB"), [("LE-A", "40"), ("LE-B", "3")])
-        self.assertEqual(cases("RD"), [("LE-A", "<5"), ("LE-B", "<5")])
+        self.assertEqual(cases("RD"), [("LE-A", "40"), ("LE-B", "3")])        # RD: only the diagnosis codes are suppressed
+        self.assertGreater(db.execute("SELECT COUNT(*) FROM wert_stand w JOIN zeitraum z USING (zeitraum) WHERE z.kurz = 'RD' AND w.unterdrueckt = 1").fetchone()[0], 0)
         self.assertEqual(db.execute("SELECT COUNT(*) FROM wert_stand w JOIN zeitraum z USING (zeitraum) WHERE z.kurz = 'MTB' AND w.unterdrueckt = 1").fetchone()[0], 0)
         self.assertEqual(db.execute("SELECT COUNT(*) FROM zeitreihe WHERE unterdrueckt = 1").fetchone()[0], 0)        # time series of the main run: MTB
         u = page_values(html)["unterdrueckung"]
@@ -206,9 +207,18 @@ class DatenkranzModeTests(Base):
         self.assertIn("case.diagnosisRd.diagnoses[].code: ORPHA:558", kats)
         self.assertIn("metaData.birthDate: 2010-01", kats)                       # dates as months
         cases = db.execute("SELECT le, wert_text FROM wert_stand w JOIN kennzahl k USING (zeile) WHERE k.kategorie LIKE 'Fallzahl%' ORDER BY le").fetchall()
-        # LE-B has 3 cases; with two LEs, Gesamt minus LE-A would give them away: LE-A is suppressed too (complementary)
-        self.assertEqual(cases, [("LE-A", "<5"), ("LE-B", "<5")])
+        # RD: only the values of the diagnosis codes are suppressed (decision of 26.11.2026), the case count is exact
+        self.assertEqual(cases, [("LE-A", "40"), ("LE-B", "3")])
         self.assertEqual(db.execute("SELECT wert_text FROM wert_stand_alle_le w JOIN kennzahl k USING (zeile) WHERE k.kategorie LIKE 'Fallzahl%'").fetchone()[0], "43")
+        # LE-B has 3 cases with ORPHA:558; with two LEs, Gesamt minus LE-A would give them away: LE-A is suppressed too
+        code = lambda kat: db.execute("SELECT le, wert_text FROM wert_stand w JOIN kennzahl k USING (zeile) WHERE w.zeitraum = 'gesamt' "
+                                      "AND k.kategorie = ? ORDER BY le", [kat]).fetchall()
+        self.assertEqual(code("case.diagnosisRd.diagnoses[].code: ORPHA:558"), [("LE-A", "<5"), ("LE-B", "<5")])
+        # every suppressed cell is a value of a diagnosis code; the fill rate of the codes and every other row are exact
+        rows = db.execute("SELECT DISTINCT k.kategorie FROM wert_stand w JOIN kennzahl k USING (zeile) WHERE w.unterdrueckt = 1").fetchall()
+        self.assertTrue(rows)
+        self.assertEqual([k for (k,) in rows if not k.startswith("case.diagnosisRd.diagnoses[].code: ")], [])
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM zeitreihe z WHERE unterdrueckt = 1 AND kennzahl NOT LIKE '%diagnoses[].code: %'").fetchone()[0], 0)
         self.assertIn('"navA": "Felder"', html)
 
     def test_no_group_with_one_suppressed_cell(self):
@@ -234,10 +244,12 @@ class Review20261126Tests(Base):
     """Fixes after the cross-model review of 26.11.2026 (synthetic data)"""
 
     def test_the_note_shows_the_case_count_as_the_matrix_does(self):
+        # RD: the case count is exact since only the diagnosis codes are suppressed (26.11.2026); the note shows it
+        # as the matrix does
         _, db = self.build("--mode", "datenkranz", self.write("export.json", submissions(n_a=3, n_b=0)))
         note = db.execute("SELECT hinweis FROM zeitraum").fetchone()[0]
-        self.assertNotIn("3 Fälle", note)
-        self.assertIn("<5 Fälle", note)
+        self.assertIn("3 Fälle", note)
+        self.assertIn("nur die Zeilen, die zeigen, welche Erkrankung", note)
 
     def test_no_alle_next_to_a_suppressed_use_case(self):
         unknown = submissions(n_a=8, n_b=0, disease="unknownDisease")

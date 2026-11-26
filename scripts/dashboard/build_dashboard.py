@@ -22,8 +22,9 @@ history view ("Verlauf").
 
 Suppression applies to rare diseases (SE/RD) only: by decision of the data holders (26.11.2026) oncology data
 (mode onko, use case MTB in mode datenkranz) is not suppressed, every value is exact; an oncology matrix or time
-series with suppressed cells ("<5") is refused. RD: "<5" means 1 to 4 cases or hidden to protect a neighbouring cell
-(then also 5 or more). The page shows it as "unterdrückt" without bounds, never as 0, and never computes it back.
+series with suppressed cells ("<5") is refused. RD: only the rows that tell which disease a case has are suppressed
+(decision of 26.11.2026: the diagnosis codes; the RD matrix decides for its rows, mode datenkranz suppresses the values
+of diagnoses[].code only); "<5" means 1 to 4 cases or hidden to protect a neighbouring cell (then also 5 or more). The page shows it as "unterdrückt" without bounds, never as 0, and never computes it back.
 Bounds 1-4 are shown only for files that state they have no complementary suppression ("suppressed":
 {"complementary": 0}). problems[] (case keys, TANs) is never read.
 
@@ -389,8 +390,16 @@ CODE_VALUE = re.compile(r"^[A-Za-z0-9_.:+/\-]{1,40}$")
 FREE_TEXT_NAME = re.compile(r"[Rr]emark|[Ff]ree[Tt]ext|[Ff]reitext|[Cc]omment|[Nn]otes?$|[Bb]emerkung")
 MAX_DISTINCT = 30
 USE_CASE = {"rare": "RD", "oncological": "MTB", "hereditary": "MTB"}
-# Oncology is not suppressed (decision of the data holders, 26.11.2026); RD and unknown use cases are, like the RD matrix.
+# Oncology is not suppressed (decision of the data holders, 26.11.2026); RD and unknown use cases are, like the RD matrix,
+# and like it only in the rows that tell which disease a case has: the values of the diagnosis codes
+# (case.diagnosisRd.diagnoses[].code); every other row (fill rates, other values, cases, submissions) is exact.
 ONCOLOGY_USE_CASES = {"MTB"}
+DIAGNOSIS_CODE_PATH = re.compile(r"(^|\.)diagnoses\[\]\.code$")
+
+
+def is_code_row(r):
+    """A row of mode datenkranz that the suppression covers: a value of a diagnosis code (not its fill rate)"""
+    return r["base_key"] is not None and ": " in r["item"] and bool(DIAGNOSIS_CODE_PATH.search(r["item"].split(": ", 1)[0]))
 
 
 def load_submissions(path):
@@ -451,11 +460,12 @@ class Counter2:
                 self.c[(row, e, p)] += 1
 
 
-def suppress(cells, groups, min_cell, hidden=None):
+def suppress(cells, groups, min_cell, hidden=None, scope=None):
     """Primary (1 to min_cell - 1) and complementary suppression: in every group (total first, then its parts) with
-    exactly one suppressed cell the smallest other nonzero cell is suppressed too, until none is left.
-    -> (suppressed cells, number of primary ones)"""
-    hidden = set(hidden or ()) | {k for k, v in cells.items() if 0 < v < min_cell}
+    exactly one suppressed cell the smallest other nonzero cell is suppressed too, until none is left. scope: the cells
+    that may be suppressed (None: all). -> (suppressed cells, number of primary ones)"""
+    allowed = (lambda k: True) if scope is None else (lambda k: k in scope)
+    hidden = set(hidden or ()) | {k for k, v in cells.items() if 0 < v < min_cell and allowed(k)}
     primary = len(hidden)
     changed = True
     while changed:
@@ -464,7 +474,8 @@ def suppress(cells, groups, min_cell, hidden=None):
             g = [k for k in g if k in cells]
             if len(g) < 2 or sum(1 for k in g if k in hidden) != 1:
                 continue
-            rest = [k for k in g[1:] if k not in hidden and cells[k] > 0] or [k for k in g if k not in hidden and cells[k] > 0]
+            rest = ([k for k in g[1:] if k not in hidden and cells[k] > 0 and allowed(k)]
+                    or [k for k in g if k not in hidden and cells[k] > 0 and allowed(k)])
             if rest:
                 hidden.add(min(rest, key=lambda k: cells[k]))
                 changed = True
@@ -580,7 +591,9 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
                 for p in ["gesamt"] + months:
                     cells[(r["key"], e, p)] = cnt.c.get((r["key"], e, p), 0)
         hidden = set()
-        if suppressed:          # RD: the suppression groups
+        if suppressed:          # RD: the suppression groups; only the cells of the code rows are suppressed
+            code_rows = [r for r in rows if is_code_row(r)]
+            scope = {(r["key"], e, p) for r in code_rows for e in ents for p in ["gesamt"] + months}
             gl = []
             for r in rows:
                 for p in ["gesamt"] + months:
@@ -592,9 +605,9 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
                     for p in ["gesamt"] + months:
                         gl.append([(total, e, p)] + [(k, e, p) for k in parts])    # a partition of a count
             # values whose base is below min_cell are suppressed too (also 0), then the complementary suppression again
-            small_base = {(r["key"], e, p) for r in rows if r["base_key"] for e in ents for p in ["gesamt"] + months
+            small_base = {(r["key"], e, p) for r in code_rows for e in ents for p in ["gesamt"] + months
                           if 0 < cells[(r["base_key"], e, p)] < min_cell}
-            hidden, primary = suppress(cells, gl, min_cell, small_base)
+            hidden, primary = suppress(cells, gl, min_cell, small_base, scope)
 
         def out(k):
             r = rows[row_index[k[0]]]
@@ -621,9 +634,11 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
             "rows": res_rows, "time_series": {"resolution": "month", "periods": months, "rows": ts_rows},
             "notes": [f"{out((cases_key, TOTAL, 'gesamt'))['value']} Fälle (Episoden mit Erstmeldung, Use Case {name}), Stand je Fall aus der letzten Nicht-Test-Einreichung; "
                       "Füllgrad und Werte je Fall (ein Fall zählt je Wert einmal), Monat = Monat der Erstmeldung, bei Einreichungen der Monat der Einreichung.",
-                      (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso Werte mit einer Basis unter {min_cell}; ergänzend "
-                       f"unterdrückt, ebenfalls als <{min_cell}, damit sich keine unterdrückte Zelle aus Gesamt und den übrigen LE, aus dem Gesamtzeitraum und den "
-                       "Monaten oder aus einer Aufteilung ergibt; eine Zelle <5 kann daher auch 5 oder mehr Fälle zählen." if suppressed else
+                      (f"Unterdrückt werden wie in der RD-Matrix nur die Zeilen, die zeigen, welche Erkrankung ein Fall hat: die Werte der Diagnosecodes "
+                       f"(diagnoses[].code). Dort sind Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso Werte mit einer Basis unter "
+                       f"{min_cell}; ergänzend unterdrückt, ebenfalls als <{min_cell} und nur in diesen Zeilen, damit sich keine unterdrückte Zelle aus Gesamt "
+                       "und den übrigen LE oder aus dem Gesamtzeitraum und den Monaten ergibt; eine Zelle <5 kann daher auch 5 oder mehr Fälle zählen. "
+                       "Alle anderen Zahlen (Einreichungen, Fälle, Füllgrade, andere Werte) sind exakt, auch unter 5." if suppressed else
                        "Keine Unterdrückung (Onkologie, Entscheidung der Datenhalter vom 26.11.2026): alle Werte exakt, auch unter 5."),
                       f"Werte nur bei Feldern mit höchstens {MAX_DISTINCT} verschiedenen kodierten Werten; Datumsfelder als Monate; Freitext nur als Füllgrad. "
                       f"Nicht ausgewertet (Kennungen, Freitext, mehr als {MAX_DISTINCT} verschiedene Texte): " + (", ".join(sorted(skipped)) or "keine") + "."],
@@ -942,7 +957,8 @@ def footer(suppressed):
     exact = "nach Entscheidung der Datenhalter (26.11.2026) nicht unterdrückt, alle Werte sind exakt, auch unter 5."
     if not any(suppressed):
         return "Nur Aggregate je LE. Keine Unterdrückung kleiner Zellen: Onkologische Daten werden " + exact
-    return ("Nur Aggregate je LE. Unterdrückt wird nur bei Seltenen Erkrankungen (RD); onkologische Daten (MTB) werden " + exact
+    return ("Nur Aggregate je LE. Unterdrückt wird nur bei Seltenen Erkrankungen (RD), und dort nur in den Zeilen aus den Diagnosecodes; "
+            "onkologische Daten (MTB) werden " + exact
             + " RD: Unterdrückte Zellen („<5“, schraffiert) werden nie als 0 gezeigt und nie zurückgerechnet; eine unterdrückte Zelle kann auch"
             " 5 oder mehr Fälle zählen (ergänzende Unterdrückung). Eine Veränderung ist „n. b.“ (nicht berechenbar), sobald eine Seite unterdrückt ist.")
 

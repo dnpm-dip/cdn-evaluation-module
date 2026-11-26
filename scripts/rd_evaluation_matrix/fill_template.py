@@ -168,7 +168,12 @@ def suppression_line(result):
     if result["min_cell"] <= 1:
         return ""
     k = result["min_cell"]
-    if result.get("suppress_scope", "all") == "diagnoses":
+    scope = result.get("suppress_scope", "all")
+    if scope == "codes":
+        return (f"Nur Zeilen aus den Diagnosecodes (Orphacode, Erkrankungsgruppen, siehe Hinweise): Zellen mit weniger als "
+                f"{k} Fällen unterdrückt (<{k}), ergänzend weitere in diesen Zeilen, damit keine unterdrückte Zahl "
+                "berechenbar ist. Alle anderen Zahlen exakt, auch Diagnosestatus und Diagnoserate.")
+    if scope == "diagnoses":    # written before 26.11.2026 (scope replaced by codes)
         return (f"Nur Diagnosezeilen (Abschnitte siehe Hinweise): Zellen mit weniger als {k} Fällen unterdrückt (<{k}), "
                 "ergänzend weitere, damit keine unterdrückte Zahl als Differenz berechenbar ist. Alle anderen Zahlen exakt.")
     return (f"Zellen mit weniger als {k} Fällen unterdrückt (<{k}), ergänzend "

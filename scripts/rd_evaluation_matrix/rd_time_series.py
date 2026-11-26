@@ -49,9 +49,10 @@ others. Neither output contains case keys or TANs. The cells per LE and period a
 same, and suppressed ones can still follow from the Gesamt column and the other LEs or from the
 other categories: the tables, suppressed or not (--min-cell 1), are meant for the data nodes and the
 LE concerned, not for publication.
---suppress-scope diagnoses (default) applies all of this only to the diagnosis blocks (Diagnosestatus,
-Diagnoserate: rdm.DIAGNOSIS_SECTIONS, their base "Fälle" exact as in the matrix) and shows every other
-count, percentage and statistic exactly; --suppress-scope all to every block.
+--suppress-scope codes (default) applies all of this only to the rows derived from the diagnosis codes
+(rdm.CODE_SECTIONS, rdm.CODE_ITEMS: Orphacode, the disease groups), as the matrix does. The time series has no
+such block, so with codes every count, percentage and statistic is exact, also the diagnosis status and rate;
+--suppress-scope all suppresses every block.
 plot_time_series.py draws the curves from the CSV.
 
 Example:
@@ -633,17 +634,18 @@ def suppress_complementary(rows, lines, min_cell, due_days):
 # Main
 # ---------------------------------------------------------------------------------------------
 
-def is_diagnosis_line(line):
-    """A line of the diagnosis blocks, the sections of the matrix that are its diagnosis rows (rdm.is_diagnosis_row)"""
-    return rdm.is_diagnosis_row(SimpleNamespace(section=line.block, item=line.item))
+def is_code_line(line):
+    """A line of a block that is a code section of the matrix (rdm.is_code_row); the time series has none so far"""
+    return rdm.is_code_row(SimpleNamespace(section=line.block, item=line.item))
 
 
 def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH, due_days=None, reasons=None,
-        suppress_scope=rdm.SUPPRESS_DIAGNOSES):
+        suppress_scope=rdm.SUPPRESS_CODES):
     """
     The time series of the submissions (rdm.SubmissionRow) and the failures of the export, given
     as (site, submittedAt); reasons as load_dip_reasons returns them (None: not in the export).
-    suppress_scope rdm.SUPPRESS_DIAGNOSES: only the diagnosis lines are suppressed, all others are exact
+    suppress_scope rdm.SUPPRESS_CODES: only the lines derived from the diagnosis codes are suppressed (none so far),
+    all others are exact
     """
     if suppress_scope not in rdm.SUPPRESS_SCOPES:
         raise ValueError(f"suppress_scope must be one of {rdm.SUPPRESS_SCOPES}: {suppress_scope}")
@@ -739,9 +741,9 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
                      for line in case_lines(of, unreadable_counts[key], due_days, no_gfk1_counts[key])]
             lines += [(line, None) for line in submission_lines(event_counts.get(key, {}))]
             for line, group in lines:
-                if every or is_diagnosis_line(line):
+                if every or is_code_line(line):
                     values = suppressed(line, min_cell, group)
-                    if not every and line.base_label in rdm.EXACT_DIAGNOSIS_BASES:
+                    if not every and line.base_label in rdm.EXACT_CODE_BASES:
                         values["base"] = line.base      # shown as the count of another line
                 else:
                     values = suppressed(line, 1)        # exact: nothing is below a min_cell of 1
@@ -790,15 +792,10 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
          "Weitergabesicher ist die Tabelle damit nicht: ein Teil der unterdrückten Zellen folgt aus Gesamt und den "
          "übrigen LEs oder aus den übrigen Kategorien. Sie ist für die Datenknoten und den jeweiligen LE bestimmt."
          if min_cell > 1 and every else
-         (f"Unterdrückt werden nur die Blöcke '{B_STATUS}' und '{B_RATE}' (die Diagnosezeilen der Matrix): dort sind "
-          f"Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso Anteile mit unterdrücktem Wert oder "
-          f"Nenner; Zählwerte innerhalb von 1 bis {min_cell - 1} Fällen bleiben leer, auch die Null. Ergänzend "
-          f"unterdrückt, ebenfalls als <{min_cell}: wäre in einer Kennzahl eines LE genau ein Zeitraum unterdrückt, auch "
-          f"der Zeitraum (oder '{WHOLE}') mit der kleinsten weiteren Zahl über 0; eine Zelle <{min_cell} kann daher auch "
-          f"{min_cell} oder mehr zählen. Alle anderen Zahlen, Anteile, Mediane und Quartile sind exakt angegeben, auch "
-          f"unter {min_cell}. Weitergabesicher ist die Tabelle damit nicht: ein Teil der unterdrückten Zellen folgt aus "
-          "Gesamt und den übrigen LEs oder aus den übrigen Kategorien. Sie ist für die Datenknoten und den jeweiligen LE "
-          "bestimmt.")
+         (f"Unterdrückt werden wie in der Matrix nur Zeilen aus den Diagnosecodes (Orphacode, Erkrankungsgruppen, "
+          "--suppress-scope codes); die Zeitreihe hat keine solche Zeile. Alle Zahlen, Anteile, Mediane und Quartile "
+          f"sind exakt angegeben, auch unter {min_cell}, auch '{B_STATUS}' und '{B_RATE}': sie zeigen, ob ein Fall "
+          "eine Diagnose hat, nicht welche. Die Tabelle ist für die Datenknoten und den jeweiligen LE bestimmt.")
          if min_cell > 1 else
          "Keine Zellen unterdrückt (--min-cell 1): nur für den internen Gebrauch der Datenknoten."),
         "Broad Consent bewertet zum Datum der letzten Einreichung. Übermittelt: mindestens ein Eintrag in "
@@ -897,9 +894,9 @@ def main(argv=None):
                              "(default: today)")
     parser.add_argument("--min-cell", type=int, default=5,
                         help="counts below are suppressed, 1 disables (default: %(default)s)")
-    parser.add_argument("--suppress-scope", choices=rdm.SUPPRESS_SCOPES, default=rdm.SUPPRESS_DIAGNOSES,
-                        help="suppress small counts only in the diagnosis blocks (rdm.DIAGNOSIS_SECTIONS), all other "
-                             "numbers exact, or in all blocks (default: %(default)s)")
+    parser.add_argument("--suppress-scope", type=rdm.scope_argument, choices=rdm.SUPPRESS_SCOPES, default=rdm.SUPPRESS_CODES,
+                        help="suppress small counts only in the lines derived from the diagnosis codes (rdm.CODE_SECTIONS; "
+                             "the time series has none, so all numbers are exact), or in all blocks (default: %(default)s)")
     parser.add_argument("--period", choices=(MONTH, QUARTER), default=QUARTER, help="resolution (default: %(default)s)")
     parser.add_argument("--follow-up-due-days", type=int,
                         help="also report the follow-ups of the cases whose GFK2 is at least this many days before "

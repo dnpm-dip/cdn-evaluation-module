@@ -23,9 +23,11 @@ shown unless it is the count of a single LE), and complementary
 cells with the same marker until no suppressed count follows from the shown numbers, also not from several sum
 relations together (the whole linear system, see protect). If one still followed, nothing is written and the
 script exits with an error (blocked_message: the cells on stderr, for the KDK only).
---suppress-scope diagnoses (default) suppresses only the diagnosis rows (DIAGNOSIS_SECTIONS, DIAGNOSIS_ITEMS) and
-shows every other count, share and duration exactly, except in the LE columns where the exact numbers alone
-determine a suppressed diagnosis cell (suppressed there as with all); --suppress-scope all suppresses every row.
+--suppress-scope codes (default) suppresses only the rows derived from the diagnosis codes, which tell which disease
+a case has (CODE_SECTIONS, CODE_ITEMS: Orphacode, the disease groups with their status rows, "Diagnose ohne
+Erkrankungsgruppe"), complementary cells and the protection included, and shows every other count, share and
+duration exactly, also the diagnosis status and rates; where the code rows of an LE can't be protected cell by cell,
+all its code rows are suppressed, never another row. --suppress-scope all suppresses every row.
 Follow-up (FU_SECTIONS): cases with GFK2 due, current or overdue at --reference-date with the interval
 --follow-up-months (default 12), days from GFK2 to the first follow-up, mandatory fields of the follow-ups.
 The xlsx is written from the JSON by fill_template.py (needs openpyxl).
@@ -252,9 +254,12 @@ STALE = "stale"   # losses: non-convertible submissions of an evaluated episode
 PROBLEMS = (P_GFK1_AFTER_SUBMISSION, P_GFK2_AFTER_SUBMISSION, P_SHORT_MEDICAL, P_NO_GENOME,
             P_PRIOR_AFTER_GFK1, P_DIAGNOSIS_WITHOUT_GROUP, P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)
 
-# Scope of the small-cell suppression (--suppress-scope): only the diagnosis rows (default), or every count
-SUPPRESS_DIAGNOSES, SUPPRESS_ALL = "diagnoses", "all"
-SUPPRESS_SCOPES = (SUPPRESS_DIAGNOSES, SUPPRESS_ALL)
+# Scope of the small-cell suppression (--suppress-scope): only the rows derived from the diagnosis codes (default,
+# decision of the data holders of 26.11.2026: "nur auf die Diagnosen selbst (Diagnosecodes)"), or every count. The
+# former scope "diagnoses" (also the diagnosis status rows) is gone; results written with it carry
+# suppress_scope "diagnoses" (fill_template.py and the dashboard still read them).
+SUPPRESS_CODES, SUPPRESS_ALL = "codes", "all"
+SUPPRESS_SCOPES = (SUPPRESS_CODES, SUPPRESS_ALL)
 PROBLEMS_SECTION = "Rückfragen an LE (Anzahl, Einzelfälle siehe Rückfragen)"
 # Rows that a period matrix doesn't count by period: the submissions that couldn't be converted and the episodes
 # without initial submission have no date of an initial submission, every matrix of a run counts all of them. In a
@@ -264,36 +269,40 @@ NOT_ADDITIVE = frozenset({("Fälle", "Einreichungen nicht konvertierbar (nicht i
                           (PROBLEMS_SECTION, P_NOT_CONVERTED), (PROBLEMS_SECTION, P_WITHOUT_INITIAL)})
 DISEASE_GROUP_BLOCKS = ("Erkrankungsgruppen gesamt", "Erkrankungsgruppen Adult (ab 18)",
                         "Erkrankungsgruppen Pädiatrisch (unter 18)")
-# The diagnosis rows: the diagnostic result of a case (status, rate, disease group, Orpha coding) and the counts
-# broken down by it. With SUPPRESS_DIAGNOSES only their cells are suppressed, every other number is exact.
-DIAGNOSIS_SECTIONS = (
-    "Diagnosestatus (alle Fälle)",
-    "Diagnoserate (abgeschlossene Fälle)",
-    "Diagnoserate nach WGS-Seq. Art (abgeschlossene Fälle mit WGS/lrWGS)",
-    "Diagnosestatus nach Altersgruppe",
-    *(f"Vorbefunde, Status {s} (Mehrfachnennung möglich)" for s in CASE_STATUSES),
-    *(f"Vorbefunde nach Jahr, Status {s}" for s in CASE_STATUSES),
-    "Orphacode",
-    *DISEASE_GROUP_BLOCKS,
-)
-DIAGNOSIS_ITEMS = ((PROBLEMS_SECTION, P_DIAGNOSIS_WITHOUT_GROUP),)
-# Bases of diagnosis rows that are shown exactly: they are counts of other rows or follow from exact ones (the
-# cases, the sequenced cases = cases - "davon nicht sequenziert", the age blocks of the disease groups = sums of
-# the age groups), or count no diagnostic result (the sequenced cases of an age group, = the cases of the age group
-# where no case is left unsequenced; they sum to the sequenced cases). Every other base of a diagnosis row (closed
-# cases, cases of a status or a disease group) is suppressed with the row.
-EXACT_DIAGNOSIS_BASES = (("Fälle", "sequenzierte Fälle") + tuple(f"Fälle ({s})" for s in DISEASE_GROUP_BLOCKS)
-                         + tuple(f"Fälle {g}" for g in AGE_GROUPS))
+# The code rows: the rows that tell which disease a case has, derived from its diagnosis codes (Orphacode, ICD-10 for
+# the neuromuscular group): the Orpha coding, the disease groups in total, Adult and Pädiatrisch with their status rows
+# (group x status) and the Rückfrage "Diagnose ohne Erkrankungsgruppe". With SUPPRESS_CODES only their cells are
+# suppressed; every other number is exact, also the diagnosis status rows (Diagnosestatus, Diagnoserate, by WGS
+# extent and by age group, the prior findings by status): they tell whether a case has a diagnosis, not which one.
+CODE_SECTIONS = ("Orphacode", *DISEASE_GROUP_BLOCKS)
+CODE_ITEMS = ((PROBLEMS_SECTION, P_DIAGNOSIS_WITHOUT_GROUP),)
+# Bases of code rows that are shown exactly: they count no code (the cases of the matrix, of the age block of a
+# disease group block = the cases of its age groups). The base of a status row of a disease group (the cases of
+# the group) is suppressed with the row.
+EXACT_CODE_BASES = ("Fälle",) + tuple(f"Fälle ({s})" for s in DISEASE_GROUP_BLOCKS)
 
 
-def is_diagnosis_row(row):
-    """A row of the diagnosis sections (DIAGNOSIS_SECTIONS, DIAGNOSIS_ITEMS)"""
-    return row.section in DIAGNOSIS_SECTIONS or (row.section, row.item) in DIAGNOSIS_ITEMS
+def is_code_row(row):
+    """A row derived from the diagnosis codes (CODE_SECTIONS, CODE_ITEMS)"""
+    return row.section in CODE_SECTIONS or (row.section, row.item) in CODE_ITEMS
 
 
-def is_diagnosis_cell(row, field_):
-    """A cell suppressed with SUPPRESS_DIAGNOSES: the value of a diagnosis row, or its base unless that is exact"""
-    return is_diagnosis_row(row) and (field_ == "value" or row.base_label not in EXACT_DIAGNOSIS_BASES)
+def is_code_cell(row, field_):
+    """A cell suppressed with SUPPRESS_CODES: the value of a code row, or its base unless that is exact"""
+    return is_code_row(row) and (field_ == "value" or row.base_label not in EXACT_CODE_BASES)
+
+
+def scope_argument(value):
+    """--suppress-scope of the command lines: the former scope "diagnoses" is refused with a hint"""
+    if value == "diagnoses":
+        raise argparse.ArgumentTypeError("'diagnoses' was replaced by 'codes' (only the rows derived from the diagnosis "
+                                         "codes, the diagnosis status exact; decision of the data holders, 26.11.2026)")
+    return value
+
+
+def in_scope(scope):
+    """The cells (row, field) a scope suppresses"""
+    return (lambda r, f: True) if scope == SUPPRESS_ALL else is_code_cell
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1087,8 +1096,9 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=(), follow_up
 
 
 # Small-cell suppression, to protect the cases of a single LE: Gesamt (the sum over all LEs) isn't suppressed itself.
-# Scope: with SUPPRESS_ALL every count, with SUPPRESS_DIAGNOSES (default) only the cells of the diagnosis rows
-# (is_diagnosis_cell); all other counts, shares and duration statistics are exact.
+# Scope: with SUPPRESS_ALL every count, with SUPPRESS_CODES (default) only the cells of the code rows (is_code_cell);
+# all other counts, shares and duration statistics are exact, and every suppressed cell is a code cell (also the
+# complementary ones and those of the protection below).
 # Primary: counts 1..min_cell-1 of an LE in scope. Complementary: a suppressed count must not be
 # recoverable as a difference, so in each group of counts with a known sum relation in which exactly one count is
 # suppressed, the smallest other nonzero count of an LE in scope is suppressed as well, until no group changes; a
@@ -1103,8 +1113,8 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=(), follow_up
 #       (e.g. no unsequenced case), where they hold.
 # A count is the set it counts (case keys, variant ids): the same set shown twice, e.g. the case count and the base
 # "Fälle", is one quantity and suppressed in both places; in a group it stays two cells. Each zero is a quantity of
-# its own. With SUPPRESS_DIAGNOSES the cells in scope are quantities apart from the exact ones, even of the same
-# set, and a group of diagnosis rows can have an exact total (the sequenced cases, the cases): where exactly one part
+# its own. With SUPPRESS_CODES the cells in scope are quantities apart from the exact ones, even of the same
+# set, and a group of code rows can have an exact total (the cases, a diagnosis status): where exactly one part
 # is suppressed and the others are zeros, a zero part is suppressed instead (as <min_cell, which it is), so that the
 # suppressed part isn't the exact total minus the shown zeros; preferably one in a row with a nonzero Gesamt. A zero
 # is never chosen where it is known to be 0 anyway (beside exact zeros, also through other groups: all counts are
@@ -1345,11 +1355,14 @@ def close(groups, cells, size, hidden, rank, zero_rank, protected=frozenset(), z
 # follow is nonzero in it except with probability 2^-61, so the check errs, if at all, towards "follows". After the
 # closure, protect suppresses further cells until no count of 1 to min_cell - 1 follows: per such count the
 # cheapest allowed cell next to it through the suppressed ones (a nonzero LE cell of the smallest count first, zeros,
-# Gesamt and the total file last), more of them where a count stays computable, then the closure again. Where a
-# count follows even with every cell of the scope suppressed (with SUPPRESS_DIAGNOSES: from the exact numbers
-# alone, e.g. the closed cases where "noch keine GFK2" is 0), the columns involved are suppressed as with
-# SUPPRESS_ALL (escalated: the LE in that file, then in every file, with Gesamt), and so are those of a count that
-# stays computable for long. Deterministic: every choice is ordered by the cells, not by hashes. What still follows
+# Gesamt and the total file last), more of them where a count stays computable, then the closure again. All of them
+# are cells of the scope: with SUPPRESS_CODES the exact rows stay exact, and a relation between code rows and exact
+# margins (the cases, the diagnosis status of an LE) is protected by further code cells, also zeros a reader can't
+# infer. Where a count follows even with every cell of the scope suppressed, or stays computable for long, its
+# columns are escalated: with SUPPRESS_CODES their whole code block is suppressed (every code cell, also the zeros,
+# never another row), first of the LE in that file, then with Gesamt of the file, then of the LE and Gesamt in every
+# file, then of every column; with SUPPRESS_ALL (every cell in the scope already) an escalation only starts the
+# closure again. Deterministic: every choice is ordered by the cells, not by hashes. What still follows
 # afterwards (it shouldn't) is result["derivable"], and the scripts then write nothing (main, monthly_matrices).
 # Bounds are not checked: all counts are >= 0, so a suppressed cell can be bounded by shown ones (at most a shown
 # count it is part of).
@@ -1370,15 +1383,15 @@ def cell_count(columns, cell):
     return (r.n if field_ == "value" else r.base) if r.unit == COUNT else None
 
 
-def cell_relations(files, columns, total=None):
+def cell_relations(files, columns, total=None, scoped=None):
     """
     The sum relations between the count cells (column, row index, field) of all files that a reader knows, each
     (lhs, rhs) with sum(lhs) = sum(rhs): Gesamt = the sum of the LEs per row and field; with total, each cell of that
     file = the sum of the same cell of the others (NOT_ADDITIVE: equal to each); per column the rows of a section
     with one base label whose sets are disjoint and make up the base (the categories of a section) and the relations
     of sum_relations() where they hold (always: in every column); two cells of a column that count the same set in
-    every column of all files (structurally the same number, e.g. the cases and the base "Fälle"), both diagnosis
-    cells or both not.
+    every column of all files (structurally the same number, e.g. the cases and the base "Fälle"), both cells of the
+    scope (scoped(row, field), None: all) or both not.
     """
     out = []
     has = lambda cell: cell_count(columns, cell) is not None
@@ -1423,7 +1436,7 @@ def cell_relations(files, columns, total=None):
         for i, r in enumerate(rows):
             for field_, s in (("value", r.members), ("base", r.of)):
                 if s is not None and has((c, i, field_)):
-                    positions.setdefault((r.key, field_, is_diagnosis_cell(r, field_)), {})[c] = i
+                    positions.setdefault((r.key, field_, scoped is None or scoped(r, field_)), {})[c] = i
     classes = {}
     for p, at in positions.items():
         signature = (p[2],) + tuple((cell_order((c, 0, "")), columns[c][i].members if p[1] == "value" else columns[c][i].of)
@@ -1590,11 +1603,14 @@ def subset_cells(files, cells):
 
 def closure(files, columns, min_cell, scope, total, escalated):
     """The quantities, the primary suppression and the closure (close): cells, size, hidden, and a function that
-    closes hidden again. A quantity is (column, set or own id, can be suppressed, in the scope); escalated columns
-    are suppressed as with SUPPRESS_ALL"""
-    original = (lambda r, f: True) if scope == SUPPRESS_ALL else is_diagnosis_cell
-    cells, size = quantities(columns, COUNT, lambda c, r, f: original(r, f) or c in escalated, original)
+    closes hidden again. A quantity is (column, set or own id, can be suppressed, in the scope); only cells of the
+    scope can be suppressed. With SUPPRESS_CODES every code cell of the escalated columns is suppressed (the whole
+    block); with SUPPRESS_ALL every cell is in the scope already, and an escalation only starts the closure again"""
+    original = in_scope(scope)
+    cells, size = quantities(columns, COUNT, lambda c, r, f: original(r, f), original)
     hidden = {q for q in cells.values() if q[2] and q[0][1] != TOTAL and 0 < size[q] < min_cell}
+    if scope == SUPPRESS_CODES:
+        hidden |= {q for q in cells.values() if q[2] and q[0] in escalated}
     groups = Groups()
     sums = [((tag, TOTAL), [(tag, e) for e in entities if e != TOTAL]) for tag, entities in files.items()]
     column_sums(columns, cells, sums, groups)
@@ -1614,7 +1630,7 @@ def closure(files, columns, min_cell, scope, total, escalated):
     def close_again():
         close(groups, cells, size, hidden, rank=lambda q: (q[0][1] == TOTAL, q[0][0] == total),
               zero_rank=lambda q: row_total.get(q, 0) == 0, protected=protected,
-              zero_fallback=scope == SUPPRESS_DIAGNOSES, subsets=subsets)
+              zero_fallback=scope == SUPPRESS_CODES, subsets=subsets)
         return hidden
 
     return cells, size, close_again(), close_again, protected
@@ -1628,7 +1644,7 @@ def protect(files, min_cell, scope=SUPPRESS_ALL, total=None, extend=True):
     escalated columns
     """
     columns = {(tag, e): rows for tag, entities in files.items() for e, rows in entities.items()}
-    relations_ = cell_relations(files, columns, total)
+    relations_ = cell_relations(files, columns, total, None if scope == SUPPRESS_ALL else in_scope(scope))
     near = {}
     for lhs, rhs in relations_:
         for k in lhs + rhs:
@@ -1652,16 +1668,16 @@ def protect(files, min_cell, scope=SUPPRESS_ALL, total=None, extend=True):
         # the counts that follow even with every cell that can be suppressed suppressed: escalate their columns
         scope_q = {q for q in cells.values() if q[2]}
         fixed, pinned = derivable_cells(relations_, cells, size, scope_q, targets(), subsets, rules=rules)
-        more = escalation(fixed, files, columns, escalated)
+        more = escalation(fixed, files, columns, escalated, single=scope == SUPPRESS_CODES)
         if more:
             escalated |= more
             restart = True
             continue
         cost = lambda k: (not cells[k][3], size[cells[k]] == 0, cells[k][0][1] == TOTAL, cells[k][0][0] == total,
                           size[cells[k]], cell_order(k))
-        # a zero only where the scope suppresses zeros anyway (diagnoses: the closure does)
+        # a zero only where the scope suppresses zeros anyway (codes: the closure does)
         allowed = lambda k: (cells[k][2] and k not in pinned and cells[k] not in protected
-                             and (size[cells[k]] > 0 or (scope == SUPPRESS_DIAGNOSES and cells[k][3])))
+                             and (size[cells[k]] > 0 or (scope == SUPPRESS_CODES and cells[k][3])))
         tried = {}
         while True:
             unprotected, zero = derivable_cells(relations_, cells, size, hidden, targets(), subsets, rules=rules)
@@ -1674,7 +1690,8 @@ def protect(files, min_cell, scope=SUPPRESS_ALL, total=None, extend=True):
                     continue
                 n = tried[t] = tried.get(t, 0) + 1
                 if n > STUCK_ROUNDS:
-                    more = escalation([t], files, columns, escalated, every_file=True)
+                    more = escalation([t], files, columns, escalated, every_file=scope == SUPPRESS_ALL,
+                                      single=scope == SUPPRESS_CODES)
                     if more:
                         escalated |= more
                         restart = True
@@ -1682,7 +1699,7 @@ def protect(files, min_cell, scope=SUPPRESS_ALL, total=None, extend=True):
                 candidates.sort(key=cost)
                 added.update(cells[k] for k in candidates[:1 if n <= 3 else 4 if n <= 6 else 16 if n <= STUCK_ROUNDS else None])
             if not added and not restart:
-                more = escalation(unprotected, files, columns, escalated)
+                more = escalation(unprotected, files, columns, escalated, single=scope == SUPPRESS_CODES)
                 if more:
                     escalated |= more
                     restart = True
@@ -1693,11 +1710,14 @@ def protect(files, min_cell, scope=SUPPRESS_ALL, total=None, extend=True):
     return cells, size, hidden, unprotected, escalated
 
 
-def escalation(cells_, files, columns, escalated, every_file=False):
-    """The columns to suppress as with SUPPRESS_ALL for counts that follow: the cell's column and Gesamt of its file,
-    where these are escalated already (or every_file) the LE and Gesamt in every file, then all columns"""
+def escalation(cells_, files, columns, escalated, every_file=False, single=False):
+    """The columns to escalate for counts that follow (with SUPPRESS_CODES their whole code block is suppressed):
+    with single first the cell's column alone, then with Gesamt of its file, where these are escalated already (or
+    every_file) the LE and Gesamt in every file, then all columns"""
     more = set()
-    if not every_file:
+    if single and not every_file:
+        more = {c for (c, _, _) in cells_} - escalated
+    if not every_file and not more:
         for (c, _, _) in cells_:
             more.update([c, (c[0], TOTAL)])
         more -= escalated
@@ -1847,19 +1867,20 @@ def suppressed_files(files, min_cell, scope=SUPPRESS_ALL, total=None, extend=Tru
     Gesamt the sum of the LEs). total: the tag of the file whose every column is the sum of the same column of the
     other files, row by row (the total matrix and the matrices per quarter of its period), else None. Returns
     {tag: (cells, size, hidden, unprotected, escalated)}, cells keyed by (entity, row index, field) of that file,
-    unprotected the cells that still follow (see protect), escalated the entities suppressed as with SUPPRESS_ALL.
+    unprotected the cells that still follow (see protect), escalated the entities (LEs and Gesamt) of that file whose
+    whole scope block is suppressed.
     """
     cells, size, hidden, unprotected, escalated = protect(files, min_cell, scope, total, extend)
     unprotected = set(unprotected)
     return {tag: ({(c[1], i, f): q for (c, i, f), q in cells.items() if c[0] == tag}, size, hidden,
                   {(c[1], i, f) for (c, i, f) in unprotected if c[0] == tag},
-                  {c[1] for c in escalated if c[0] == tag and c[1] != TOTAL})
+                  {c[1] for c in escalated if c[0] == tag})
             for tag in files}
 
 
 def suppressed_quantities(entities, min_cell, scope=SUPPRESS_ALL, extend=True):
     """The quantity of each count cell, the sizes, the quantities to suppress, the cells of suppressed counts that
-    still follow and the escalated entities (suppressed_files)"""
+    still follow and the entities whose whole scope block is suppressed (suppressed_files)"""
     return suppressed_files({None: entities}, min_cell, scope, extend=extend)[None]
 
 
@@ -1904,6 +1925,13 @@ GESAMT_NOTE = ("Gesamt nur, wenn die Zahl allein von einer LE stammt, und dann e
 HEAD_NOTE = ("eine Zahl, die andere enthält (eine Erkrankungsgruppe, der Diagnosestatus Diagnose), kann {hidden} zeigen, "
              "während Zahlen in ihr (die Statuszeilen der Gruppe, Diagnose je Erkrankungsgruppe) zweistellig sind; "
              "{hidden} heißt dann nur, dass die Zahl nicht gezeigt wird.")
+CODE_RELATIONS_NOTE = ("eine Erkrankungsgruppe gegen ihre Statuszeilen, Adult + Pädiatrisch = gesamt, die Statuszeilen "
+                       "über die Gruppen gegen den exakt gezeigten Diagnosestatus (gesamt und je Altersblock), 'ohne "
+                       "Orphacode' gegen die Gruppe 'unbekannt: kein Orphacode', 'Diagnose ohne Erkrankungsgruppe' gegen "
+                       "die unbekannten Gruppen")
+CODE_HEAD_NOTE = ("eine Zahl, die andere enthält (eine Erkrankungsgruppe gesamt), kann {hidden} zeigen, während Zahlen in "
+                  "ihr (die Statuszeilen der Gruppe, die Gruppe in Adult oder Pädiatrisch) zweistellig sind; {hidden} "
+                  "heißt dann nur, dass die Zahl nicht gezeigt wird.")
 
 
 def suppression_note(min_cell, scope, primary, complementary):
@@ -1920,31 +1948,40 @@ def suppression_note(min_cell, scope, primary, complementary):
                 f"berechenbar ist; {GESAMT_NOTE} "
                 f"({complementary} Zellen zusätzlich zu {primary}). Eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr "
                 f"Fälle zählen, auch weit mehr: {HEAD_NOTE.format(hidden=f'<{min_cell}')}")
-    return (f"Unterdrückt werden nur die Diagnosezeilen: die Abschnitte {', '.join(DIAGNOSIS_SECTIONS)} und die Zeile "
-            + ", ".join(f"{s}: {i}" for s, i in DIAGNOSIS_ITEMS) + ". "
-            f"Dort sind in den Spalten der LEs Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso "
-            f"Bezugszahlen unter {min_cell} (außer {', '.join(EXACT_DIAGNOSIS_BASES)}) und die Anteile dazu (nicht in den "
-            f"Rückfragen); Gesamt (Summe über alle LEs) wird gezeigt. Ergänzend unterdrückt, ebenfalls als <{min_cell}: "
-            f"in jeder Zeile über die LEs und Gesamt und in jeder Summenbeziehung einer Spalte ({RELATIONS_NOTE}; die Summe "
-            "kann exakt gezeigt sein, z. B. die sequenzierten Fälle), in der sonst genau eine Zelle unterdrückt wäre, "
-            "die kleinste weitere Diagnosezelle einer LE über 0, sonst eine 0, bis keine unterdrückte Zahl als Differenz "
-            f"berechenbar ist; {GESAMT_NOTE} ({complementary} Zellen zusätzlich zu {primary}). Eine Zelle <{min_cell} "
-            f"kann daher auch 0 oder {min_cell} und mehr Fälle zählen, auch weit mehr: {HEAD_NOTE.format(hidden=f'<{min_cell}')} Alle anderen Zahlen, "
-            f"Anteile und Bearbeitungsdauern sind exakt angegeben, auch Fallzahlen unter {min_cell}.")
+    hidden = f"<{min_cell}"
+    return (f"Unterdrückt werden nur die Zeilen aus den Diagnosecodes, die zeigen, welche Erkrankung ein Fall hat: die "
+            f"Abschnitte {', '.join(CODE_SECTIONS)} (mit den Statuszeilen der Gruppen) und die Zeile "
+            + ", ".join(f"{s}: {i}" for s, i in CODE_ITEMS) + ". "
+            f"Dort sind in den Spalten der LEs Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt ({hidden}), ebenso "
+            f"Bezugszahlen unter {min_cell} (außer {', '.join(EXACT_CODE_BASES)}) und die Anteile dazu (nicht in den "
+            f"Rückfragen); Gesamt (Summe über alle LEs) wird gezeigt. Ergänzend unterdrückt, ebenfalls als {hidden} und "
+            f"nur in diesen Zeilen: in jeder Zeile über die LEs und Gesamt und in jeder Summenbeziehung einer Spalte "
+            f"({CODE_RELATIONS_NOTE}; die Summe kann exakt gezeigt sein, z. B. die Fälle oder der Diagnosestatus), in der "
+            "sonst genau eine Zelle unterdrückt wäre, die kleinste weitere Codezelle einer LE über 0, sonst eine 0, bis "
+            f"keine unterdrückte Zahl als Differenz berechenbar ist; {GESAMT_NOTE} ({complementary} Zellen zusätzlich zu "
+            f"{primary}). Eine Zelle {hidden} kann daher auch 0 oder {min_cell} und mehr Fälle zählen, auch weit mehr: "
+            f"{CODE_HEAD_NOTE.format(hidden=hidden)} Alle anderen Zahlen sind exakt angegeben, auch unter {min_cell}: "
+            "auch Diagnosestatus, Diagnoserate (auch nach WGS-Seq. Art), Diagnosestatus nach Altersgruppe und die "
+            "Vorbefunde je Status (sie zeigen, ob ein Fall eine Diagnose hat, nicht welche), alle Anteile und "
+            "Bearbeitungsdauern.")
 
 
-def protection_note(min_cell, scope, escalated, beyond):
-    """The note on the check of the whole system (protect), for the sheet Hinweise"""
+def protection_note(min_cell, scope, escalated):
+    """The note on the check of the whole system (protect), for the sheet Hinweise; escalated: the entities of the
+    file whose whole code block is suppressed (SUPPRESS_CODES)"""
     if min_cell <= 1:
         return ""
     note = (" Geprüft am ganzen linearen Gleichungssystem aller gezeigten Summenbeziehungen (auch mehrere zusammen, "
-            "mit den Nullen, die sich daraus ergeben) und, wo nötig, weitere Zellen unterdrückt: keine unterdrückte "
+            "mit den Nullen, die sich daraus ergeben) und, wo nötig, weitere Zellen unterdrückt"
+            + (", nur in den Codezeilen" if scope == SUPPRESS_CODES else "") + ": keine unterdrückte "
             f"Zahl von 1 bis {min_cell - 1} ist aus den gezeigten Zahlen exakt berechenbar (Schranken sind möglich, "
             "da alle Zahlen ≥ 0 sind).")
-    if scope == SUPPRESS_DIAGNOSES and escalated:
-        note += (f" In {escalated} LE-Spalten bestimmten die exakt gezeigten Zahlen außerhalb der Diagnosezeilen eine "
-                 "unterdrückte Diagnosezelle; dort ist wie mit --suppress-scope all in allen Zeilen unterdrückt "
-                 f"({beyond} Zellen außerhalb der Diagnosezeilen).")
+    if escalated:
+        les = sum(1 for e in escalated if e != TOTAL)
+        which = " und ".join(([f"{les} LE-Spalten" if les != 1 else "1 LE-Spalte"] if les else [])
+                             + (["der Spalte Gesamt"] if TOTAL in escalated else []))
+        note += (f" In {which} ließ sich das nicht mit einzelnen Zellen erreichen; dort sind alle Codezeilen "
+                 "unterdrückt (auch die Nullen), alle anderen Zeilen bleiben exakt.")
     return note
 
 
@@ -1958,7 +1995,7 @@ def small(n, min_cell):
 # ---------------------------------------------------------------------------------------------
 
 def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medical_days=14,
-        suppress_scope=SUPPRESS_DIAGNOSES, follow_up_months=FU_MONTHS):
+        suppress_scope=SUPPRESS_CODES, follow_up_months=FU_MONTHS):
     """The matrix of the cases with initial submission in [start, end) (None: open), suppressed (protect);
     result["derivable"]: the suppressed counts that still follow (then nothing may be written, see main)"""
     ev = evaluate(rows, failures, heads, start, end, reference_date, min_medical_days, suppress_scope, follow_up_months)
@@ -1966,7 +2003,7 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
 
 
 def run_joint(rows, failures, heads, periods, reference_date, min_cell=5, min_medical_days=14,
-              suppress_scope=SUPPRESS_DIAGNOSES, follow_up_months=FU_MONTHS, start=None, end=None):
+              suppress_scope=SUPPRESS_CODES, follow_up_months=FU_MONTHS, start=None, end=None):
     """
     The total matrix over [start, end) and one matrix per period (start, end) of periods, suppressed together:
     besides the relations within each matrix, every cell of the total matrix is the sum of the same cell of the
@@ -1993,7 +2030,7 @@ def run_joint(rows, failures, heads, periods, reference_date, min_cell=5, min_me
              for i, p in enumerate(parts)])
 
 
-def evaluate(rows, failures, heads, start, end, reference_date, min_medical_days=14, suppress_scope=SUPPRESS_DIAGNOSES,
+def evaluate(rows, failures, heads, start, end, reference_date, min_medical_days=14, suppress_scope=SUPPRESS_CODES,
              follow_up_months=FU_MONTHS):
     """The rows of every LE and Gesamt (entities) and what the notes need, before the suppression"""
     if suppress_scope not in SUPPRESS_SCOPES:
@@ -2077,22 +2114,22 @@ def render(ev, cells, size, hidden, unprotected, escalated, min_cell, joint_note
     """The result (JSON) of an evaluation with the suppressed quantities; unprotected: the cells (entity, row index,
     field) of suppressed counts of 1 to min_cell - 1 that still follow from the shown numbers (protect), as
     result["derivable"] (entity, section, item, field), which write_json and write_csv leave out (with any of them
-    nothing may be written, see main); escalated: the LEs whose column is suppressed as with SUPPRESS_ALL"""
+    nothing may be written, see main); escalated: the entities whose whole scope block is suppressed (protect)"""
     entities, suppress_scope, reference_date = ev.entities, ev.suppress_scope, ev.reference_date
     les, submitters, tests, period, start, end, heads = ev.les, ev.submitters, ev.tests, ev.period, ev.start, ev.end, ev.heads
     min_medical_days, follow_up_months, problems = ev.min_medical_days, ev.follow_up_months, ev.problems
     reasons_exported, unmapped_heads = ev.reasons_exported, ev.unmapped_heads
     primary = sum(1 for q in cells.values() if q in hidden and 0 < size[q] < min_cell)
     complementary = sum(1 for q in cells.values() if q in hidden) - primary
-    beyond = sum(1 for q in cells.values() if q in hidden and not q[3])     # outside the scope (escalated columns)
+    if any(q in hidden and not q[3] for q in cells.values()):
+        raise AssertionError("render: a suppressed cell outside the scope")     # protect never suppresses one
     template_rows = entities[TOTAL]
     result_rows = []
     for i, r in enumerate(template_rows):
         values = {}
         for name, entity_rows in entities.items():
-            if r.unit == VALUE:     # the durations aren't diagnosis rows
-                hide_value = (suppress_scope == SUPPRESS_ALL or name in escalated or (escalated and name == TOTAL)) \
-                    and hidden_statistic(entities, name, i, min_cell)
+            if r.unit == VALUE:     # the durations aren't code rows: suppressed with SUPPRESS_ALL only
+                hide_value = suppress_scope == SUPPRESS_ALL and hidden_statistic(entities, name, i, min_cell)
             else:
                 hide_value = cells.get((name, i, "value")) in hidden
             n, base, pct = suppressed(entity_rows[i], min_cell, hide_value, cells.get((name, i, "base")) in hidden)
@@ -2107,7 +2144,7 @@ def render(ev, cells, size, hidden, unprotected, escalated, min_cell, joint_note
         "letzten Nicht-Test-Einreichung; Spezifikation: docs/rd-evaluation-matrix.txt.",
         f"{tests} Testeinreichungen verworfen.",
         suppression_note(min_cell, suppress_scope, primary, complementary) + (f" {joint_note}" if joint_note else "")
-        + protection_note(min_cell, suppress_scope, len(escalated), beyond),
+        + protection_note(min_cell, suppress_scope, escalated if suppress_scope == SUPPRESS_CODES else ()),
         "Diagnosestatus 'offen': Undiagnostiziert und noch keine Fallkonferenz nach dem Indikationsboard (GFK2); "
         "die Diagnoserate bezieht sich auf die abgeschlossenen Fälle. 'Undiagnostiziert' zählt daher nur Fälle mit GFK2: "
         "alle Fälle mit noGeneticDiagnosis sind Undiagnostiziert + offen; LEs mit unterschiedlichem Anteil offener Fälle "
@@ -2146,7 +2183,8 @@ def render(ev, cells, size, hidden, unprotected, escalated, min_cell, joint_note
         "period": period,
         "min_cell": min_cell,
         "suppress_scope": suppress_scope,
-        "suppressed": {"primary": primary, "complementary": complementary, "beyond_scope": beyond},
+        "suppressed": {"primary": primary, "complementary": complementary,
+                       "whole_blocks": len(escalated) if suppress_scope == SUPPRESS_CODES else 0},
         "derivable": sorted((e, template_rows[i].section, template_rows[i].item, f) for e, i, f in unprotected),
         "entities": [TOTAL] + les,
         "labels": {TOTAL: TOTAL, **labels},
@@ -2258,9 +2296,9 @@ def main(argv=None):
                         help="date the research consents are additionally evaluated at (default: today)")
     parser.add_argument("--min-cell", type=int, default=5,
                         help="counts below are suppressed, 1 disables (default: %(default)s)")
-    parser.add_argument("--suppress-scope", choices=SUPPRESS_SCOPES, default=SUPPRESS_DIAGNOSES,
-                        help="suppress small counts only in the diagnosis rows (DIAGNOSIS_SECTIONS), all other numbers "
-                             "exact, or in all rows (default: %(default)s)")
+    parser.add_argument("--suppress-scope", type=scope_argument, choices=SUPPRESS_SCOPES, default=SUPPRESS_CODES,
+                        help="suppress small counts only in the rows derived from the diagnosis codes (CODE_SECTIONS), "
+                             "all other numbers exact, or in all rows (default: %(default)s)")
     parser.add_argument("--min-medical-days", type=int, default=14,
                         help="shorter GFK1-GFK2 durations are listed for clarification (default: %(default)s)")
     parser.add_argument("--follow-up-months", type=int, default=FU_MONTHS,

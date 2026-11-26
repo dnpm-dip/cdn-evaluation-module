@@ -1011,54 +1011,42 @@ class InputOutputTests(unittest.TestCase):
 PREVIOUS = "647f21b"    # the last commit before --suppress-scope: its output equals that of --suppress-scope all
 
 
-class DiagnosisScopeTests(unittest.TestCase):
-    """--suppress-scope diagnoses: only the diagnosis blocks are suppressed, all other numbers are exact"""
+class CodeScopeTests(unittest.TestCase):
+    """--suppress-scope codes (default): only the rows derived from the diagnosis codes are suppressed, as in the
+    matrix; the time series has no such block, so every number is exact, also the diagnosis status and rate"""
 
-    def test_the_diagnosis_blocks_are_those_of_the_matrix(self):
-        self.assertTrue(ts.is_diagnosis_line(ts.Line(ts.B_STATUS, rdm.DIAGNOSED)))
-        self.assertTrue(ts.is_diagnosis_line(ts.Line(ts.B_RATE, rdm.DIAGNOSED)))
-        self.assertFalse(ts.is_diagnosis_line(ts.Line(ts.B_SEX, "m")))
-        result = run(synthetic(), min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-        self.assertEqual({r["block"] for r in result["rows"] if ts.is_diagnosis_line(SimpleNamespace(
-            block=r["block"], item=r["item"]))}, {ts.B_STATUS, ts.B_RATE})
-        self.assertEqual(result["suppress_scope"], rdm.SUPPRESS_DIAGNOSES)
+    def test_the_time_series_has_no_code_block(self):
+        self.assertFalse(ts.is_code_line(ts.Line(ts.B_STATUS, rdm.DIAGNOSED)))
+        self.assertFalse(ts.is_code_line(ts.Line(ts.B_RATE, rdm.DIAGNOSED)))
+        self.assertTrue(ts.is_code_line(ts.Line("Orphacode", "Erkr. ohne Orphacode (keine Orphanet-Kodierung)")))
+        self.assertTrue(ts.is_code_line(ts.Line(rdm.DISEASE_GROUP_BLOCKS[0], rdm.NEUROMUSCULAR)))
+        result = run(synthetic(), min_cell=5, scope=rdm.SUPPRESS_CODES)
+        self.assertEqual([r for r in result["rows"] if ts.is_code_line(SimpleNamespace(block=r["block"], item=r["item"]))], [])
+        self.assertEqual(result["suppress_scope"], rdm.SUPPRESS_CODES)
 
-    def test_non_diagnosis_cells_exact_and_no_period_follows_from_the_others(self):
+    def test_every_cell_exact_also_the_diagnosis_status(self):
         for rows in (synthetic(), synthetic(seed=14, sizes=(("LE-A", 6), ("LE-B", 3)))):
             full = run(rows, resolution=ts.QUARTER)
-            result = run(rows, min_cell=5, resolution=ts.QUARTER, scope=rdm.SUPPRESS_DIAGNOSES)
-            hidden = 0
+            result = run(rows, min_cell=5, resolution=ts.QUARTER, scope=rdm.SUPPRESS_CODES)
             fields = ("value", "base", "percent", "median", "q1", "q3", "n")
-            for r, f in zip(result["rows"], full["rows"]):
-                diagnosis = r["block"] in (ts.B_STATUS, ts.B_RATE)
-                if not diagnosis or r["base_label"] in rdm.EXACT_DIAGNOSIS_BASES:
-                    self.assertEqual(r["base"], f["base"], (r["block"], r["item"]))
-                if diagnosis:
-                    hidden += sum(r[x] in ("<5", None) and f[x] is not None for x in ("value", "base"))
-                else:
-                    self.assertEqual({x: r[x] for x in fields}, {x: f[x] for x in fields}, (r["block"], r["item"]))
-            self.assertGreater(hidden, 0)
-            # per LE and diagnosis figure, never exactly one period suppressed
-            figures = {}
-            for r, f in zip(result["rows"], full["rows"]):
-                if r["block"] in (ts.B_STATUS, ts.B_RATE) and f["value"] is not None:
-                    figures.setdefault((r["le"], r["block"], r["item"]), []).append(r["value"] in ("<5", None))
-            self.assertEqual([k for k, v in figures.items() if sum(v) == 1], [])
+            self.assertEqual([{x: r[x] for x in fields} for r in result["rows"]], [{x: f[x] for x in fields} for f in full["rows"]])
+            self.assertTrue(any(isinstance(r["value"], int) and 0 < r["value"] < 5 for r in result["rows"] if r["block"] == ts.B_STATUS))
 
-    def test_small_counts_outside_the_diagnosis_blocks_are_shown(self):
+    def test_small_counts_are_shown_and_old_scopes_refused(self):
         result = cases(*[datenkranz(f"t{i}", gender="male" if i < 2 else "female",
                                     assessment="noGeneticDiagnosis" if i < 2 else "confirmedGeneticDiagnosis")
-                         for i in range(7)], min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
+                         for i in range(7)], min_cell=5, scope=rdm.SUPPRESS_CODES)
         self.assertEqual(get(result, ts.B_SEX, "m"), 2)
-        self.assertEqual(get(result, ts.B_STATUS, rdm.UNDIAGNOSED), "<5")
+        self.assertEqual(get(result, ts.B_STATUS, rdm.UNDIAGNOSED), 2)
         self.assertEqual(get(result, ts.B_STATUS, rdm.UNDIAGNOSED, field="base"), 7)
         self.assertTrue(result["notes"][0].startswith("7 Fälle"))
-        few = cases(datenkranz("t1"), datenkranz("t2"), min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-        self.assertEqual(get(few, ts.B_CASES, ts.CASES), 2)
-        self.assertIsNone(get(few, ts.B_STATUS, rdm.DIAGNOSED))       # a count within 2 cases is left out
-        self.assertEqual(get(few, ts.B_STATUS, rdm.DIAGNOSED, field="base"), 2)
-        with self.assertRaises(ValueError):
-            run([], scope="none")
+        self.assertTrue(any("die Zeitreihe hat keine solche Zeile" in n for n in result["notes"]))
+        for scope in ("none", "diagnoses"):
+            with self.assertRaises(ValueError):
+                run([], scope=scope)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as err:
+            ts.main(["missing.json", "--suppress-scope", "diagnoses"])
+        self.assertIn("replaced by 'codes'", err.getvalue())
 
     def test_scope_all_is_unchanged(self):
         # the previous version of the script (before --suppress-scope), from the git history

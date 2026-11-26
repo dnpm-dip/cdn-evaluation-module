@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from datetime import date
+from types import SimpleNamespace
 from io import StringIO
 from unittest import mock
 
@@ -89,12 +90,20 @@ class RunTests(unittest.TestCase):
         # the total covers exactly the quarters
         self.assertEqual(results["rd_gesamt"]["period"], "01.10.2025 - 30.06.2026")
         self.assertTrue(any("Gemeinsam unterdrückt" in n for n in results["rd_gesamt"]["notes"]))
-        # the default scope; with one LE of five cases its exact rows give the diagnoses away, so its columns are
-        # suppressed as with --suppress-scope all (and the case counts with them), which the notes say
+        # the default scope codes: only the rows derived from the diagnosis codes are suppressed, the case counts and
+        # the diagnosis status of the only LE are exact
         q4 = self.run_rd(dates)["rd_2025-Q4"]
-        self.assertEqual(q4["suppress_scope"], "diagnoses")
-        self.assertEqual(q4["derivable"] if "derivable" in q4 else [], [])
-        self.assertTrue(any("wie mit --suppress-scope all" in n for n in q4["notes"]))
+        self.assertEqual(q4["suppress_scope"], "codes")
+        self.assertNotIn("derivable", q4)
+        self.assertEqual(rdt.get(q4, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "LE-A"), 2)
+        self.assertEqual(rdt.get(q4, "Diagnosestatus (alle Fälle)", rd.DIAGNOSED, "LE-A"), 2)
+        # (no --orphanet: no disease groups; the Orphacode rows are 0, so nothing is suppressed at all)
+        hidden = {(r["section"], r["item"]) for r in q4["rows"] for v in r["values"].values() if "<5" in (v["value"], v["base"])}
+        self.assertEqual({k for k in hidden if not rd.is_code_row(SimpleNamespace(section=k[0], item=k[1]))}, set())
+        # the former scope is refused with a hint
+        with self.assertRaises(SystemExit), redirect_stderr(StringIO()) as err:
+            mm.main(["missing.json", "--suppress-scope", "diagnoses"])
+        self.assertIn("replaced by 'codes'", err.getvalue())
 
     def test_rd_only_per_quarter_and_the_period_range(self):
         # RD (SE) matrices only per quarter: --period month is refused for rd and both, before anything is read
@@ -109,9 +118,8 @@ class RunTests(unittest.TestCase):
         self.assertEqual(results["rd_2026-Q2"]["suppress_scope"], "all")
         # all rows: the case count of the only LE is suppressed, and Gesamt with it (it is that LE's count)
         self.assertEqual(results["rd_2026-Q2"]["rows"][0]["values"]["Gesamt"]["value"], "<5")
-        # a single case in the default scope: its exact rows would give its diagnosis away, so also there the case
-        # count (of the LE and so of Gesamt) is suppressed
-        self.assertEqual(self.run_rd(["2026-05-01"])["rd_2026-Q2"]["rows"][0]["values"]["Gesamt"]["value"], "<5")
+        # a single case in the default scope: its case count is exact, only its code rows are suppressed
+        self.assertEqual(self.run_rd(["2026-05-01"])["rd_2026-Q2"]["rows"][0]["values"]["Gesamt"]["value"], 1)
 
     def test_follow_up_rows_and_interval(self):
         prefix = "Stand am Stichtag (Intervall "
@@ -170,7 +178,7 @@ def spread(rows, seed):
     return out
 
 
-def joint(rows, min_cell=5, scope=rd.SUPPRESS_DIAGNOSES):
+def joint(rows, min_cell=5, scope=rd.SUPPRESS_CODES):
     """The total and the quarterly RD matrices of one run"""
     starts = [date(2025, 10, 1), date(2026, 1, 1), date(2026, 4, 1), date(2026, 7, 1), date(2026, 10, 1)]
     ranges = [(s, mm.next_period(s, mm.QUARTER)) for s in starts]
@@ -240,24 +248,28 @@ class JointSuppressionTests(unittest.TestCase):
     def test_another_threshold_and_larger_les(self):
         for seed in range(12, 15):
             with self.subTest(seed=seed):
-                self.check(spread(rdt.varied(seed), seed), rd.SUPPRESS_DIAGNOSES, min_cell=3)
-                self.check(spread(rdt.synthetic(seed=seed), seed), rd.SUPPRESS_DIAGNOSES)
+                self.check(spread(rdt.varied(seed), seed), rd.SUPPRESS_CODES, min_cell=3)
+                self.check(spread(rdt.synthetic(seed=seed), seed), rd.SUPPRESS_CODES)
 
     def test_a_period_is_not_the_exact_total_minus_the_other_periods(self):
-        # LE B: 2 undiagnosed cases in 2025-Q4, 9 in 2026-Q1. Separately the total (11) is exact beside Q1 (9) and Q4 "<5"
-        def r(le, i, d, assessment):
-            return rd.SubmissionRow(f"{le}{i}", f"{d}T10:00:00", rdt.datenkranz(f"{le}{i}", submitted=d, assessment=assessment), le, None)
+        # LE B: 2 undiagnosed neuromuscular cases in 2025-Q4, 9 in 2026-Q1. Separately the total (11) is exact beside
+        # Q1 (9) and Q4 "<5"
+        def r(le, i, d, assessment, icd10="Q87.4"):
+            return rd.SubmissionRow(f"{le}{i}", f"{d}T10:00:00", rdt.datenkranz(f"{le}{i}", submitted=d, assessment=assessment,
+                                                                               icd10=icd10), le, None)
         rows = ([r("A", i, ["2025-11-03", "2026-02-03"][i % 2], list(rd.ASSESSMENT_STATUS)[i % 5]) for i in range(40)]
-                + [r("B", i, "2025-11-05", "noGeneticDiagnosis") for i in range(2)]
-                + [r("B", 10 + i, "2026-02-05", "noGeneticDiagnosis") for i in range(9)])
-        total, parts = self.check(rows, rd.SUPPRESS_DIAGNOSES)
-        status = "Diagnosestatus (alle Fälle)"
-        cells = [rdt.get(x, status, rd.UNDIAGNOSED, "B") for x in [total] + parts[:2]]
+                + [r("B", i, "2025-11-05", "noGeneticDiagnosis", "G71.0") for i in range(2)]
+                + [r("B", 10 + i, "2026-02-05", "noGeneticDiagnosis", "G71.0") for i in range(9)])
+        total, parts = self.check(rows, rd.SUPPRESS_CODES)
+        block, item = "Erkrankungsgruppen gesamt", f"{rd.NEUROMUSCULAR}: {rd.UNDIAGNOSED}"
+        cells = [rdt.get(x, block, item, "B") for x in [total] + parts[:2]]
         self.assertEqual(cells[1], "<5")
         self.assertGreaterEqual(cells.count("<5"), 2, cells)
+        # the diagnosis status is exact (2 in Q4)
+        self.assertEqual(rdt.get(parts[0], "Diagnosestatus (alle Fälle)", rd.UNDIAGNOSED, "B"), 2)
         # separately suppressed, the total of B would show 11 beside Q1's 9: Q4 = 2
         alone = rd.run(rows, [], rdt.HEADS, date(2025, 10, 1), date(2026, 4, 1), date(2026, 11, 24), 5)
-        self.assertEqual(rdt.get(alone, status, rd.UNDIAGNOSED, "B"), 11)
+        self.assertEqual(rdt.get(alone, block, item, "B"), 11)
 
 
 class OutputTests(unittest.TestCase):
@@ -360,19 +372,28 @@ class JointProtectionTests(unittest.TestCase):
         self.assertLessEqual(self.independent(results, fulls), self.reported(results))
         self.closed(*self.files(rows, rd.SUPPRESS_ALL))
 
-    def test_open_cases_known_to_be_zero_no_longer_give_the_closed_cases_away(self):
-        # review (Codex 1b): one LE, three undiagnosed cases with GFK2 in each of two quarters: "noch keine GFK2" is
-        # exact and 0, so the open cases are 0 and the closed cases (3) were the exact sequenced cases
+    def test_one_small_le_per_quarter_stays_within_the_code_rows(self):
+        # one LE, three undiagnosed cases with GFK2 in each of two quarters (review, Codex 1b, for the former scope):
+        # the status rows are exact now; the code rows of A and Gesamt (the same numbers) are protected within the code
+        # rows, if need be as a whole block, and every other row stays exact
         ranges = [(date(2026, 1, 1), date(2026, 4, 1)), (date(2026, 4, 1), date(2026, 7, 1))]
         rows = self.quarters([(3,), (3,)], "noGeneticDiagnosis")
-        results, _ = self.files(rows, rd.SUPPRESS_DIAGNOSES, ranges, extend=False)
-        self.assertIn((1, "A", "Diagnoserate (abgeschlossene Fälle)", rd.DIAGNOSED, "base"), self.reported(results))
-        results, fulls = self.files(rows, rd.SUPPRESS_DIAGNOSES, ranges)
+        results, fulls = self.files(rows, rd.SUPPRESS_CODES, ranges)
         self.closed(results, fulls)
-        # the exact rows alone gave it away: the column is suppressed as with --suppress-scope all, and says so
-        self.assertGreater(results[1]["suppressed"]["beyond_scope"], 0)
-        self.assertEqual(rdt.get(results[1], "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "A"), "<5")
-        self.assertTrue(any("wie mit --suppress-scope all" in n for n in results[1]["notes"]))
+        self.only_code_rows(results, fulls)
+        self.assertEqual(rdt.get(results[1], "Diagnoserate (abgeschlossene Fälle)", rd.UNDIAGNOSED, "A"), 3)
+        self.assertEqual(rdt.get(results[1], "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "A"), 3)
+
+    def only_code_rows(self, results, fulls):
+        """Every suppressed cell is a code cell, every other one exact"""
+        for result, full in zip(results, fulls):
+            for r, f in zip(result["rows"], full["rows"]):
+                for e in result["entities"]:
+                    if not rdt.code_row(r):
+                        self.assertEqual(r["values"][e], f["values"][e], (r["key"], e))
+                    for field in ("value", "base"):
+                        if r["values"][e][field] == f"<{result['min_cell']}":
+                            self.assertTrue(rdt.code_cell(r, field), (r["key"], e, field))
 
     def test_seven_cases_at_two_les(self):
         rows = rdt.synthetic(seed=0, sizes=(("A", 2), ("B", 5)))
@@ -380,10 +401,14 @@ class JointProtectionTests(unittest.TestCase):
         for r in rows:
             r.content["metaData"]["submission"]["date"] = f"{rnd.choice(['2025-11', '2025-12', '2026-02', '2026-05'])}-0{rnd.randint(1, 9)}"
         ranges = [(s, mm.next_period(s, mm.QUARTER)) for s in (date(2025, 10, 1), date(2026, 1, 1), date(2026, 4, 1))]
-        results, fulls = self.files(rows, rd.SUPPRESS_DIAGNOSES, ranges, extend=False)
-        self.assertTrue(self.reported(results))
-        self.assertLessEqual(self.independent(results, fulls), self.reported(results))
-        self.closed(*self.files(rows, rd.SUPPRESS_DIAGNOSES, ranges))
+        for scope in rd.SUPPRESS_SCOPES:
+            with self.subTest(scope=scope):
+                results, fulls = self.files(rows, scope, ranges, extend=False)
+                self.assertLessEqual(self.independent(results, fulls), self.reported(results))
+                results, fulls = self.files(rows, scope, ranges)
+                self.closed(results, fulls)
+                if scope == rd.SUPPRESS_CODES:
+                    self.only_code_rows(results, fulls)
 
     def test_random_sets_end_with_no_computable_cell(self):
         sets = [(f"varied {seed}", spread(rdt.varied(seed), seed)) for seed in range(6)]
@@ -395,6 +420,8 @@ class JointProtectionTests(unittest.TestCase):
                     total, parts = joint(rows, scope=scope)
                     full_total, full_parts = joint(rows, min_cell=1, scope=scope)
                     self.closed([total] + parts, [full_total] + full_parts)
+                    if scope == rd.SUPPRESS_CODES:
+                        self.only_code_rows([total] + parts, [full_total] + full_parts)
 
     def test_a_forced_computable_cell_blocks_the_output(self):
         entries = [{"case": r.case, "submittedAt": r.submitted_at, "content": r.content, "site": r.site}

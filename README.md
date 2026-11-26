@@ -147,7 +147,8 @@ together (`run_joint`, used by `monthly_matrices.py`): each cell of the total is
 of the periods (per LE and Gesamt), so that no period follows from the total and the other periods by a single
 relation (tested in `scripts/monthly_matrices`, `JointSuppressionTests`). The losses that have no date (submissions
 that couldn't be converted, episodes without a readable initial submission) are counted in every matrix of a run
-and are equal there, not added up (`NOT_ADDITIVE`). Separate runs are each closed on their own but not together.
+and are equal there, not added up (`NOT_ADDITIVE`). Separate runs are each closed on their own but not together. The submissions of an episode are ordered by `submittedAt` parsed as a time (time zones to UTC), as in the
+oncology matrix; the latest one gives the case's state.
 
 **Limits of the protection.** The closure closes every single relation, not systems of them: several relations,
 each with two or more suppressed cells, can together still determine a suppressed count (e.g. an LE's quarter from

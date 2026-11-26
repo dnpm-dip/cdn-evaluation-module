@@ -131,6 +131,17 @@ class CaseTests(unittest.TestCase):
         self.assertEqual([p["tan"] for p in problems(result, rdm.P_WITHOUT_INITIAL)], ["t4"])
         self.assertIn("2 Testeinreichungen verworfen.", result["notes"])
 
+    def test_latest_submission_by_parsed_submitted_at_across_time_zones(self):
+        # the follow-up is later in time (09:30 UTC) than the initial (10:00+02:00 = 08:00 UTC), but sorts first as text
+        rows = [
+            row("a", datenkranz("t1", assessment="noGeneticDiagnosis"), "2025-03-01T10:00:00+02:00"),
+            row("a", datenkranz("t2", type_="followup", submitted="2025-03-01"), "2025-03-01T09:30:00Z"),
+        ]
+        result = run(rows)
+        self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", "Diagnose"), 1)          # latest = t2
+        self.assertEqual([r.submitted_at for r in sorted([rows[1], rows[0]], key=rdm.submitted_order)],
+                         ["2025-03-01T10:00:00+02:00", "2025-03-01T09:30:00Z"])
+
     def test_period_applies_to_the_initial_submission_and_names_the_title(self):
         rows = [
             row("a", datenkranz("t1", submitted="2024-06-30")),

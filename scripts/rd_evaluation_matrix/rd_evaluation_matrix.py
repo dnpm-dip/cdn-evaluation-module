@@ -44,7 +44,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from itertools import product
 from types import SimpleNamespace
@@ -407,6 +407,18 @@ def submission_type(content):
     return submission_meta(content)["type"]
 
 
+def submitted_order(row):
+    """Sort key of a submission by submittedAt: parsed, time zones to UTC (a text sort misorders mixed offsets such
+    as "+01:00" and "Z"); a value that can't be parsed sorts after the parsed ones, by its text"""
+    try:
+        t = datetime.fromisoformat(str(row.submitted_at).replace("Z", "+00:00"))
+        if t.tzinfo is not None:
+            t = t.astimezone(timezone.utc).replace(tzinfo=None)
+        return (0, t, "")
+    except ValueError:
+        return (1, datetime.min, str(row.submitted_at))
+
+
 def submission_date(content):
     return parse_date(submission_meta(content)["date"])
 
@@ -456,8 +468,8 @@ def build_cases(rows, start=None, end=None):
 
     cases, without_initial = [], []
     for key, subs in by_key.items():
-        # stable sort: equal times keep the order of the input
-        subs = sorted(subs, key=lambda r: r.submitted_at)
+        # stable sort by the parsed submittedAt (time zones to UTC); equal times keep the order of the input
+        subs = sorted(subs, key=submitted_order)
         case = Case(key, leistungserbringer(subs[0]), [r.content for r in subs], [r.reason for r in subs])
         if not any(submission_type(s) == "initial" for s in case.submissions):
             without_initial.append((case.le, key, case.latest["metaData"].get("tanC")))

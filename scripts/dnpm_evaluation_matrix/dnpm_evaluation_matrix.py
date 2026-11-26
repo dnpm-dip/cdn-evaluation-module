@@ -15,6 +15,8 @@ Input, either
     optional "site", optional "reasonResearchConsentMissing"}, one entry per submission, for KDKs with
     their own export; cases are keyed by (site or submitterId, case).
 Only submissions with metaData.submission.diseaseType oncological or hereditary are evaluated.
+The file is read as a stream in two passes (overview, then the cases, each evaluated and dropped once its
+last submission is read), so that it may be larger than the memory; progress goes to stderr.
 
 A case is an episode with an initial submission; its state is the one of its latest non-test
 submission (submitted up to --cutoff). --from/--until select the cases by the date of their initial
@@ -41,11 +43,14 @@ Example:
 """
 
 import argparse
+import codecs
 import csv
 import json
+import os
 import re
 import statistics
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -275,45 +280,246 @@ def items(x):
     return x if isinstance(x, list) else []
 
 
-def load_submissions(path):
-    """The submissions of the input file, and the submissions the export couldn't convert"""
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+class Progress:
+    """
+    A progress line on stderr: the share of the input file read, rewritten in place on a terminal,
+    else one line per 10 %
+    """
 
-    if isinstance(data, dict) and "tables" in data:
-        tables = {t["name"]: t for t in data["tables"]}
-        if "datenkranz" not in tables:
-            raise ValueError(f"{path}: no table 'datenkranz', not a result of export-datenkranz")
+    def __init__(self, label, total, out=None):
+        self.label, self.total, self.out = label, max(total, 1), out or sys.stderr
+        self.tty = self.out.isatty()
+        self.detail, self.last, self.step = "", 0.0, -1
 
+    def update(self, done):
+        share = min(done / self.total, 1.0)
+        if self.tty:
+            now = time.monotonic()
+            if now - self.last >= 0.5:
+                self.last = now
+                self.out.write(f"\r{self.line(share)}")
+                self.out.flush()
+        elif int(share * 10) > self.step:
+            self.step = int(share * 10)
+            print(self.line(self.step / 10), file=self.out)
+
+    def line(self, share):
+        size = f"{self.total / 1e9:.1f} GB" if self.total >= 1e9 else f"{self.total / 1e6:.0f} MB"
+        return (f"{self.label}: {share * 100:3.0f} % von {size}"
+                + (f", {self.detail}" if self.detail else "") + "   ")
+
+    def finish(self):
+        if self.tty:
+            self.out.write(f"\r{self.line(1.0)}\n")
+        elif self.step < 10:
+            print(self.line(1.0), file=self.out)
+        self.out.flush()
+
+
+class JsonStream:
+    """
+    Reads a JSON document piece by piece, so that a file larger than the memory can be read: the
+    containers on the way to the values of interest are walked (object, array), the values
+    themselves decoded one at a time (value); only the current value and a chunk are in memory.
+    """
+
+    CHUNK = 1 << 22       # bytes read at a time
+    WHITESPACE = re.compile(r"[ \t\n\r]*")
+
+    def __init__(self, f, progress=None):
+        self.f, self.progress = f, progress
+        self.utf8 = codecs.getincrementaldecoder("utf-8-sig")()
+        self.decoder = json.JSONDecoder()
+        self.buf, self.pos, self.eof, self.bytes_read = "", 0, False, 0
+
+    def _fill(self, n):
+        data = self.f.read(n)
+        self.bytes_read += len(data)
+        self.eof = not data
+        self.buf = self.buf[self.pos:] + self.utf8.decode(data, final=self.eof)
+        self.pos = 0
+        if self.progress:
+            self.progress.update(self.bytes_read)
+
+    def error(self, message):
+        return ValueError(f"invalid JSON (within the first {self.bytes_read} bytes): {message}")
+
+    def peek(self):
+        """The next character after whitespace, "" at the end"""
+        while True:
+            self.pos = self.WHITESPACE.match(self.buf, self.pos).end()
+            if self.pos < len(self.buf):
+                return self.buf[self.pos]
+            if self.eof:
+                return ""
+            self._fill(self.CHUNK)
+
+    def expect(self, char):
+        if self.peek() != char:
+            raise self.error(f"'{char}' expected")
+        self.pos += 1
+
+    def value(self):
+        """The next value, decoded"""
+        self.peek()
+        while True:
+            try:
+                value, end = self.decoder.raw_decode(self.buf, self.pos)
+                # a value ending with the buffer may continue in the file (a number), unless at the end
+                if end < len(self.buf) or self.eof:
+                    self.pos = end
+                    return value
+            except json.JSONDecodeError as e:
+                if self.eof:
+                    raise self.error(e.msg) from None
+            # at least double the buffer, so that a large value is decoded a bounded number of times
+            self._fill(max(self.CHUNK, 2 * (len(self.buf) - self.pos)))
+
+    def _members(self, close):
+        if self.peek() == close:
+            self.pos += 1
+            return False
+        return True
+
+    def _next(self, close):
+        char = self.peek()
+        self.pos += 1
+        if char == close:
+            return False
+        if char != ",":
+            raise self.error(f"',' or '{close}' expected")
+        return True
+
+    def object(self):
+        """The keys of the next object; the caller reads (or walks) each value before the next key"""
+        self.expect("{")
+        more = self._members("}")
+        while more:
+            if self.peek() != '"':
+                raise self.error("object key expected")
+            key = self.value()
+            self.expect(":")
+            yield key
+            more = self._next("}")
+
+    def array(self):
+        """Once per element of the next array; the caller reads (or walks) each element"""
+        self.expect("[")
+        more = self._members("]")
+        while more:
+            yield
+            more = self._next("]")
+
+    def end(self):
+        if self.peek() != "":
+            raise self.error("extra data after the JSON document")
+
+
+REASON = "reasonResearchConsentMissing"
+
+
+class InputFile:
+    """
+    The input file, read as a stream (see JsonStream) each time rows() is iterated, so that it can be
+    read in passes: the submissions (SubmissionRow, oncology rows of the export or entries of a list) and,
+    once a pass is complete, the submissions the export couldn't convert (failures).
+    """
+
+    def __init__(self, path, progress=False):
+        self.path, self.progress = path, progress
+        self.failures = None
+        # list input: whether an entry has reasonResearchConsentMissing, known once a pass is complete; until
+        # then an entry without it gets NOT_EXPORTED, after that None if another entry has it
+        self.exported = None
+
+    def rows(self, label=None):
+        size = os.path.getsize(self.path)
+        progress = Progress(label, size) if self.progress and label else None
+        with open(self.path, "rb") as f:
+            stream = JsonStream(f, progress)
+            count = 0
+            for row in self._rows(stream):
+                count += 1
+                if progress:
+                    progress.detail = f"{count} Einreichungen"
+                yield row
+            stream.end()
+        if progress:
+            progress.finish()
+
+    def _rows(self, stream):
+        start = stream.peek()
+        if start == "{":
+            yield from self._export_rows(stream)
+        elif start == "[":
+            yield from self._list_rows(stream)
+        else:
+            raise ValueError(f"{self.path}: neither a result of export-datenkranz nor a list of submissions")
+
+    def _export_rows(self, stream):
         def key(r):
             return json.dumps([r.get("site"), r.get("patient"), r.get("episodeOfCare")])
 
-        exported = "reasonResearchConsentMissing" in (tables["datenkranz"].get("columns") or [])
-        rows = [
-            SubmissionRow(key(r), r.get("submittedAt") or "", r.get("content"), r.get("site"),
-                          r.get("reasonResearchConsentMissing") if exported else NOT_EXPORTED)
-            for r in tables["datenkranz"]["rows"] if r.get("useCase") in (None, "MTB")
-        ]
-        failures = [
-            Failure(r.get("site"), key(r), r.get("tan"), r.get("submittedAt") or "", str(r.get("error") or ""))
-            for r in tables.get("failures", {}).get("rows", []) if r.get("useCase") in (None, "MTB")
-        ]
-        return rows, failures
+        failures, tables = [], None
+        for name in stream.object():
+            if name != "tables":
+                stream.value()
+                continue
+            tables = set()
+            for _ in stream.array():
+                table, exported = None, False
+                for field in stream.object():
+                    if field == "name":
+                        table = stream.value()
+                        tables.add(table)
+                    elif field == "columns":
+                        exported = REASON in (stream.value() or [])
+                    elif field == "rows":
+                        if table is None:
+                            raise ValueError(f"{self.path}: rows of a table before its name")
+                        for _ in stream.array():
+                            r = stream.value()
+                            if table == "datenkranz" and r.get("useCase") in (None, "MTB"):
+                                yield SubmissionRow(key(r), r.get("submittedAt") or "", r.get("content"), r.get("site"),
+                                                    r.get(REASON) if exported else NOT_EXPORTED)
+                            elif table == "failures" and r.get("useCase") in (None, "MTB"):
+                                failures.append(Failure(r.get("site"), key(r), r.get("tan"), r.get("submittedAt") or "",
+                                                        str(r.get("error") or "")))
+                    else:
+                        stream.value()
+        if tables is None:
+            raise ValueError(f"{self.path}: neither a result of export-datenkranz nor a list of submissions")
+        if "datenkranz" not in tables:
+            raise ValueError(f"{self.path}: no table 'datenkranz', not a result of export-datenkranz")
+        self.failures = failures
 
-    if isinstance(data, list):
-        exported = any(isinstance(e, dict) and "reasonResearchConsentMissing" in e for e in data)
-
+    def _list_rows(self, stream):
         def key(e):
             # the LE belongs to the key: the same local case id at two LEs are two cases; sort_keys makes an
             # object key independent of the order of its fields
             le = e.get("site") or dig(e.get("content"), "metaData", "submission", "submitterId")
             return json.dumps([le, e.get("case")], sort_keys=True)
 
-        return [SubmissionRow(key(e), e.get("submittedAt") or "", e.get("content"), e.get("site"),
-                              e.get("reasonResearchConsentMissing") if exported else NOT_EXPORTED)
-                for e in data if isinstance(e, dict)], []
+        exported = False
+        for _ in stream.array():
+            e = stream.value()
+            if not isinstance(e, dict):
+                continue
+            exported = exported or REASON in e
+            yield SubmissionRow(key(e), e.get("submittedAt") or "", e.get("content"), e.get("site"),
+                                e.get(REASON) if REASON in e or self.exported else NOT_EXPORTED)
+        self.exported, self.failures = exported, []
 
-    raise ValueError(f"{path}: neither a result of export-datenkranz nor a list of submissions")
+
+def load_submissions(path):
+    """The submissions of the input file, and the submissions the export couldn't convert (all in memory)"""
+    source = InputFile(path)
+    rows = list(source.rows())
+    if source.exported:
+        for r in rows:
+            if r.reason is NOT_EXPORTED:
+                r.reason = None
+    return rows, source.failures
 
 
 # ---------------------------------------------------------------------------------------------
@@ -568,6 +774,19 @@ def filled(x):
     return x not in (None, "", [], {})
 
 
+# the fields of the variants the matrix reads (fill rates), all a variant is kept as: the case's other facts
+# don't need them, and the variant lists are the largest part of a case
+SMALL_FILL_FIELDS = ("proteinChange", "transcriptId", "variantTypes", "loh")
+CNV_FILL_FIELDS = ("gene", "chromosome", "startPosition", "endPosition")
+_FILL_MARKS = {}
+
+
+def fill_marks(variant, names):
+    """A variant as {field: True} of its filled fields among names (one shared dict per combination)"""
+    marks = tuple(name for name in names if filled(variant.get(name)))
+    return _FILL_MARKS.setdefault(marks, dict.fromkeys(marks, True))
+
+
 def rec_id(rec):
     return str(rec.get("identifier")) if rec.get("identifier") else json.dumps(rec, sort_keys=True)
 
@@ -770,7 +989,8 @@ def evaluate_case(case, reference_date, min_medical_days):
         procedures=procedures,
         has_plan=plan is not None, care_plan=care_plan, therapies=therapies, studies=studies,
         other_recommendations=set(items(care_plan.get("otherRecommendations"))),
-        has_molecular=molecular is not None, small=small, cnvs=cnvs,
+        has_molecular=molecular is not None,
+        small=[fill_marks(v, SMALL_FILL_FIELDS) for v in small], cnvs=[fill_marks(v, CNV_FILL_FIELDS) for v in cnvs],
         tmb=max(tmbs) if tmbs else None, hrd=(True in hrd) if hrd else None,
         biomarker_fields={f: any(b.get(f) is not None for b in complex_biomarkers)
                           for f in ("ploidy", "tmb", "hrdHigh", "lstHigh", "taiHigh")},
@@ -1214,10 +1434,8 @@ def matrix_rows(cases, subs, losses, problem_counts, reference_date):
         ("Füllgrad optionaler Felder (Therapieempfehlungen)", recs, ("evidenceLevelDetails", "variants"), "Empfehlungen"),
         ("Füllgrad optionaler Felder (Follow-up-Therapien)", [t for e in cases for t in e.fu_therapies],
          ("therapyEndDate", "substances", "terminationReasonOBDS", "therapyResponse", "therapyResponseDate"), "Therapien"),
-        ("Füllgrad optionaler Felder (SNV/Indel)", [v for e in sequenced for v in e.small],
-         ("proteinChange", "transcriptId", "variantTypes", "loh"), "Varianten"),
-        ("Füllgrad optionaler Felder (CNV)", [v for e in sequenced for v in e.cnvs],
-         ("gene", "chromosome", "startPosition", "endPosition"), "Varianten"),
+        ("Füllgrad optionaler Felder (SNV/Indel)", [v for e in sequenced for v in e.small], SMALL_FILL_FIELDS, "Varianten"),
+        ("Füllgrad optionaler Felder (CNV)", [v for e in sequenced for v in e.cnvs], CNV_FILL_FIELDS, "Varianten"),
     ):
         add(s, f"{base_label} gesamt", len(of))
         for name in names:
@@ -1438,55 +1656,147 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
     The matrix with its time series, from the submissions (SubmissionRow) and failures of the export; the
     result's "problems" (case keys of all LEs) are for the Rückfragen files only, not for the JSON
     """
+    return run_passes(lambda label: iter(rows), lambda: failures, start, end, reference_date, min_cell,
+                      min_medical_days, resolution, cutoff, suppress_scope)
+
+
+def run_file(source, start, end, reference_date, min_cell=5, min_medical_days=14, resolution=MONTH, cutoff=None,
+             suppress_scope=SUPPRESS_DIAGNOSES):
+    """run on an InputFile, read in two passes so that only the submissions of unfinished cases are in memory"""
+    labels = {1: "Durchgang 1/2 (Übersicht)", 2: "Durchgang 2/2 (Auswertung)"}
+    return run_passes(lambda n: source.rows(labels[n]), lambda: source.failures, start, end, reference_date, min_cell,
+                      min_medical_days, resolution, cutoff, suppress_scope)
+
+
+CASE_ROW, TEST_ROW, UNREADABLE_ROW = "case", "test", "unreadable"
+
+
+def row_kind(row):
+    """What a submission is for build_cases: a submission of a case, a test, unreadable, or None (not oncology)"""
+    submission = dig(row.content, "metaData", "submission")
+    if not isinstance(submission, dict):
+        return UNREADABLE_ROW, None
+    if submission.get("diseaseType") not in ONCO_DISEASE_TYPES:
+        return None, submission
+    if submission.get("type") == "test":
+        return TEST_ROW, submission
+    return CASE_ROW, submission
+
+
+def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5, min_medical_days=14, resolution=MONTH,
+               cutoff=None, suppress_scope=SUPPRESS_DIAGNOSES):
+    """
+    run, with the submissions read twice (read_rows(1), read_rows(2) give them in the same order), the failures
+    after the first time (read_failures()). The first pass counts the submissions of each case and keeps the
+    small rest (tests as their facts, unreadable submissions without content); the second gathers the
+    submissions of each case and evaluates it once its last submission is read, then drops them: only the
+    evaluated facts of a case stay in memory, its submissions only as long as the case isn't complete (one
+    case at a time for the export, which is ordered by case). Same result as with build_cases over all rows.
+    """
     if suppress_scope not in SUPPRESS_SCOPES:
         raise ValueError(f"suppress_scope must be one of {SUPPRESS_SCOPES}: {suppress_scope}")
     if cutoff and reference_date > cutoff:
         raise ValueError(f"reference date {reference_date} after the cutoff {cutoff}")
-    if cutoff:
-        rows = [r for r in rows if not (submission_date(r) and submission_date(r) > cutoff)]
-        failures = [f for f in failures if not (parse_date(f.submitted_at) and parse_date(f.submitted_at) > cutoff)]
+
+    def kept(row):
+        return not (cutoff and submission_date(row) and submission_date(row) > cutoff)
 
     def in_range(d):
         return d is None or not ((start and d < start) or (end and d >= end))
 
-    cases, tests, without_initial, unreadable_rows, submitters = build_cases(rows)
+    # pass 1: overview
+    expected, order = {}, {}        # case key: number of its submissions, rank of its first submission
+    test_facts, unreadable_rows, submitters = [], [], {}
+    tests, reasons_exported = 0, False
+    for row in read_rows(1):
+        if not kept(row):
+            continue
+        reasons_exported = reasons_exported or row.reason is not NOT_EXPORTED
+        kind, submission = row_kind(row)
+        if kind == UNREADABLE_ROW:
+            unreadable_rows.append(SubmissionRow(row.case, row.submitted_at, None, row.site, row.reason))
+        elif kind == TEST_ROW:
+            tests += 1
+            fact = submission_fact(row, resolution)
+            if fact.date is None or in_range(fact.date):
+                test_facts.append(fact)
+        elif kind == CASE_ROW:
+            if row.case not in expected:
+                order[row.case], expected[row.case] = len(order), 0
+            expected[row.case] += 1
+            if row.site and submission.get("submitterId"):
+                submitters.setdefault(str(row.site), set()).add(str(submission["submitterId"]))
+    failures = list(read_failures() or [])
+    if cutoff:
+        failures = [f for f in failures if not (parse_date(f.submitted_at) and parse_date(f.submitted_at) > cutoff)]
 
-    problems = []   # dicts le, problem, case, tan, detail, and the period they are counted in
-
-    def problem(le, kind, case, tan, detail, d):
+    def problem(problems, le, kind, case, tan, detail, d):
         problems.append({"le": le, "problem": kind, "case": case, "tan": tan, "detail": detail,
                          "period": period_of(d, resolution) if d else None})
 
-    evaluated, no_gfk1 = [], []     # no_gfk1: (LE, period) of the cases unreadable for want of GFK1
-    for case in cases:
-        initial = next(r for r in case.rows if submission_type(r.content) == "initial")
-        initial_date = submission_date(initial)
-        if not in_range(initial_date):
-            continue
-        try:
-            if initial_date is None:
-                raise ValueError("Erstmeldung ohne lesbares Datum")
-            e = evaluate_case(case, reference_date, min_medical_days)
-        except Exception as error:     # a case that can't be read is clarified with its LE, the run goes on
-            problem(case.le, P_UNREADABLE, case.key, dig(case.latest, "metaData", "tanC"), repr(error)[:300], initial_date)
-            if initial_date and parse_date(dig(case.latest, "metaData", "molecularBoardDecisionDate")) is None:
-                no_gfk1.append((case.le, period_of(initial_date, resolution)))
-            continue
-        e.initial_date = initial_date
-        e.period = period_of(initial_date, resolution)
-        evaluated.append(e)
-        for kind, detail in e.problems:
-            problem(e.le, kind, e.key, e.tan, detail, initial_date)
+    no_gfk1 = []    # (LE, period) of the cases unreadable for want of GFK1
 
-    for case in without_initial:
-        d = submission_date(case.rows[0])
-        if in_range(d):
-            problem(case.le, P_WITHOUT_INITIAL, case.key, dig(case.latest, "metaData", "tanC"),
-                    "nur Folgemeldungen/Nachmeldungen/Korrekturen, keine Erstmeldung", d)
+    def finish(key, rows):
+        """
+        A complete case: (0 with initial / 1 without, rank, evaluated facts or None, its problems, the facts of
+        its submissions in the range)
+        """
+        rows = sorted(rows, key=lambda r: r.submitted_at)     # stable: equal times keep the input order
+        case = Case(key, leistungserbringer(rows[0]), rows)
+        with_initial = any(submission_type(s) == "initial" for s in case.submissions)
+        problems, e = [], None
+        if with_initial:
+            initial_date = submission_date(case.initial)
+            if in_range(initial_date):
+                try:
+                    if initial_date is None:
+                        raise ValueError("Erstmeldung ohne lesbares Datum")
+                    e = evaluate_case(case, reference_date, min_medical_days)
+                except Exception as error:     # a case that can't be read is clarified with its LE, the run goes on
+                    problem(problems, case.le, P_UNREADABLE, case.key, dig(case.latest, "metaData", "tanC"),
+                            repr(error)[:300], initial_date)
+                    if initial_date and parse_date(dig(case.latest, "metaData", "molecularBoardDecisionDate")) is None:
+                        no_gfk1.append((case.le, period_of(initial_date, resolution)))
+                if e is not None:
+                    e.initial_date = initial_date
+                    e.period = period_of(initial_date, resolution)
+                    for kind, detail in e.problems:
+                        problem(problems, e.le, kind, e.key, e.tan, detail, initial_date)
+        else:
+            d = submission_date(case.rows[0])
+            if in_range(d):
+                problem(problems, case.le, P_WITHOUT_INITIAL, case.key, dig(case.latest, "metaData", "tanC"),
+                        "nur Folgemeldungen/Nachmeldungen/Korrekturen, keine Erstmeldung", d)
+        facts = [x for x in (submission_fact(r, resolution) for r in case.rows) if x.date is None or in_range(x.date)]
+        return (0 if with_initial else 1, order[key], e, problems, facts)
+
+    # pass 2: the cases, each evaluated and dropped once complete
+    pending, finished = {}, []
+    for row in read_rows(2):
+        if not kept(row) or row_kind(row)[0] != CASE_ROW:
+            continue
+        if row.case not in expected:
+            raise ValueError("the input changed between the two passes (a case unknown to the first)")
+        rows = pending.setdefault(row.case, [])
+        rows.append(row)
+        if len(rows) == expected[row.case]:
+            del pending[row.case]
+            finished.append(finish(row.case, rows))
+        del rows, row
+    if pending:
+        raise ValueError("the input changed between the two passes (cases with fewer submissions than in the first)")
+
+    # in the order of build_cases: the cases with initial, then those without, each by their first submission
+    finished.sort(key=lambda c: (c[0], c[1]))
+    evaluated = [e for _, _, e, _, _ in finished if e is not None]
+    problems = [p for _, _, _, ps, _ in finished for p in ps]   # dicts le, problem, case, tan, detail, period
+    subs = [x for _, _, _, _, facts in finished for x in facts] + test_facts
+    del finished
+
     for row in unreadable_rows:
         d = parse_date(row.submitted_at)
         if in_range(d):
-            problem(leistungserbringer(row), P_UNREADABLE, row.case, None, "Einreichung ohne lesbare metaData.submission", d)
+            problem(problems, leistungserbringer(row), P_UNREADABLE, row.case, None, "Einreichung ohne lesbare metaData.submission", d)
     evaluated_keys = {e.key for e in evaluated}
     stale = Counter()
     for f in failures:
@@ -1495,12 +1805,8 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
             continue
         if f.case in evaluated_keys:
             stale[(str(f.site or "?"), period_of(d, resolution) if d else None)] += 1
-        problem(str(f.site or "?"), P_NOT_CONVERTED, f.case, f.tan,
+        problem(problems, str(f.site or "?"), P_NOT_CONVERTED, f.case, f.tan,
                 ("Episode mit älterem Stand ausgewertet; " if f.case in evaluated_keys else "") + f.error[:300], d)
-
-    subs = [submission_fact(r, resolution) for c in cases + without_initial for r in c.rows] \
-        + [submission_fact(r, resolution) for r in tests]
-    subs = [x for x in subs if x.date is None or in_range(x.date)]
 
     les = sorted({e.le for e in evaluated} | {p["le"] for p in problems} | {x.le for x in subs})
 
@@ -1559,7 +1865,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
         f"{masked(len(evaluated))} Fälle (Episoden mit Erstmeldung, diseaseType oncological/hereditary) ausgewertet, Stand je Fall "
         "aus der letzten Nicht-Test-Einreichung; plan und molecular aus der letzten Einreichung, die sie enthält; "
         "Follow-ups und deren Therapien über alle Einreichungen. Definitionen: scripts/dnpm_evaluation_matrix/README.md.",
-        f"{masked(len(tests))} Testeinreichungen nicht in den Fällen (nur im Abschnitt Einreichungen gezählt).",
+        f"{masked(tests)} Testeinreichungen nicht in den Fällen (nur im Abschnitt Einreichungen gezählt).",
         (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso jeder Wert mit einer Basis unter "
          f"{min_cell} (auch die 0) und Kennzahlen aus weniger als {min_cell} Werten (nicht in den Rückfragen). "
          f"Ergänzend unterdrückt, ebenfalls als <{min_cell}, damit sich keine unterdrückte Zelle aus Gesamt und den übrigen LE, "
@@ -1617,7 +1923,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days
         notes.append(f"Fälle mit Erstmeldung, Einreichungen und Rückfragen vom {start or '…'} bis vor dem {end or '…'}.")
     if cutoff:
         notes.append(f"Datenstand {cutoff.isoformat()}: spätere Einreichungen (metaData.submission.date) nicht berücksichtigt.")
-    if all(r.reason is NOT_EXPORTED for r in rows):
+    if not reasons_exported:
         notes.append("Der Export enthält keine Spalte reasonResearchConsentMissing: Gründe fehlender Einwilligung nur "
                      "aus noScopeJustification, die das DIP-Mapping nicht befüllt.")
     if unreadable_rows:
@@ -1709,9 +2015,8 @@ def main(argv=None):
     if args.cutoff and args.reference_date > args.cutoff:
         parser.error("--reference-date must not be after --cutoff")
 
-    rows, failures = load_submissions(args.input)
-    result = run(rows, failures, args.start, args.end, args.reference_date, args.min_cell, args.min_medical_days,
-                 args.resolution, args.cutoff, args.suppress_scope)
+    result = run_file(InputFile(args.input, progress=True), args.start, args.end, args.reference_date, args.min_cell,
+                      args.min_medical_days, args.resolution, args.cutoff, args.suppress_scope)
 
     with open(f"{args.output}.json", "w", encoding="utf-8") as f:     # without the case keys of the Rückfragen
         json.dump({k: v for k, v in result.items() if k != "problems"}, f, ensure_ascii=False, indent=1)

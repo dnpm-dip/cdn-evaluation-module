@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 The evaluation matrices (Auswertematrix) of rare diseases (rd_evaluation_matrix.py) and oncology
-(dnpm_evaluation_matrix.py) for a whole period and for each quarter (--period quarter, the default) or month
-(--period month) in it, in one run: the single entry point for a total matrix together with its period
-matrices. Per period one evaluation, the cases selected by the calendar quarter or month of their initial
+(dnpm_evaluation_matrix.py) for a whole period and for each quarter (--period quarter, the default) in it, in one
+run: the single entry point for a total matrix together with its period matrices. RD (SE) only per quarter:
+--period month is refused for RD (--matrix rd or both), monthly matrices are for oncology only (--matrix dnpm). Per period one evaluation, the cases selected by the calendar quarter or month of their initial
 submission (Erstmeldung; --from/--until of the scripts set to the period, Q4/2025 = 2025-10-01 to before
 2026-01-01). The first period is that of the earliest initial submission in the export (or --from, if later),
 the last one that of the latest initial submission (or the one before --until): no empty leading periods. The
@@ -11,9 +11,13 @@ total matrix ("gesamt") covers exactly these periods, from the first day of the 
 
 RD: the total and the period matrices are suppressed together (rd_evaluation_matrix.run_joint): besides the
 relations within each matrix, each cell of the total matrix is the sum of the same cell of the period matrices
-(per LE and Gesamt), so that no suppressed cell follows from the total and the other periods. Hand out only total
-and period matrices of the same run: a total matrix from a separate run of rd_evaluation_matrix.py is suppressed
-on its own and, together with these period matrices, can make suppressed cells computable.
+(per LE and Gesamt), and the suppression is extended until no suppressed count follows from all files together,
+also not from several relations (rd_evaluation_matrix.protect). If one still followed, no RD file is written and
+the run ends with an error (the cells on stderr, for the KDK only); nothing of the run is written then, oncology
+neither. Hand out only total and period matrices of the same run: a total matrix from a separate run of
+rd_evaluation_matrix.py is suppressed on its own and, together with these period matrices, can make suppressed
+cells computable; the same holds for monthly RD numbers (e.g. the time series of rd_time_series.py) next to the
+quarters.
 Oncology: not suppressed (decision of the data holders), every value exact; the total matrix has the time
 series by the same periods.
 
@@ -30,11 +34,11 @@ JSON (so the xlsx) without the Rückfragen. RD: small counts are suppressed only
 The Rückfragen contain case keys: only for the respective LEs. The RD JSON contains them as well
 (as written by rd_evaluation_matrix.py, unless --rueckfragen-per-le), the oncology JSON doesn't.
 
-Examples (all quarters of the export and their total; months July 2025 to October 2026 and their total):
+Examples (all quarters of the export and their total; oncology per month July 2025 to October 2026):
   python3 monthly_matrices.py export-datenkranz_2026-11-01_10-00-00.json \\
     --orphanet en_product7.xml --reference-date 2026-11-01 --rueckfragen-per-le --output-dir quarterly
-  python3 monthly_matrices.py export-datenkranz_2026-11-01_10-00-00.json --period month \\
-    --from 2025-07 --until 2026-11 --orphanet en_product7.xml --reference-date 2026-11-01 --output-dir monthly
+  python3 monthly_matrices.py export-datenkranz_2026-11-01_10-00-00.json --matrix dnpm --period month \\
+    --from 2025-07 --until 2026-11 --reference-date 2026-11-01 --output-dir monthly
   uv run fill_monthly.py quarterly
 """
 
@@ -113,15 +117,21 @@ def dnpm_initial_dates(rows):
     return [d for d in dates if d]
 
 
-def prepare_dir(out_dir, kind, replace):
-    """The output directory of a kind (rd, dnpm), refused if it has files of an earlier run (with --replace they are
-    deleted): an old period's JSON with the Rückfragen of all LEs would otherwise go into the xlsx with the new ones
-    (fill_monthly.py takes every <kind>_<period>.json), and old _rueckfragen.csv of all LEs would stay beside them"""
-    os.makedirs(out_dir, exist_ok=True)
-    old = sorted(f for f in os.listdir(out_dir) if f.startswith(f"{kind}_"))
+def earlier_files(out_dir, kind, replace):
+    """The files of an earlier run in the output directory of a kind (rd, dnpm); refused unless --replace: an old
+    period's JSON with the Rückfragen of all LEs would otherwise go into the xlsx with the new ones (fill_monthly.py
+    takes every <kind>_<period>.json), and old _rueckfragen.csv of all LEs would stay beside them"""
+    old = sorted(f for f in os.listdir(out_dir) if f.startswith(f"{kind}_")) if os.path.isdir(out_dir) else []
     if old and not replace:
         raise SystemExit(f"{out_dir} has files of an earlier run ({', '.join(old[:3])}{', …' if len(old) > 3 else ''}); "
                          "use a new --output-dir or --replace (deletes them)")
+    return old
+
+
+def prepare_dir(out_dir, kind, replace):
+    """The output directory of a kind, the files of an earlier run deleted (only with --replace, earlier_files)"""
+    old = earlier_files(out_dir, kind, replace)
+    os.makedirs(out_dir, exist_ok=True)
     for f in old:
         os.remove(os.path.join(out_dir, f))
 
@@ -133,28 +143,38 @@ def periods_of(dates, args):
 TOTAL_LABEL = "gesamt"
 
 
-def run_rd(path, args):
-    """The RD total matrix and the period matrices, suppressed together; the number of periods"""
+def rd_results(path, args):
+    """The RD total matrix and the period matrices, suppressed together: [(name, result)] (empty without cases).
+    Ends the run (SystemExit) before anything is written if a suppressed count follows from the shown numbers"""
     rows, failures = rd.load_submissions(path)
     heads = rd.load_linearisation(args.orphanet) if args.orphanet else None
-    out_dir = os.path.join(args.output_dir, RD)
-    prepare_dir(out_dir, RD, args.replace)
     periods_ = periods_of(rd_initial_dates(rows), args)
     if not periods_:
-        return 0
+        return []
     ranges = [(start, next_period(start, args.period)) for start in periods_]
     total, parts = rd.run_joint(rows, failures, heads, ranges, args.reference_date, args.min_cell, args.min_medical_days,
                                 args.suppress_scope, args.follow_up_months, start=ranges[0][0], end=ranges[-1][1])
-    for name, result in [(TOTAL_LABEL, total)] + [(label(start, args.period), r) for start, r in zip(periods_, parts)]:
-        output = os.path.join(out_dir, f"{RD}_{name}")
-        # as rd_evaluation_matrix.main writes it
-        rd.write_json(f"{output}.json", result, args.rueckfragen_per_le)
-        rd.write_csv(f"{output}.csv", result, args.delimiter)
-        rd.write_rueckfragen(output, result, args.delimiter, args.rueckfragen_per_le)
-        print(f"RD   {name}: {output}.json ({cases(result)} Fälle)", file=sys.stderr)
-        if rd.write_audit(f"{output}_audit.csv", result, args.delimiter):
-            print(rd.audit_message(f"RD {name}", result), file=sys.stderr)
-    return len(periods_)
+    results = [(TOTAL_LABEL, total)] + [(label(start, args.period), r) for start, r in zip(periods_, parts)]
+    blocked = rd.blocked_message({f"RD {name}": result for name, result in results})
+    if blocked:
+        raise SystemExit(blocked)
+    return results
+
+
+def write_rd(results, args):
+    """The RD files as rd_evaluation_matrix.main writes them; on an error the files of this run are removed"""
+    out_dir = os.path.join(args.output_dir, RD)
+    prepare_dir(out_dir, RD, args.replace)
+    written = []
+    try:
+        for name, result in results:
+            output = os.path.join(out_dir, f"{RD}_{name}")
+            written += rd.write_outputs(output, result, args.delimiter, args.rueckfragen_per_le)
+            print(f"RD   {name}: {output}.json ({cases(result)} Fälle)", file=sys.stderr)
+    except BaseException:
+        rd.remove_files(written)
+        raise
+    return len(results) - 1 if results else 0
 
 
 def run_dnpm(path, args):
@@ -190,7 +210,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input", help="result JSON of export-datenkranz (or a JSON list of submissions)")
     parser.add_argument("--period", choices=(QUARTER, MONTH), default=QUARTER,
-                        help="one matrix per calendar quarter or month of the initial submission (default: %(default)s)")
+                        help="one matrix per calendar quarter or month of the initial submission (default: %(default)s); "
+                             "month only with --matrix dnpm (RD only per quarter)")
     parser.add_argument("--from", dest="start", type=month,
                         help="first month or quarter (YYYY-MM or YYYY-Qn; a month: its quarter); default and at the "
                              "earliest the period of the earliest initial submission")
@@ -225,6 +246,8 @@ def main(argv=None):
         parser.error("--from must be before --until")
     if args.cutoff and args.reference_date and args.reference_date > args.cutoff:
         parser.error("--reference-date must not be after --cutoff")
+    if args.period == MONTH and args.matrix in (RD, "both"):
+        parser.error("--period month: the RD (SE) matrices only per quarter; monthly matrices with --matrix dnpm")
 
     written = []
     if args.matrix in (RD, "both"):
@@ -232,7 +255,11 @@ def main(argv=None):
             print("RD: without --orphanet the disease groups aren't evaluated", file=sys.stderr)
         rd_args = argparse.Namespace(**vars(args))
         rd_args.reference_date = args.reference_date or date.today()
-        written.append(f"RD {run_rd(args.input, rd_args)}")
+        earlier_files(os.path.join(args.output_dir, RD), RD, args.replace)     # refused before the long evaluation
+        if args.matrix == "both":
+            earlier_files(os.path.join(args.output_dir, DNPM), DNPM, args.replace)
+        results = rd_results(args.input, rd_args)       # nothing is written if a suppressed count follows
+        written.append(f"RD {write_rd(results, rd_args)}")
     if args.matrix in (DNPM, "both"):
         written.append(f"oncology {run_dnpm(args.input, args)}")
     unit = "quarters" if args.period == QUARTER else "months"

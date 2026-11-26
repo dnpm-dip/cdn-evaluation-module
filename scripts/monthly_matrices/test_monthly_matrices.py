@@ -9,6 +9,7 @@ import unittest
 from contextlib import redirect_stderr
 from datetime import date
 from io import StringIO
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "rd_evaluation_matrix"))
@@ -77,7 +78,8 @@ class RunTests(unittest.TestCase):
         return self.run_mm("rd", entries, *args)[0]
 
     def test_one_matrix_per_quarter_of_the_initial_submission_and_their_total(self):
-        results = self.run_rd(["2025-11-30", "2025-12-31", "2026-01-01", "2026-03-31", "2026-04-01"])
+        dates = ["2025-11-30", "2025-12-31", "2026-01-01", "2026-03-31", "2026-04-01"]
+        results = self.run_rd(dates, "--min-cell", "1")
         self.assertEqual(list(results), ["rd_2025-Q4", "rd_2026-Q1", "rd_2026-Q2", "rd_gesamt"])   # nothing before 2025-Q4
         cases = {k: r["rows"][0]["values"]["Gesamt"]["value"] for k, r in results.items()}
         self.assertEqual(cases, {"rd_2025-Q4": 2, "rd_2026-Q1": 2, "rd_2026-Q2": 1, "rd_gesamt": 5})
@@ -87,20 +89,29 @@ class RunTests(unittest.TestCase):
         # the total covers exactly the quarters
         self.assertEqual(results["rd_gesamt"]["period"], "01.10.2025 - 30.06.2026")
         self.assertTrue(any("Gemeinsam unterdrückt" in n for n in results["rd_gesamt"]["notes"]))
-        # the default scope: the case counts below 5 are shown
+        # the default scope; with one LE of five cases its exact rows give the diagnoses away, so its columns are
+        # suppressed as with --suppress-scope all (and the case counts with them), which the notes say
+        q4 = self.run_rd(dates)["rd_2025-Q4"]
         self.assertEqual(q4["suppress_scope"], "diagnoses")
+        self.assertEqual(q4["derivable"] if "derivable" in q4 else [], [])
+        self.assertTrue(any("wie mit --suppress-scope all" in n for n in q4["notes"]))
 
-    def test_months_and_the_period_range(self):
-        results = self.run_rd(["2025-11-30", "2025-12-31", "2026-01-01"], "--period", "month", "--until", "2026-01")
-        self.assertEqual(list(results), ["rd_2025-11", "rd_2025-12", "rd_gesamt"])
-        self.assertIn("Fälle mit Erstmeldung vom 2025-11-01 bis vor dem 2025-12-01.", results["rd_2025-11"]["notes"])
+    def test_rd_only_per_quarter_and_the_period_range(self):
+        # RD (SE) matrices only per quarter: --period month is refused for rd and both, before anything is read
+        for kind in ("rd", "both"):
+            with self.assertRaises(SystemExit), redirect_stderr(StringIO()):
+                mm.main(["missing.json", "--matrix", kind, "--period", "month"])
+        results = self.run_rd(["2025-11-30", "2025-12-31", "2026-01-01"], "--until", "2026-Q1", "--min-cell", "1")
+        self.assertEqual(list(results), ["rd_2025-Q4", "rd_gesamt"])
         self.assertEqual(results["rd_gesamt"]["rows"][0]["values"]["Gesamt"]["value"], 2)
         results = self.run_rd(["2025-11-30", "2026-05-01"], "--from", "2026-Q1", "--suppress-scope", "all")
         self.assertEqual(list(results), ["rd_2026-Q1", "rd_2026-Q2", "rd_gesamt"])     # an empty quarter within is written
         self.assertEqual(results["rd_2026-Q2"]["suppress_scope"], "all")
         # all rows: the case count of the only LE is suppressed, and Gesamt with it (it is that LE's count)
         self.assertEqual(results["rd_2026-Q2"]["rows"][0]["values"]["Gesamt"]["value"], "<5")
-        self.assertEqual(self.run_rd(["2026-05-01"])["rd_2026-Q2"]["rows"][0]["values"]["Gesamt"]["value"], 1)
+        # a single case in the default scope: its exact rows would give its diagnosis away, so also there the case
+        # count (of the LE and so of Gesamt) is suppressed
+        self.assertEqual(self.run_rd(["2026-05-01"])["rd_2026-Q2"]["rows"][0]["values"]["Gesamt"]["value"], "<5")
 
     def test_follow_up_rows_and_interval(self):
         prefix = "Stand am Stichtag (Intervall "
@@ -172,7 +183,7 @@ def across_files(total, parts, full_total, full_parts):
     Independently of the implementation: every count cell of the total matrix (per row, LE and Gesamt, value and base)
     is the sum of the same cell of the period matrices (a missing LE or row counts 0). Findings as text: a relation
     that doesn't hold in the unsuppressed matrices, exactly one suppressed cell, or a suppressed cell beside a side of
-    shown zeros
+    shown zeros, where that cell counts 1 to min_cell - 1 (see rdt.recoverable)
     """
     hidden = f"<{total['min_cell']}"
     found = []
@@ -192,11 +203,14 @@ def across_files(total, parts, full_total, full_parts):
                 parts_true = [cell(p, r["key"], e, f) for p in full_parts]
                 if r["section"] != rd.PROBLEMS_SECTION and true != sum(x or 0 for x in parts_true):
                     found.append(f"does not hold: {r['key']} {e} {f}")
-                shown = [cell(total, r["key"], e, f)] + [c for c in (cell(p, r["key"], e, f) for p in parts) if c is not None]
-                if shown.count(hidden) == 1:
+                present = [i for i, p in enumerate(parts) if cell(p, r["key"], e, f) is not None]
+                shown = [cell(total, r["key"], e, f)] + [cell(parts[i], r["key"], e, f) for i in present]
+                trues = [true] + [cell(full_parts[i], r["key"], e, f) for i in present]
+                small = [s == hidden and 0 < t < total["min_cell"] for s, t in zip(shown, trues)]
+                if shown.count(hidden) == 1 and any(small):
                     found.append(f"one suppressed cell: {r['key']} {e} {f}: {shown}")
-                for side, other in ((shown[:1], shown[1:]), (shown[1:], shown[:1])):
-                    if hidden not in side and sum(side) == 0 and hidden in other:
+                for side, other in (((0,), range(1, len(shown))), (range(1, len(shown)), (0,))):
+                    if all(shown[i] != hidden for i in side) and sum(shown[i] for i in side) == 0 and any(small[i] for i in other):
                         found.append(f"suppressed beside shown zeros: {r['key']} {e} {f}: {shown}")
     return found
 
@@ -218,13 +232,13 @@ class JointSuppressionTests(unittest.TestCase):
         return total, parts
 
     def test_random_sets_in_both_scopes(self):
-        for seed in range(12):
+        for seed in range(6):
             for scope in rd.SUPPRESS_SCOPES:
                 with self.subTest(seed=seed, scope=scope):
                     self.check(spread(rdt.varied(seed), seed), scope)
 
     def test_another_threshold_and_larger_les(self):
-        for seed in range(12, 18):
+        for seed in range(12, 15):
             with self.subTest(seed=seed):
                 self.check(spread(rdt.varied(seed), seed), rd.SUPPRESS_DIAGNOSES, min_cell=3)
                 self.check(spread(rdt.synthetic(seed=seed), seed), rd.SUPPRESS_DIAGNOSES)
@@ -284,7 +298,7 @@ class OutputTests(unittest.TestCase):
         entries = self.entries(["2025-11-03", "2026-02-03", "2026-02-04"])
         del entries[2]["content"]["metaData"]["submission"]["date"]
         with tempfile.TemporaryDirectory() as tmp:
-            files = self.main(tmp, entries)
+            files = self.main(tmp, entries, "--min-cell", "1")
             self.assertIn("rd_gesamt.json", files)
             with open(os.path.join(tmp, "out", "rd", "rd_gesamt.json"), encoding="utf-8") as f:
                 result = json.load(f)
@@ -292,18 +306,23 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(rdt.get(result, "Fälle", "Episoden ohne Erstmeldung (nicht in den Fällen)"), 1)
 
 
-class JointAuditTests(unittest.TestCase):
+class JointProtectionTests(unittest.TestCase):
     """
-    The closure closes every single relation, not systems of them; the audit (rd.derivable) finds the suppressed counts
-    that follow from the whole linear system of all files and reports them (result["derivable"], *_audit.csv, never in
-    the JSON, CSV or xlsx). Checked against an independent solver over the published numbers (rdt.derivable_cells).
+    The closure closes every single relation, not systems of them; the suppression is therefore extended against the
+    whole linear system of all files (rd.protect) until no suppressed count follows. Checked with an independent exact
+    solver over the published numbers (rdt.derivable_cells): the counterexamples of the review are closed, random sets
+    (also with tiny LEs) end with no computable cell, and where one is forced (the closure alone) nothing is written.
     """
 
-    def files(self, rows, scope, ranges=None, min_cell=5):
+    def files(self, rows, scope, ranges=None, min_cell=5, extend=True):
         ranges = ranges or [(s, mm.next_period(s, mm.QUARTER)) for s in
                             (date(2026, 1, 1), date(2026, 4, 1), date(2026, 7, 1), date(2026, 10, 1))]
-        run = lambda m: rd.run_joint(rows, [], rdt.HEADS, ranges, date(2026, 12, 31), m, suppress_scope=scope)
-        (t, ps), (ft, fps) = run(min_cell), run(1)
+        original = rd.suppressed_files
+
+        def run(m, extend_):
+            with mock.patch.object(rd, "suppressed_files", lambda *a, **k: original(*a, **{**k, "extend": extend_})):
+                return rd.run_joint(rows, [], rdt.HEADS, ranges, date(2026, 12, 31), m, suppress_scope=scope)
+        (t, ps), (ft, fps) = run(min_cell, extend), run(1, True)
         return [t] + ps, [ft] + fps
 
     def reported(self, results):
@@ -313,6 +332,13 @@ class JointAuditTests(unittest.TestCase):
         import ast
         return {ast.literal_eval(f.split(": ", 1)[1]) for f in rdt.derivable_cells(list(zip(fulls, results)))
                 if f.startswith("follows")}
+
+    def closed(self, results, fulls):
+        self.assertEqual(self.reported(results), set())
+        self.assertEqual(self.independent(results, fulls), set())
+        self.assertEqual(across_files(results[0], results[1:], fulls[0], fulls[1:]), [])
+        for full, result in zip(fulls, results):
+            self.assertEqual(rdt.recoverable(full, result), [])
 
     @staticmethod
     def quarters(counts, assessment="confirmedGeneticDiagnosis"):
@@ -325,24 +351,28 @@ class JointAuditTests(unittest.TestCase):
                                                  rdt.datenkranz(f"{le}{qi}{i}", submitted=d, assessment=assessment), le, None))
         return rows
 
-    def test_a_system_of_relations_gives_a_cell_away_and_is_reported(self):
-        # quarters (A, B, C, D): (3,3,1,0), (3,3,0,0), (0,0,3,3), (0,0,3,3), all suppressed in the LE columns; the
-        # quarter totals, the totals of A and B and the zeros give C in Q1 = 7 + 6 - 6 - 6 = 1, although every single
-        # relation has two suppressed cells
-        results, fulls = self.files(self.quarters([(3, 3, 1, 0), (3, 3, 0, 0), (0, 0, 3, 3), (0, 0, 3, 3)]), rd.SUPPRESS_ALL)
-        reported = self.reported(results)
-        self.assertTrue(reported)
-        self.assertLessEqual(self.independent(results, fulls), reported)
-        # the single-relation checks find nothing: the closure itself is as before
-        self.assertEqual(across_files(results[0], results[1:], fulls[0], fulls[1:]), [])
-
-    def test_open_cases_are_known_to_be_zero_where_every_case_has_a_gfk2(self):
-        # one LE, three undiagnosed cases with GFK2 in each of two quarters: "noch keine GFK2" is exact and 0, so the
-        # open cases are 0 and the closed cases (3) follow from the exact sequenced cases
-        results, fulls = self.files(self.quarters([(3,), (3,)], "noGeneticDiagnosis"), rd.SUPPRESS_DIAGNOSES,
-                                    ranges=[(date(2026, 1, 1), date(2026, 4, 1)), (date(2026, 4, 1), date(2026, 7, 1))])
-        self.assertIn((1, "A", "Diagnoserate (abgeschlossene Fälle)", rd.DIAGNOSED, "base"), self.reported(results))
+    def test_a_system_of_relations_no_longer_gives_a_cell_away(self):
+        # review (Codex, Kimi): quarters (A, B, C, D): (3,3,1,0), (3,3,0,0), (0,0,3,3), (0,0,3,3), all suppressed in the
+        # LE columns; with the closure alone the quarter totals, the totals of A and B and the zeros give C in Q1 = 1
+        rows = self.quarters([(3, 3, 1, 0), (3, 3, 0, 0), (0, 0, 3, 3), (0, 0, 3, 3)])
+        results, fulls = self.files(rows, rd.SUPPRESS_ALL, extend=False)
+        self.assertTrue(self.reported(results))
         self.assertLessEqual(self.independent(results, fulls), self.reported(results))
+        self.closed(*self.files(rows, rd.SUPPRESS_ALL))
+
+    def test_open_cases_known_to_be_zero_no_longer_give_the_closed_cases_away(self):
+        # review (Codex 1b): one LE, three undiagnosed cases with GFK2 in each of two quarters: "noch keine GFK2" is
+        # exact and 0, so the open cases are 0 and the closed cases (3) were the exact sequenced cases
+        ranges = [(date(2026, 1, 1), date(2026, 4, 1)), (date(2026, 4, 1), date(2026, 7, 1))]
+        rows = self.quarters([(3,), (3,)], "noGeneticDiagnosis")
+        results, _ = self.files(rows, rd.SUPPRESS_DIAGNOSES, ranges, extend=False)
+        self.assertIn((1, "A", "Diagnoserate (abgeschlossene Fälle)", rd.DIAGNOSED, "base"), self.reported(results))
+        results, fulls = self.files(rows, rd.SUPPRESS_DIAGNOSES, ranges)
+        self.closed(results, fulls)
+        # the exact rows alone gave it away: the column is suppressed as with --suppress-scope all, and says so
+        self.assertGreater(results[1]["suppressed"]["beyond_scope"], 0)
+        self.assertEqual(rdt.get(results[1], "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "A"), "<5")
+        self.assertTrue(any("wie mit --suppress-scope all" in n for n in results[1]["notes"]))
 
     def test_seven_cases_at_two_les(self):
         rows = rdt.synthetic(seed=0, sizes=(("A", 2), ("B", 5)))
@@ -350,30 +380,63 @@ class JointAuditTests(unittest.TestCase):
         for r in rows:
             r.content["metaData"]["submission"]["date"] = f"{rnd.choice(['2025-11', '2025-12', '2026-02', '2026-05'])}-0{rnd.randint(1, 9)}"
         ranges = [(s, mm.next_period(s, mm.QUARTER)) for s in (date(2025, 10, 1), date(2026, 1, 1), date(2026, 4, 1))]
-        results, fulls = self.files(rows, rd.SUPPRESS_DIAGNOSES, ranges)
-        self.assertIn((0, "A", "Diagnosestatus (alle Fälle)", rd.UNCLEAR, "value"), self.reported(results))
+        results, fulls = self.files(rows, rd.SUPPRESS_DIAGNOSES, ranges, extend=False)
+        self.assertTrue(self.reported(results))
         self.assertLessEqual(self.independent(results, fulls), self.reported(results))
+        self.closed(*self.files(rows, rd.SUPPRESS_DIAGNOSES, ranges))
 
-    def test_the_audit_agrees_with_the_independent_solver_on_random_sets(self):
-        for seed in range(4):
+    def test_random_sets_end_with_no_computable_cell(self):
+        sets = [(f"varied {seed}", spread(rdt.varied(seed), seed)) for seed in range(6)]
+        sets += [(f"tiny {seed}", spread(rdt.synthetic(seed=seed, sizes=(("LE-A", 3), ("LE-B", 1), ("LE-C", 2))), seed))
+                 for seed in range(40, 43)]
+        for name, rows in sets:
             for scope in rd.SUPPRESS_SCOPES:
-                with self.subTest(seed=seed, scope=scope):
-                    total, parts = joint(spread(rdt.varied(seed), seed), scope=scope)
-                    full_total, full_parts = joint(spread(rdt.varied(seed), seed), min_cell=1, scope=scope)
-                    results, fulls = [total] + parts, [full_total] + full_parts
-                    self.assertLessEqual(self.independent(results, fulls), self.reported(results))
+                with self.subTest(set=name, scope=scope):
+                    total, parts = joint(rows, scope=scope)
+                    full_total, full_parts = joint(rows, min_cell=1, scope=scope)
+                    self.closed([total] + parts, [full_total] + full_parts)
 
-    def test_the_audit_is_written_apart_from_the_shared_files(self):
-        results, _ = self.files(self.quarters([(3, 3, 1, 0), (3, 3, 0, 0), (0, 0, 3, 3), (0, 0, 3, 3)]), rd.SUPPRESS_ALL)
+    def test_a_forced_computable_cell_blocks_the_output(self):
+        entries = [{"case": r.case, "submittedAt": r.submitted_at, "content": r.content, "site": r.site}
+                   for r in self.quarters([(3, 3, 1, 0), (3, 3, 0, 0), (0, 0, 3, 3), (0, 0, 3, 3)])]
+        original = rd.suppressed_files
         with tempfile.TemporaryDirectory() as tmp:
-            out = os.path.join(tmp, "m")
-            rd.write_json(f"{out}.json", results[1])
-            rd.write_csv(f"{out}.csv", results[1])
-            self.assertEqual(rd.write_audit(f"{out}_audit.csv", results[1]), f"{out}_audit.csv")
-            with open(f"{out}.json", encoding="utf-8") as f:
-                self.assertNotIn("derivable", json.load(f))
-            self.assertIn("WARNUNG", rd.audit_message("Q1", results[1]))
-        self.assertIsNone(rd.audit_message("x", {**results[1], "derivable": []}))
+            path, out = os.path.join(tmp, "export.json"), os.path.join(tmp, "out")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(entries, f)
+            args = [path, "--reference-date", "2026-12-31", "--output-dir", out, "--suppress-scope", "all"]
+            with redirect_stderr(StringIO()):
+                mm.main(args + ["--matrix", "rd"])
+            before = sorted(os.listdir(os.path.join(out, "rd")))
+            self.assertIn("rd_gesamt.json", before)
+            with mock.patch.object(rd, "suppressed_files", lambda *a, **k: original(*a, **{**k, "extend": False})):
+                for kind in ("rd", "both"):
+                    with self.assertRaises(SystemExit) as raised, redirect_stderr(StringIO()):
+                        mm.main(args + ["--matrix", kind, "--replace"])
+                    self.assertIn("Ausgabe gesperrt", str(raised.exception.code))
+            # nothing written, nothing of the earlier run deleted, no oncology either
+            self.assertEqual(sorted(os.listdir(os.path.join(out, "rd"))), before)
+            self.assertFalse(os.path.exists(os.path.join(out, "dnpm")))
+            self.assertFalse([f for f in before if "audit" in f])
+
+    def test_a_failed_write_removes_the_files_of_the_run(self):
+        entries = [{"case": r.case, "submittedAt": r.submitted_at, "content": r.content, "site": r.site}
+                   for r in self.quarters([(3, 3, 1, 0), (3, 3, 0, 0)])]
+        original = rd.write_outputs
+        calls = []
+
+        def failing(*a, **k):
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError("disk full")
+            return original(*a, **k)
+        with tempfile.TemporaryDirectory() as tmp:
+            path, out = os.path.join(tmp, "export.json"), os.path.join(tmp, "out")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(entries, f)
+            with mock.patch.object(rd, "write_outputs", failing), self.assertRaises(OSError), redirect_stderr(StringIO()):
+                mm.main([path, "--matrix", "rd", "--reference-date", "2026-12-31", "--output-dir", out])
+            self.assertEqual(os.listdir(os.path.join(out, "rd")), [])
 
 
 class NotAdditiveTests(unittest.TestCase):

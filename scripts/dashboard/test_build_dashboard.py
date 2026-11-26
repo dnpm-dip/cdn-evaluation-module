@@ -230,6 +230,49 @@ class DatenkranzModeTests(Base):
             self.assertFalse(bd.skipped_name(name), name)
 
 
+class Review20261126Tests(Base):
+    """Fixes after the cross-model review of 26.11.2026 (synthetic data)"""
+
+    def test_the_note_shows_the_case_count_as_the_matrix_does(self):
+        _, db = self.build("--mode", "datenkranz", self.write("export.json", submissions(n_a=3, n_b=0)))
+        note = db.execute("SELECT hinweis FROM zeitraum").fetchone()[0]
+        self.assertNotIn("3 Fälle", note)
+        self.assertIn("<5 Fälle", note)
+
+    def test_no_alle_next_to_a_suppressed_use_case(self):
+        unknown = submissions(n_a=8, n_b=0, disease="unknownDisease")
+        p = self.write("export.json", submissions(n_a=1, n_b=6) + unknown)
+        _, db = self.build("--mode", "datenkranz", p)
+        self.assertNotIn("Alle", [r[0] for r in db.execute("SELECT kurz FROM zeitraum")])
+
+    def test_free_text_is_counted_as_filled_only(self):
+        subs = submissions(n_a=1, n_b=0)
+        subs[0]["content"]["case"]["diagnosisRd"]["extraInfo"] = "fictitious patient detail"
+        subs[0]["content"]["case"]["diagnosisRd"]["freeTextRemark"] = "fictitious patient remark"
+        html, db = self.build("--mode", "datenkranz", self.write("export.json", subs))
+        text = " ".join(str(x) for (t,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'") for row in db.execute(f"SELECT * FROM {t}") for x in row)
+        self.assertNotIn("fictitious", text)
+        self.assertNotIn("fictitious", html)
+        self.assertIn("case.diagnosisRd.extraInfo", {r[0] for r in db.execute("SELECT kategorie FROM kennzahl")})    # its fill rate
+        self.assertTrue(bd.skipped_name("case.diagnosisRd.freeTextRemark"))
+
+    def test_onko_refuses_a_suppressed_embedded_time_series(self):
+        d = onko_matrix()
+        d["time_series"]["rows"][0]["values"]["LE-B"]["2026-01"] = {"value": "<5", "base": None, "percent": None}
+        with self.assertRaises(SystemExit):
+            self.build("--mode", "onko", self.write("onko.json", d))
+        second = onko_matrix() | {"period": "… - 31.01.2026"}
+        second["time_series"] = d["time_series"]
+        with self.assertRaises(SystemExit):
+            self.build("--mode", "onko", self.write("a.json", onko_matrix()), self.write("b.json", second))
+
+    def test_several_use_cases_have_no_time_series(self):
+        _, db = self.build("--mode", "datenkranz", self.write("export.json", submissions() + submissions(disease="oncological")))
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM zeitreihe").fetchone()[0], 0)
+        _, db = self.build("--mode", "datenkranz", self.write("export1.json", submissions(disease="oncological")))
+        self.assertGreater(db.execute("SELECT COUNT(*) FROM zeitreihe").fetchone()[0], 0)
+
+
 class HelperTests(unittest.TestCase):
     def test_period_name(self):
         self.assertEqual(bd.period_name("gesamter Export (Erstmeldungen 01.01.2026 - 31.03.2026)"), "Gesamt")

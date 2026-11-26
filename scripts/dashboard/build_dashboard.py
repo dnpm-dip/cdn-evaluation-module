@@ -383,6 +383,10 @@ def series_blocks(series, cases_item):
 # ===================================================================== mode datenkranz
 ID_LIKE = re.compile(r"(^id|Id(?=[A-Z]|$)|ID|_id|^tan|Tan(?=[A-Z]|$)|tanC|^patient|identifier|[Aa]ddress|[Nn]ame$|[Cc]omment|[Nn]ote|[Tt]ext$|[Dd]escription)")
 DATE_VALUE = re.compile(r"^\d{4}-\d{2}(-\d{2})?([T ][0-9:.]+(Z|[+-]\d{2}:?\d{2})?)?$")
+# a value label is published only for code-like strings (no blanks, at most 40 characters: codes, enum values, ICD,
+# ORPHA, OPS, ATC); any other string of a field (free text, a remark, a name) is counted as filled only
+CODE_VALUE = re.compile(r"^[A-Za-z0-9_.:+/\-]{1,40}$")
+FREE_TEXT_NAME = re.compile(r"[Rr]emark|[Ff]ree[Tt]ext|[Ff]reitext|[Cc]omment|[Nn]otes?$|[Bb]emerkung")
 MAX_DISTINCT = 30
 USE_CASE = {"rare": "RD", "oncological": "MTB", "hereditary": "MTB"}
 # Oncology is not suppressed (decision of the data holders, 26.11.2026); RD and unknown use cases are, like the RD matrix.
@@ -432,7 +436,7 @@ def walk(x, path=""):
 
 
 def skipped_name(path):
-    return any(ID_LIKE.search(seg.replace("[]", "")) for seg in path.split("."))
+    return any(ID_LIKE.search(seg.replace("[]", "")) or FREE_TEXT_NAME.search(seg.replace("[]", "")) for seg in path.split("."))
 
 
 class Counter2:
@@ -485,6 +489,8 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
             continue
         if all(isinstance(v, str) and DATE_VALUE.match(v) for v in vs):
             kind[p] = "date"
+        elif any(isinstance(v, str) and not CODE_VALUE.match(v) for v in vs):
+            kind[p] = "filled"                              # free text: fill rate only, no values
         elif len(vs) <= MAX_DISTINCT:
             kind[p] = "enum"
         elif all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vs):
@@ -613,14 +619,14 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
             "title": f"DATENKRANZ {name}", "period": f"gesamter Export ({name}, Einreichungen {first} - {months[-1] if months else ''})",
             "reference_date": last if re.fullmatch(r"\d{4}-\d{2}-\d{2}", last) else None, "entities": ents, "labels": {e: e for e in ents},
             "rows": res_rows, "time_series": {"resolution": "month", "periods": months, "rows": ts_rows},
-            "notes": [f"{len(cases)} Fälle (Episoden mit Erstmeldung, Use Case {name}), Stand je Fall aus der letzten Nicht-Test-Einreichung; "
+            "notes": [f"{out((cases_key, TOTAL, 'gesamt'))['value']} Fälle (Episoden mit Erstmeldung, Use Case {name}), Stand je Fall aus der letzten Nicht-Test-Einreichung; "
                       "Füllgrad und Werte je Fall (ein Fall zählt je Wert einmal), Monat = Monat der Erstmeldung, bei Einreichungen der Monat der Einreichung.",
                       (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso Werte mit einer Basis unter {min_cell}; ergänzend "
                        f"unterdrückt, ebenfalls als <{min_cell}, damit sich keine unterdrückte Zelle aus Gesamt und den übrigen LE, aus dem Gesamtzeitraum und den "
                        "Monaten oder aus einer Aufteilung ergibt; eine Zelle <5 kann daher auch 5 oder mehr Fälle zählen." if suppressed else
                        "Keine Unterdrückung (Onkologie, Entscheidung der Datenhalter vom 26.11.2026): alle Werte exakt, auch unter 5."),
-                      f"Werte nur bei Feldern mit höchstens {MAX_DISTINCT} verschiedenen Werten; Datumsfelder als Monate. Nicht ausgewertet (Kennungen, "
-                      f"Freitext, mehr als {MAX_DISTINCT} verschiedene Texte): " + (", ".join(sorted(skipped)) or "keine") + "."],
+                      f"Werte nur bei Feldern mit höchstens {MAX_DISTINCT} verschiedenen kodierten Werten; Datumsfelder als Monate; Freitext nur als Füllgrad. "
+                      f"Nicht ausgewertet (Kennungen, Freitext, mehr als {MAX_DISTINCT} verschiedene Texte): " + (", ".join(sorted(skipped)) or "keine") + "."],
         }
         if suppressed:
             result.update(min_cell=min_cell, suppressed={"primary": primary, "complementary": len(hidden) - primary})
@@ -968,10 +974,11 @@ def main(argv=None):
             subs, failed = load_submissions(path)
             ucs = sorted({s["uc"] for s in subs} | {uc for _, uc in failed})
             sup = {uc: uc not in ONCOLOGY_USE_CASES for uc in ucs}
-            # "Alle" only over use cases suppressed alike: next to an exact oncology use case it would give the RD cells away
-            alle = len(ucs) > 1 and len(set(sup.values())) == 1
+            # no "Alle" next to a suppressed use case: Alle minus an exact (MTB) or separately suppressed use case
+            # (unknown) would give the RD cells away; the use cases are never added up
+            alle = len(ucs) > 1 and not any(sup.values())
             if len(ucs) > 1 and not alle:
-                print(f"{path.name}: no use case 'Alle' (oncology is not suppressed, RD is)", file=sys.stderr)
+                print(f"{path.name}: no use case 'Alle' (RD and unknown use cases are suppressed, each on its own)", file=sys.stderr)
             sel = ([("Alle", set(ucs), sup[ucs[0]])] if alle else []) + [(uc, {uc}, sup[uc]) for uc in ucs]
             results, skipped = datenkranz_results(subs, failed, args.min_cell, sel)
             for (uc_name, d), (_, _, suppressed) in zip(results, sel):
@@ -992,7 +999,8 @@ def main(argv=None):
         mode = mode or (max(hits, key=hits.get) if max(hits.values()) > 0 else "allgemein")
         for l in runs:
             l["suppressed"] = DOMAINS[mode]["suppressed"]
-            if not l["suppressed"] and n_suppressed(v for r in l["d"]["rows"] for v in r["values"].values()):
+            ts_cells = (c for r in (l["d"].get("time_series") or {}).get("rows") or [] for pers in r["values"].values() for c in pers.values())
+            if not l["suppressed"] and n_suppressed(list(v for r in l["d"]["rows"] for v in r["values"].values()) + list(ts_cells)):
                 raise SystemExit(f"{l['path']}: suppressed cells (\"<5\"), but oncology is not suppressed (decision of the data holders, 26.11.2026); "
                                  "rebuild the matrix with the current dnpm_evaluation_matrix.py")
     cfg = DOMAINS[mode]
@@ -1018,7 +1026,12 @@ def main(argv=None):
     main_values = {(r["section"], r["item"]): r["values"] for r in main_run["d"]["rows"]}
     labels_back = {lab: e for l in runs for e, lab in l["d"]["labels"].items()}
     series, suppressed_series = [], []      # suppressed_series: runs ("Lauf") of the time series that are suppressed
-    if main_run["d"].get("time_series"):
+    # mode datenkranz with several use cases and no "Alle": the page shows one time series for every period, it would
+    # show the main use case's months next to another use case; left out
+    mixed = mode == "datenkranz" and len({l["zr_name"] for l in runs}) > 1 and main_run["zr_name"].split(" ")[-1] != "Alle"
+    if mixed:
+        print("mode datenkranz, several use cases: no time series (it would show one use case's months for all)", file=sys.stderr)
+    if main_run["d"].get("time_series") and not mixed:
         res, periods, ss = series_from_matrix(main_run["d"], main_values)
         series.append((main_run["path"].stem, res, main_run["ds"], periods, ss))
         if main_run["suppressed"]:

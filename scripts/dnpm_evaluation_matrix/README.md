@@ -144,6 +144,7 @@ Datenkranz carries them. Base: the sequenced cases with a GFK2 date (`with_mtb` 
 | verstorben | `vitalStatus` deceased in any follow-up: no further follow-up due (also if a later follow-up says living; a `deathDate` without deceased doesn't count, it is a Rückfrage) |
 | noch nicht fällig | GFK2 less than one interval before the reference date |
 | lost to follow-up | not deceased, GFK2 ≥ 12 months before the reference date, and no `followUpDate` or `lastContactDate` in the 12 months before it ("no contact for a year"). `followUpDate` is the date of the documentation, used as the date of contact. As the SOP has it, the follow-up ends here: such a case is neither due nor overdue (a state of its own; until 25.11.2026 it was counted as overdue) |
+| dates | `followUpDate` and `lastContactDate` as on the timeline: a month (`YYYY-MM`) as its 15th, the same for contact, state and the days to the first follow-up (the earliest `followUpDate` from GFK2 on); deceased at the reference date only by a follow-up and death date up to it |
 | fällig, aktuell | due, not lost, and a `followUpDate` in the interval before the reference date: after the reference date minus the interval (counted back from the reference date, so a month end doesn't shorten the window), up to the reference date |
 | fällig, überfällig | due, not lost, and no such `followUpDate` |
 | Follow-up aktuell, von fälligen | current / (current + overdue): the share of due follow-ups that are up to date; lost to follow-up is not in the base |
@@ -292,3 +293,14 @@ tells them apart by start date and substances.
    reported separately, and is `diagnosticAssessment` expected for them?
 9. Reasons for not implementing a recommendation: planned in the schema?
 10. TMB cut-off (10 mut/Mb used here) and HRD definition for the reports.
+
+## Upgrade of existing xlsx templates (PR #11)
+
+The row keys of the oncology matrix changed: the section `Umsetzung (sequenzierte Fälle mit Therapieempfehlung)` is
+now `Umsetzung (sequenzierte Fälle mit Therapie- oder Studienempfehlung)` (every key of the section), and there
+are new rows (lost to follow-up in the follow-up state, `davon GFK2 am Tag der GFK1`). A template made by an
+earlier run (`Auswertmatrix_MTB_Template.xlsx`) misses them, and `fill_template.py` stops with "rows of the result
+missing in the template". Recreate it once (`fill_template.py <dnpm_gesamt.json> <template> --new-template`, or
+delete it and run `fill_monthly.py`, which creates it) and apply a custom styling again. A plan counts as GFK2 only
+with content (`carePlanOd` not empty, or recommendations): `{}` and `{"carePlanOd": {}}` are none and don't
+displace an earlier plan.

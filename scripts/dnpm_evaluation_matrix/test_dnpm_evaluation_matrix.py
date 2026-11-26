@@ -884,6 +884,57 @@ class Review20261125Tests(unittest.TestCase):
         self.assertEqual(get(result, "GFK2 (MTB): Ergebnis (sequenzierte", "GFK2 dokumentiert (plan.carePlanOd)"), 1)
 
 
+class Review20261126Tests(unittest.TestCase):
+    """Fixes after the cross-model review of 26.11.2026 (synthetic data)"""
+
+    def evaluated(self, *contents, ref=date(2026, 11, 1)):
+        case = dm.build_cases([row("a", c) for c in contents])[0][0]
+        return dm.evaluate_case(case, ref, 14)
+
+    def test_an_empty_care_plan_is_no_gfk2_and_doesnt_displace_an_earlier_plan(self):
+        empty = datenkranz("t1", mtb=None)
+        empty["plan"] = {"carePlanOd": {}}
+        result = cases(empty, datenkranz("t2"))
+        self.assertEqual(get(result, "GFK2 (MTB): Ergebnis (sequenzierte", "GFK2 dokumentiert (plan.carePlanOd)"), 1)
+        populated = datenkranz("t1", submitted="2025-03-01", therapies=[therapy_rec("r1")])
+        later = datenkranz("t2", type_="followup", submitted="2025-04-01", mtb=None)
+        later["plan"] = {"carePlanOd": {}}
+        e = self.evaluated(populated, later)
+        self.assertTrue(e.has_plan)
+        self.assertEqual(len(e.therapies), 1)
+        self.assertTrue(self.evaluated(datenkranz("t1", mtb="2025-02-20")).has_plan)     # a plan with only its date
+
+    def test_month_dates_are_contacts_and_the_first_follow_up_is_the_earliest(self):
+        e = self.evaluated(datenkranz("t1", mtb="2025-02-20", follow_ups=[follow_up("2026-10")]))
+        self.assertEqual(e.contact_dates, [date(2026, 10, 15)])
+        self.assertNotEqual(dm.follow_up_state(e, date(2026, 11, 1)), dm.FU_LOST)
+        e = self.evaluated(datenkranz("t1", mtb="2025-02-20", follow_ups=[follow_up("2026-09-01"), follow_up("2025-03-10")]))
+        self.assertEqual(e.first_fu_days, 18)
+        self.assertEqual(e.fu_dates, sorted(e.fu_dates))
+
+    def test_a_death_after_the_reference_date_doesnt_change_the_state_at_it(self):
+        dead_later = follow_up("2026-12-01", vital="deceased", death="2026-11-20")
+        self.assertFalse(self.evaluated(datenkranz("t1", follow_ups=[dead_later])).deceased)
+        self.assertTrue(self.evaluated(datenkranz("t1", follow_ups=[dead_later]), ref=date(2026, 12, 15)).deceased)
+
+    def test_a_permit_starting_after_the_date_doesnt_cancel_a_valid_one(self):
+        ref = date(2026, 11, 1)
+        valid, renewal = broad_consent(start="2024-06-01"), broad_consent(start="2027-01-01")
+        self.assertTrue(dm.permits_research_use([{"scope": valid}, {"scope": renewal}], ref))
+        self.assertTrue(dm.permits_research_use([{"scope": renewal}, {"scope": valid}], ref))
+        self.assertFalse(dm.permits_research_use([{"scope": renewal}], ref))
+        self.assertFalse(dm.permits_research_use([{"scope": valid}, {"scope": broad_consent(start="2024-06-01", kind="deny")}], ref))
+
+    def test_without_a_submission_date_the_earliest_instant_dates_the_case(self):
+        a, b = datenkranz("t1"), datenkranz("t2")
+        for c in (a, b):
+            del c["metaData"]["submission"]["date"]
+        rows = [row("a", a, "2025-03-31T23:30:00-02:00"), row("a", b, "2025-04-01T00:30:00Z")]
+        case = dm.build_cases(rows)[0][0]
+        self.assertEqual(case.initial.content["metaData"]["tanC"], "t2")
+        self.assertEqual(dm.submission_date(case.initial), date(2025, 4, 1))
+
+
 class InputOutputTests(unittest.TestCase):
 
     def test_reads_the_export_with_reasons(self):

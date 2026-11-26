@@ -363,8 +363,12 @@ def submission_type(content):
 
 
 def submission_date(row):
-    """metaData.submission.date of a submission, else the time the export has for it"""
-    return parse_date(dig(row.content, "metaData", "submission", "date")) or parse_date(row.submitted_at)
+    """metaData.submission.date of a submission, else the date (UTC) of the time the export has for it"""
+    given = parse_date(dig(row.content, "metaData", "submission", "date"))
+    if given:
+        return given
+    kind, t, _ = submitted_order(row)
+    return t.date() if kind == 0 else parse_date(row.submitted_at)
 
 
 def period_of(d, resolution):
@@ -440,7 +444,14 @@ def submitted_order(row):
 def initial_submission(case):
     """The initial submission a case is dated by: of several the one with the earliest date (metaData.submission.date,
     else the time of the export), of equal dates the first sent"""
-    return min((r for r in case.rows if submission_type(r.content) == "initial"), key=lambda r: submission_date(r) or date.max)
+    return min((r for r in case.rows if submission_type(r.content) == "initial"),
+               key=lambda r: (submission_date(r) or date.max, submitted_order(r)))
+
+
+def meaningful_plan(plan):
+    """A plan with content: a non-empty carePlanOd or recommendations ({} and {"carePlanOd": {}} are none)"""
+    return isinstance(plan, dict) and bool((isinstance(plan.get("carePlanOd"), dict) and plan["carePlanOd"])
+                                           or items(plan.get("recommendedSystemicTherapies")) or items(plan.get("recommendedStudies")))
 
 
 def build_cases(rows):
@@ -533,6 +544,8 @@ def permits_research_use(research_consents, reference_date):
             provision = find(consent, code)
             if provision is None:
                 decisions.pop(code, None)
+            elif provision.get("type") == "permit" and (parse_date(dig(provision, "period", "start")) or date.min) > reference_date:
+                continue    # a permit that starts after the date is not in effect yet: it neither permits nor denies
             else:
                 decisions[code] = permitted(provision)
     return any(decisions.values())
@@ -687,8 +700,9 @@ def evaluate_case(case, reference_date, min_medical_days):
     priors = [p for p in items(dig(latest, "case", "priorDiagnostics")) if isinstance(p, dict)]
     procedures = [p for p in items(dig(latest, "case", "priorProcedures")) if isinstance(p, dict)]
 
-    # plan and molecular: the latest submission that has them (each submission carries the whole case)
-    plan = next((s["plan"] for s in reversed(case.submissions) if isinstance(s.get("plan"), dict)), None)
+    # plan and molecular: the latest submission that has them (each submission carries the whole case); an empty
+    # plan or care plan ({} from a partial submission) is no plan and doesn't displace an earlier one
+    plan = next((s["plan"] for s in reversed(case.submissions) if meaningful_plan(s.get("plan"))), None)
     care_plan = dig(plan, "carePlanOd") if isinstance(dig(plan, "carePlanOd"), dict) else {}
     therapies = [r for r in items(dig(plan, "recommendedSystemicTherapies")) if isinstance(r, dict)]
     studies = [r for r in items(dig(plan, "recommendedStudies")) if isinstance(r, dict)]
@@ -703,10 +717,16 @@ def evaluate_case(case, reference_date, min_medical_days):
     follow_up = max(follow_ups, key=lambda x: (x[0] or date.min, x[1]), default=(None, None, None))[2]
     # each follow-up once (a submission may repeat the earlier ones), and the dates of a contact
     fu_entries = list({json.dumps(f, sort_keys=True): f for _, _, f in follow_ups}.values())
-    fu_dates = sorted({d for d, _, _ in follow_ups if d})
-    contact_dates = sorted(set(fu_dates) | {d for d in (parse_date(f.get("lastContactDate")) for f in fu_entries) if d})
+    # the dates of the follow-ups and contacts, a month (YYYY-MM) as its 15th as on the timeline, sorted; the same
+    # for the state (current, lost) and the days to the first follow-up
+    fu_dates = sorted({d for d in (milestone_date(f.get("followUpDate")) for _, _, f in follow_ups) if d})
+    contact_dates = sorted(set(fu_dates) | {d for d in (milestone_date(f.get("lastContactDate")) for f in fu_entries) if d})
     deceased = any(f.get("vitalStatus") == "deceased" for _, _, f in follow_ups)
     death_dates = [parse_date(f.get("deathDate")) for _, _, f in follow_ups if f.get("deathDate")]
+    # deceased at the reference date: a follow-up up to it (or undated) with a death up to it (or undated); a later
+    # export evaluated at an earlier date doesn't change the state then
+    deceased_at = any(f.get("vitalStatus") == "deceased" and (d is None or d <= reference_date)
+                      and (parse_date(f.get("deathDate")) or date.min) <= reference_date for d, _, f in follow_ups)
     if follow_up is not None and (deceased and not death_dates or death_dates and not deceased):
         problems.append((P_DEATH, "vitalStatus deceased ohne deathDate" if deceased else "deathDate bei vitalStatus living"))
 
@@ -735,7 +755,6 @@ def evaluate_case(case, reference_date, min_medical_days):
                 if isinstance(sc, dict) and sc.get("domain") == "mvSequencing"]
     initial_row = initial_submission(case)
     therapy_starts = [d for d in (milestone_date(t.get("therapyStartDate")) for t in implemented) if d]
-    fu_dates = [d for d in (milestone_date(f.get("followUpDate")) for _, _, f in follow_ups) if d]
     milestone_dates = {
         "MV-Einwilligung": min((d for d in mv_dates if d), default=None),
         "Erstdiagnose": milestone_date(main.get("date")),
@@ -803,7 +822,7 @@ def evaluate_case(case, reference_date, min_medical_days):
         additional_diagnoses=bool(items(diagnosis.get("additionalDiagnoses"))),
         prior_types={p.get("type") for p in priors}, priors=bool(priors),
         procedures=procedures,
-        has_plan=isinstance(dig(plan, "carePlanOd"), dict), care_plan=care_plan, therapies=therapies, studies=studies,
+        has_plan=bool(care_plan), care_plan=care_plan, therapies=therapies, studies=studies,
         other_recommendations=set(items(care_plan.get("otherRecommendations"))),
         has_molecular=molecular is not None, small=small, cnvs=cnvs,
         tmb=max(tmbs) if tmbs else None, hrd=(True in hrd) if hrd else None,
@@ -811,7 +830,7 @@ def evaluate_case(case, reference_date, min_medical_days):
                           for f in ("ploidy", "tmb", "hrdHigh", "lstHigh", "taiHigh")},
         germline_variants=any(v.get("genomicSource") == "germline" for v in small + cnvs),
         follow_up_submissions=sum(1 for s in case.submissions if submission_type(s) == "followup"),
-        follow_up=follow_up, deceased=deceased, death_date=bool(death_dates),
+        follow_up=follow_up, deceased=deceased_at, death_date=bool(death_dates),
         fu_therapies=list(fu_therapies.values()), implemented=implemented,
         implemented_ids={str(t.get("reference")) for t in implemented},
         unlinked=[t for t in fu_therapies.values() if str(t.get("reference")) not in recommended],
@@ -1517,10 +1536,22 @@ def write_rueckfragen(output, result, delimiter=";", per_le=False):
     if not per_le:
         write_problems_csv(f"{output}_rueckfragen.csv", result["problems"], result["labels"], delimiter)
         return [f"{output}_rueckfragen.csv"]
-    paths = []
-    for le in result["entities"][1:]:
-        paths.append(f"{output}_rueckfragen_{re.sub(r'[^A-Za-z0-9._-]', '_', le)}.csv")
-        write_problems_csv(paths[-1], [p for p in result["problems"] if p["le"] == le], result["labels"], delimiter)
+    paths = per_le_paths(output, result["entities"][1:])
+    for le, path in paths.items():
+        write_problems_csv(path, [p for p in result["problems"] if p["le"] == le], result["labels"], delimiter)
+    return list(paths.values())
+
+
+def per_le_paths(output, les):
+    """{LE: <output>_rueckfragen_<LE>.csv}, the LE with characters other than letters, digits, . _ - as _; refuses
+    two LEs with the same file (also differing only in case, as on macOS and Windows): one would get the other's
+    case keys"""
+    paths = {le: f"{output}_rueckfragen_{re.sub(r'[^A-Za-z0-9._-]', '_', str(le))}.csv" for le in les}
+    seen = {}
+    for le, path in paths.items():
+        other = seen.setdefault(path.lower(), le)
+        if other != le:
+            raise SystemExit(f"LEs {other!r} and {le!r} would write the same file {path}; rename one (site of the export)")
     return paths
 
 

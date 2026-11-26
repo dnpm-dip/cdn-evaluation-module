@@ -442,6 +442,11 @@ p.glossar:first-of-type { margin-top: 8px; }
 const SQLJS_URL = window.__lokalSqlJsUrl;
 const ZR_KURZ = {};
 const NAV_A = (window.__jsonDash && window.__jsonDash.navA) || "Kennzahlen";
+/* Unterdrückung nur bei SE/RD: onkologische Daten sind exakt (Entscheidung der Datenhalter, 26.11.2026). Ohne Angabe: alles unterdrückt wie bisher.
+   aktiv: irgendein Wert der Seite unterdrückt; laeufe: Läufe der Zeitreihen mit Unterdrückung; fuss: Fußtext, wenn nicht alles unterdrückt ist */
+const UNT = (window.__jsonDash && window.__jsonDash.unterdrueckung) || null;
+const laufUnt = (lauf) => !UNT || UNT.laeufe.includes(lauf);
+const ohneUnt = !!UNT && !UNT.aktiv;
 const $ = (s, r) => (r || document).querySelector(s);
 /* Elemente bauen: Datenwerte landen immer als Textknoten im Dokument, nie als HTML */
 function h(tag, attrs, ...kinder) {
@@ -529,7 +534,7 @@ const dsFuer = (zr) => D.ds.filter((d) => D.dsZr.some((x) => x.datenstand === d.
 function dsAktiv(zr) { const l = dsFuer(zr || S.zr).filter((d) => !S.ds || d <= S.ds); return l.length ? l[l.length - 1] : null; }
 const dsErg = (ds) => !!(D.dsMap.get(ds) || {}).ergaenzende_unterdrueckung;
 const untErkl = (ds) => (dsErg(ds) ? "unterdrückt („<5“): 1–4 Fälle oder zum Schutz einer Nachbarzelle verborgen, auch 5 oder mehr möglich" : "unterdrückt: 1 bis 4 Fälle");
-const untLegende = (ds) => h("span", null, h("i", { class: "schraff" }), ds === "zeitreihe" || dsErg(ds || dsAktiv()) ? "unterdrückt (auch ≥ 5 möglich), feste Breite" : "unterdrückt: 1–4 Fälle (Spanne)");
+const untLegende = (ds) => ohneUnt ? null : h("span", null, h("i", { class: "schraff" }), ds === "zeitreihe" || dsErg(ds || dsAktiv()) ? "unterdrückt (auch ≥ 5 möglich), feste Breite" : "unterdrückt: 1–4 Fälle (Spanne)");
 function dbFuer(ds) {
   if (!ds || ds === dsNeu() || !/^\d{4}-\d{2}-\d{2}$/.test(ds)) return DBN;
   if (!DBS.has(ds)) {
@@ -1249,10 +1254,10 @@ function mrSerie(b) {
   D.mr = D.mr || new Map();
   const key = b.lauf + "|" + b.block;
   if (D.mr.has(key)) return D.mr.get(key);
-  const zellen = new Map(), perioden = new Set(), kzMonat = new Set(), kzGes = new Set(), les = new Set();
+  const zellen = new Map(), perioden = new Set(), kzMonat = new Set(), kzGes = new Set(), les = new Set(), unt = laufUnt(b.lauf);
   const rein = (le, r) => {
     const ges = r.periode === "gesamt" || r.aufloesung === "gesamt";
-    zellen.set(le + "|" + (ges ? "gesamt" : r.periode) + "|" + r.kennzahl, { w: r.wert == null ? null : +r.wert, unt: !!r.unterdrueckt || r.wert == null, text: r.wert_text });
+    zellen.set(le + "|" + (ges ? "gesamt" : r.periode) + "|" + r.kennzahl, { w: r.wert == null ? null : +r.wert, unt: !!r.unterdrueckt || (unt && r.wert == null), text: r.wert_text });
     if (ges) kzGes.add(r.kennzahl); else { perioden.add(r.periode); kzMonat.add(r.kennzahl); }
     if (le) les.add(le);
   };
@@ -1267,7 +1272,7 @@ function mrSerie(b) {
   kz.sort(istGrund ? (a, c) => GRUENDE.indexOf(kurz.get(a)) - GRUENDE.indexOf(kurz.get(c)) : (a, c) => summeGes(c) - summeGes(a));
   const farbe = new Map(kz.map((k, i) => [k, istGrund ? (GRUENDE.indexOf(kurz.get(k)) < 0 ? "ohne" : grundKl(GRUENDE.indexOf(kurz.get(k))).slice(3)) : i < 6 ? "v" + (i + 1) : i === 6 ? "g7" : "offen"]));
   const total = [...kzGes].find((k) => !kzMonat.has(k) && (!vors || vors.startsWith(k))) || null;
-  const s = { lauf: b.lauf, block: b.block, aufl: b.aufloesung, per, kz, kurz, farbe, total, les: D.le.map((l) => l.kuerzel).filter((l) => les.has(l)), zellen, maske: mrMaske(zellen, per, kz, [...les]) };
+  const s = { lauf: b.lauf, block: b.block, aufl: b.aufloesung, per, kz, kurz, farbe, total, les: D.le.map((l) => l.kuerzel).filter((l) => les.has(l)), zellen, unt, maske: unt ? mrMaske(zellen, per, kz, [...les]) : new Set() };
   s.zelle = (le, p, k) => { const z = zellen.get(le + "|" + p + "|" + k); if (!z) return null; return s.maske.has(le + "|" + p + "|" + k) ? { w: null, unt: true, maske: true, text: "unterdrückt" } : z; };
   D.mr.set(key, s);
   return s;
@@ -1304,7 +1309,7 @@ function mrDiagramm(s, le, modus) {
   const zeichne = (W) => {
     const H = 230, linien = modus === "linien", ml = 38, mr = 6, mt = 10, mb = 30, kap = 6;
     const iw = Math.max(40, W - ml - mr), ih = H - mt - mb, band = iw / Math.max(1, s.per.length);
-    const sum = werte.map((z) => z.reduce((a, c) => a + (c && c.w != null ? c.w : 0), 0)), untN = werte.map((z) => z.filter((c) => c && c.w == null).length);
+    const sum = werte.map((z) => z.reduce((a, c) => a + (c && c.w != null ? c.w : 0), 0)), untN = werte.map((z) => z.filter((c) => c && c.w == null && c.unt).length);
     const max = skalaMax((linien ? Math.max(0, ...werte.flat().map((c) => (c && c.w != null ? c.w : 0))) : Math.max(0, ...sum)) || 1, false);
     const y = (v) => mt + ih - (v / max) * ih, id = "mcS" + ++MC_NR;
     const svg = zsvg("svg", { width: W, height: H, viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": (le || "Alle LE") + ", " + s.block + " je " + auflName(s.aufl) });
@@ -1340,7 +1345,7 @@ function mrDiagramm(s, le, modus) {
     });
     s.per.forEach((p, i) => {
       const zeilen = [(le || "Alle LE") + " · " + (istMonat(s.aufl) ? "Erstmeldung " : "") + p];
-      s.kz.forEach((k, j) => { const c = werte[i][j]; if (c) zeilen.push(s.kurz.get(k) + ": " + (c.w == null ? (c.maske ? "unterdrückt (Schutz)" : "unterdrückt") : fz(c.w))); });
+      s.kz.forEach((k, j) => { const c = werte[i][j]; if (c) zeilen.push(s.kurz.get(k) + ": " + (c.w == null ? (c.maske ? "unterdrückt (Schutz)" : c.unt ? "unterdrückt" : "–") : fz(c.w))); });
       zeilen.push("Summe der exakten Werte: " + fz(sum[i]) + (untN[i] ? " (ohne " + untN[i] + " unterdrückte)" : ""));
       svg.append(zsvg("rect", { x: ml + i * band, y: mt, width: band, height: ih, class: "ziel", fill: "transparent", "data-tipp": zeilen.join("\n") }));
     });
@@ -1357,11 +1362,11 @@ function mrKarte(b, le) {
   const tot = s.total ? s.zelle(le, "gesamt", s.total) : null;
   return h("section", { class: "karte" }, h("div", { class: "reihe zwischen" }, h("h2", null, titel + (le ? ", " + le : ", alle LE")), seg("Darstellung", [["stapel", "Gestapelt"], ["linien", "Linien"]], S.mrModus, (m) => { S.mrModus = m; })),
     h("p", { class: "unter" }, "Fälle je " + auflName(s.aufl) + " der Erstmeldung, Lauf „" + s.lauf + "“ (unabhängig vom Datenstand der Matrix)" + (tot ? "; " + s.total + " im ganzen Lauf: " + (tot.w == null ? "unterdrückt" : fz(tot.w)) : "")
-      + ". Unterdrückte Zellen zählen in keiner Säule mit (schraffierter Deckel)" + (s.maske.size ? "; " + s.maske.size + " Monatswerte zusätzlich zum Schutz ausgeblendet" : "") + "."),
-    h("div", { class: "legende" }, s.kz.map((k) => h("span", null, h("i", { class: "sg " + s.farbe.get(k) }), s.kurz.get(k))), h("span", null, h("i", { class: "schraff" }), "unterdrückt oder zum Schutz ausgeblendet")),
+      + (s.unt ? ". Unterdrückte Zellen zählen in keiner Säule mit (schraffierter Deckel)" + (s.maske.size ? "; " + s.maske.size + " Monatswerte zusätzlich zum Schutz ausgeblendet" : "") : ". Nicht unterdrückt: alle Werte exakt") + "."),
+    h("div", { class: "legende" }, s.kz.map((k) => h("span", null, h("i", { class: "sg " + s.farbe.get(k) }), s.kurz.get(k))), s.unt ? h("span", null, h("i", { class: "schraff" }), "unterdrückt oder zum Schutz ausgeblendet") : null),
     mrDiagramm(s, le || "", S.mrModus),
     h("div", { class: "reihe", style: "margin-top:8px" }, csvKnopf("monate_" + slug(s.block) + "_" + (le || "alle") + ".csv", () => ({ spalten: ["periode"].concat(s.kz.map((k) => s.kurz.get(k))),
-      zeilen: s.per.map((p) => [p].concat(s.kz.map((k) => { const c = s.zelle(le || "", p, k); return !c ? "" : c.w == null ? "unterdrückt" : c.w; }))) }))));
+      zeilen: s.per.map((p) => [p].concat(s.kz.map((k) => { const c = s.zelle(le || "", p, k); return !c ? "" : c.w == null ? (c.unt ? "unterdrückt" : "") : c.w; }))) }))));
 }
 
 /* ===================================================================== Vergleich zweier Stände (Datenstände oder Zeiträume) */
@@ -1749,6 +1754,7 @@ async function start() {
       "Die Seite braucht rd.sqlite (oder rd.sqlite.b64.txt) neben sich. Technische Angabe: " + (e && e.message || e)));
     return;
   }
+  if (UNT && UNT.fuss) $("#fuss").textContent = UNT.fuss;
   $("#fuss").append(" Datenbank vom " + String(D.meta.get("erstellt_am") || "").replace("T", " um ") + ".");
   /* Ohne Kontext in der Adresse gilt der zuletzt gewählte */
   const r = leseHash();

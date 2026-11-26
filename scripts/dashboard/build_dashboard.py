@@ -9,7 +9,7 @@ Modes
   onko        result JSON(s) of dnpm_evaluation_matrix.py (their time_series is used)
   datenkranz  the result JSON of export-datenkranz or a JSON list of {case, submittedAt, content}: per LE and use
               case submissions, cases, fill rate of every Datenkranz path, value distributions of enum-like fields,
-              months of date fields; small cells suppressed like the matrix scripts
+              months of date fields; use case RD suppressed like the RD matrix, oncology (MTB) exact
 
 Usage
   python3 build_dashboard.py [--mode rd|onko|datenkranz] SOURCE [SOURCE ...] [--time-series FILE ...] --output dashboard.html
@@ -20,10 +20,12 @@ it: reference_date, cutoff, "Stichtag YYYY-MM-DD" in the notes, the end of a who
 (in mode datenkranz: the latest submission). Several sources of one period with different data states give the
 history view ("Verlauf").
 
-Suppression: "<5" means 1 to 4 cases or hidden to protect a neighbouring cell (then also 5 or more). The page shows
-it as "unterdrückt" without bounds, never as 0, and never computes it back. Bounds 1-4 are shown only for files that
-state they have no complementary suppression ("suppressed": {"complementary": 0}). problems[] (case keys, TANs) is
-never read.
+Suppression applies to rare diseases (SE/RD) only: by decision of the data holders (26.11.2026) oncology data
+(mode onko, use case MTB in mode datenkranz) is not suppressed, every value is exact; an oncology matrix or time
+series with suppressed cells ("<5") is refused. RD: "<5" means 1 to 4 cases or hidden to protect a neighbouring cell
+(then also 5 or more). The page shows it as "unterdrückt" without bounds, never as 0, and never computes it back.
+Bounds 1-4 are shown only for files that state they have no complementary suppression ("suppressed":
+{"complementary": 0}). problems[] (case keys, TANs) is never read.
 
 Third-party files (sql.js, Nunito, Asap) are not part of the repository: they are downloaded once from the pinned
 URLs into --vendor (default: .vendor next to this script), checked against SHA-256 pins, and embedded.
@@ -95,7 +97,7 @@ def vendor_file(directory, name, pins=VENDOR_PINS, download=True):
 # Only patterns on section and item; names always come from the data. kern: columns of the LE table and tiles of the
 # overview (the first five), (key, section pattern, item pattern, title); "{bezug}" is replaced by the row's base.
 # gfk: rows that together are exactly 0 mean "no GFK2 documented"; diagnostic rates over closed cases are then
-# flagged "GFK1=GFK2" on the page.
+# flagged "GFK1=GFK2" on the page. suppressed: small-cell suppression applies (None: per use case, see ONCOLOGY_USE_CASES).
 DOMAINS = {
     "rd": {
         "title": "RD-Auswertematrix", "text": "Seltene Erkrankungen, Modellvorhaben Genomsequenzierung", "nav": "Kennzahlen",
@@ -109,6 +111,7 @@ DOMAINS = {
             ("ohne_orphacode", r"^Orphacode", r"ohne Orphacode \(", "ohne Orphacode"),
         ],
         "gfk": [(r"^Bearbeitungsdauer medizinisch", r"^Dauer berechenbar"), (r"^Bearbeitungsdauer medizinisch", r"unmögliches Datum")],
+        "suppressed": True,
     },
     "onko": {
         "title": "Onko-Auswertematrix", "text": "Onkologie, Modellvorhaben Genomsequenzierung", "nav": "Kennzahlen",
@@ -121,7 +124,7 @@ DOMAINS = {
             ("einwilligung", r"^Einwilligung$", r"^Broad Consent gültig zum Stichtag", "Broad Consent gültig"),
             ("followup", r"^Fälle$", r"^Fälle mit mindestens einer Folgemeldung", "mit Folgemeldung"),
         ],
-        "gfk": [],
+        "gfk": [], "suppressed": False,
     },
     "datenkranz": {
         "title": "Datenkranz", "text": "Einreichungen und Füllgrad je Leistungserbringer", "nav": "Felder",
@@ -134,10 +137,10 @@ DOMAINS = {
             ("consent", r"^metaData$", r"^metaData\.researchConsents\[\]\.[^:]*$", "Broad Consent übermittelt (Fälle)"),
             ("plan", r"^plan$", r"^plan\.[^:]*$", "Versorgungsplan (erstes Feld)"),
         ],
-        "gfk": [],
+        "gfk": [], "suppressed": None,
     },
     "allgemein": {"title": "Auswertematrix", "text": "Aggregate je Leistungserbringer", "nav": "Kennzahlen",
-                  "script": "evaluation script", "detect": None, "kern": [], "gfk": []},
+                  "script": "evaluation script", "detect": None, "kern": [], "gfk": [], "suppressed": True},
 }
 CASES_ROW = (r"^Fälle$", r"^Fallzahl")                     # case count; else the first count without base
 SYNTHETIC = re.compile(r"(^|[\s(])(LE-[A-Z]{1,2}\b|SYN-)")   # LE-A … (generators of the scripts' tests), SYN-… (make_synthetic.py)
@@ -217,6 +220,11 @@ def cell(v, unit, bounds_allowed, min_cell):
         return value, None, 1, lo, hi, None, plo, phi, denom
     w, p = number(value), number(percent)
     return ("" if w is None else str(w)), w, 0, w, w, p, p, p, denom
+
+
+def n_suppressed(cells):
+    """Cells {value, base, percent} with a suppressed value or base ("<5")"""
+    return sum(1 for v in cells if isinstance(v, dict) and any(isinstance(v.get(k), str) and v[k].startswith("<") for k in ("value", "base")))
 
 
 # ===================================================================== distributions (detected in the data)
@@ -377,6 +385,8 @@ ID_LIKE = re.compile(r"(^id|Id(?=[A-Z]|$)|ID|_id|^tan|Tan(?=[A-Z]|$)|tanC|^patie
 DATE_VALUE = re.compile(r"^\d{4}-\d{2}(-\d{2})?([T ][0-9:.]+(Z|[+-]\d{2}:?\d{2})?)?$")
 MAX_DISTINCT = 30
 USE_CASE = {"rare": "RD", "oncological": "MTB", "hereditary": "MTB"}
+# Oncology is not suppressed (decision of the data holders, 26.11.2026); RD and unknown use cases are, like the RD matrix.
+ONCOLOGY_USE_CASES = {"MTB"}
 
 
 def load_submissions(path):
@@ -458,7 +468,8 @@ def suppress(cells, groups, min_cell, hidden=None):
 
 
 def datenkranz_results(subs, failed, min_cell, use_cases):
-    """One matrix-like result (keys of the matrix JSON) per use case selection -> list of (name, result), skipped paths"""
+    """One matrix-like result (keys of the matrix JSON) per use case selection (name, use cases, suppressed)
+    -> list of (name, result), skipped paths"""
     # value catalogue over all submissions: kind of each path
     values = defaultdict(set)
     skipped = set()
@@ -481,7 +492,7 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
         else:
             skipped.add(p)                                  # free text or identifier-like (more than 30 distinct strings)
     results = []
-    for name, ucs in use_cases:
+    for name, ucs, suppressed in use_cases:
         rows, cnt, groups = [], Counter2(), []
         row_index = {}
 
@@ -556,26 +567,28 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
                 groups.append((filled, list(dict.fromkeys(parts))))
         months = sorted({k[2] for k in cnt.c if k[2] != "gesamt" and re.fullmatch(r"\d{4}-\d{2}", k[2])})
         ents = [TOTAL] + les
-        # every cell (0 where nothing was counted) and the suppression groups
+        # every cell (0 where nothing was counted)
         cells = {}
         for r in rows:
             for e in ents:
                 for p in ["gesamt"] + months:
                     cells[(r["key"], e, p)] = cnt.c.get((r["key"], e, p), 0)
-        gl = []
-        for r in rows:
-            for p in ["gesamt"] + months:
-                gl.append([(r["key"], e, p) for e in ents])                    # Gesamt and the LEs
-            for e in ents:
-                gl.append([(r["key"], e, p) for p in ["gesamt"] + months])     # whole run and the months
-        for total, parts in groups:
-            for e in ents:
+        hidden = set()
+        if suppressed:          # RD: the suppression groups
+            gl = []
+            for r in rows:
                 for p in ["gesamt"] + months:
-                    gl.append([(total, e, p)] + [(k, e, p) for k in parts])    # a partition of a count
-        # values whose base is below min_cell are suppressed too (also 0), then the complementary suppression again
-        small_base = {(r["key"], e, p) for r in rows if r["base_key"] for e in ents for p in ["gesamt"] + months
-                      if 0 < cells[(r["base_key"], e, p)] < min_cell}
-        hidden, primary = suppress(cells, gl, min_cell, small_base)
+                    gl.append([(r["key"], e, p) for e in ents])                    # Gesamt and the LEs
+                for e in ents:
+                    gl.append([(r["key"], e, p) for p in ["gesamt"] + months])     # whole run and the months
+            for total, parts in groups:
+                for e in ents:
+                    for p in ["gesamt"] + months:
+                        gl.append([(total, e, p)] + [(k, e, p) for k in parts])    # a partition of a count
+            # values whose base is below min_cell are suppressed too (also 0), then the complementary suppression again
+            small_base = {(r["key"], e, p) for r in rows if r["base_key"] for e in ents for p in ["gesamt"] + months
+                          if 0 < cells[(r["base_key"], e, p)] < min_cell}
+            hidden, primary = suppress(cells, gl, min_cell, small_base)
 
         def out(k):
             r = rows[row_index[k[0]]]
@@ -596,19 +609,22 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
                     "values": {e: {p: out((r["key"], e, p)) for p in months} for e in ents}} for r in rows]
         last = max((s["at"][:10] for s in mine), default="")
         first = min((m for m in months), default="")
-        results.append((name, {
+        result = {
             "title": f"DATENKRANZ {name}", "period": f"gesamter Export ({name}, Einreichungen {first} - {months[-1] if months else ''})",
-            "min_cell": min_cell, "suppressed": {"primary": primary, "complementary": len(hidden) - primary},
             "reference_date": last if re.fullmatch(r"\d{4}-\d{2}-\d{2}", last) else None, "entities": ents, "labels": {e: e for e in ents},
             "rows": res_rows, "time_series": {"resolution": "month", "periods": months, "rows": ts_rows},
             "notes": [f"{len(cases)} Fälle (Episoden mit Erstmeldung, Use Case {name}), Stand je Fall aus der letzten Nicht-Test-Einreichung; "
                       "Füllgrad und Werte je Fall (ein Fall zählt je Wert einmal), Monat = Monat der Erstmeldung, bei Einreichungen der Monat der Einreichung.",
-                      f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso Werte mit einer Basis unter {min_cell}; ergänzend "
-                      f"unterdrückt, ebenfalls als <{min_cell}, damit sich keine unterdrückte Zelle aus Gesamt und den übrigen LE, aus dem Gesamtzeitraum und den "
-                      "Monaten oder aus einer Aufteilung ergibt; eine Zelle <5 kann daher auch 5 oder mehr Fälle zählen.",
+                      (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso Werte mit einer Basis unter {min_cell}; ergänzend "
+                       f"unterdrückt, ebenfalls als <{min_cell}, damit sich keine unterdrückte Zelle aus Gesamt und den übrigen LE, aus dem Gesamtzeitraum und den "
+                       "Monaten oder aus einer Aufteilung ergibt; eine Zelle <5 kann daher auch 5 oder mehr Fälle zählen." if suppressed else
+                       "Keine Unterdrückung (Onkologie, Entscheidung der Datenhalter vom 26.11.2026): alle Werte exakt, auch unter 5."),
                       f"Werte nur bei Feldern mit höchstens {MAX_DISTINCT} verschiedenen Werten; Datumsfelder als Monate. Nicht ausgewertet (Kennungen, "
                       f"Freitext, mehr als {MAX_DISTINCT} verschiedene Texte): " + (", ".join(sorted(skipped)) or "keine") + "."],
-        }))
+        }
+        if suppressed:
+            result.update(min_cell=min_cell, suppressed={"primary": primary, "complementary": len(hidden) - primary})
+        results.append((name, result))
     return results, sorted(skipped)
 
 
@@ -731,7 +747,7 @@ def build_database(runs, series_sources, domain, synthetic, extra_files=()):
         for i, ds in enumerate(states, 1):
             ls = [l for l in runs if l["ds"] == ds]
             n_cases = next((number(r["values"].get(TOTAL, {}).get("value")) for l in ls if l["zr"] == "gesamt" for r in l["d"]["rows"] if r["key"] == cases_r["key"]), None)
-            db.execute("INSERT INTO datenstand VALUES (?,?,?,?,?,?,?)", (ds, i, n_cases, int(not all(l["bounds"] for l in ls)), cfg["script"], int(ds == states[-1]),
+            db.execute("INSERT INTO datenstand VALUES (?,?,?,?,?,?,?)", (ds, i, n_cases, int(any(l["suppressed"] and not l["bounds"] for l in ls)), cfg["script"], int(ds == states[-1]),
                                                                          "; ".join(f"{l['path'].name}: {l['d'].get('title') or l['d']['period']} (Datenstand: {l['ds_source']})" for l in ls)))
             for l in ls:
                 for r in l["d"]["rows"]:      # matrixzeile: position in the union, so every data state lists the rows in one order
@@ -840,7 +856,7 @@ PAGE_JS = r"""
 (function () {
   "use strict";
   const W = __VALUES__;
-  window.__jsonDash = { kern: W.kern, profilZeile: W.profilZeile, gfkZeilen: W.gfkZeilen, navA: W.navA };
+  window.__jsonDash = { kern: W.kern, profilZeile: W.profilZeile, gfkZeilen: W.gfkZeilen, navA: W.navA, unterdrueckung: W.unterdrueckung };
   const b64 = (t) => { const bin = atob(t), out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
   let bytes = null;
   window.fetch = async function (input) {
@@ -913,6 +929,18 @@ def build_page(template, vendor, db, values, title, text, nav, pins=VENDOR_PINS,
 
 
 # ===================================================================== main
+def footer(suppressed):
+    """Footer text of the page when not every run is suppressed (None: the template's text on suppression)"""
+    if all(suppressed):
+        return None
+    exact = "nach Entscheidung der Datenhalter (26.11.2026) nicht unterdrückt, alle Werte sind exakt, auch unter 5."
+    if not any(suppressed):
+        return "Nur Aggregate je LE. Keine Unterdrückung kleiner Zellen: Onkologische Daten werden " + exact
+    return ("Nur Aggregate je LE. Unterdrückt wird nur bei Seltenen Erkrankungen (RD); onkologische Daten (MTB) werden " + exact
+            + " RD: Unterdrückte Zellen („<5“, schraffiert) werden nie als 0 gezeigt und nie zurückgerechnet; eine unterdrückte Zelle kann auch"
+            " 5 oder mehr Fälle zählen (ergänzende Unterdrückung). Eine Veränderung ist „n. b.“ (nicht berechenbar), sobald eine Seite unterdrückt ist.")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sources", nargs="+", metavar="SOURCE", help="[name][@YYYY-MM-DD]=file.json or file.json")
@@ -920,7 +948,7 @@ def main(argv=None):
     ap.add_argument("--title", help="heading (default per mode)")
     ap.add_argument("--time-series", action="append", default=[], type=Path, metavar="FILE",
                     help="monthly/quarterly values: rd_time_series.py output (JSON or CSV), a matrix JSON with time_series, or *_zeitreihe.csv")
-    ap.add_argument("--min-cell", type=int, default=5, help="mode datenkranz: counts below are suppressed (default: %(default)s)")
+    ap.add_argument("--min-cell", type=int, default=5, help="mode datenkranz, use case RD: counts below are suppressed (default: %(default)s)")
     ap.add_argument("--output", required=True, type=Path, help="HTML file to write")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--synthetic", action="store_true", help="label as synthetic data")
@@ -939,12 +967,17 @@ def main(argv=None):
         for name, date, path, _ in parsed:
             subs, failed = load_submissions(path)
             ucs = sorted({s["uc"] for s in subs} | {uc for _, uc in failed})
-            sel = ([("Alle", set(ucs))] if len(ucs) > 1 else []) + [(uc, {uc}) for uc in ucs]
+            sup = {uc: uc not in ONCOLOGY_USE_CASES for uc in ucs}
+            # "Alle" only over use cases suppressed alike: next to an exact oncology use case it would give the RD cells away
+            alle = len(ucs) > 1 and len(set(sup.values())) == 1
+            if len(ucs) > 1 and not alle:
+                print(f"{path.name}: no use case 'Alle' (oncology is not suppressed, RD is)", file=sys.stderr)
+            sel = ([("Alle", set(ucs), sup[ucs[0]])] if alle else []) + [(uc, {uc}, sup[uc]) for uc in ucs]
             results, skipped = datenkranz_results(subs, failed, args.min_cell, sel)
-            for i, (uc_name, d) in enumerate(results):
+            for (uc_name, d), (_, _, suppressed) in zip(results, sel):
                 ds = date or d.get("reference_date") or datetime.date.fromtimestamp(path.stat().st_mtime).isoformat()
                 runs.append({"zr_name": uc_name if not name else f"{name} {uc_name}", "ds": ds, "ds_source": "given" if date else "latest submission",
-                             "path": path, "d": d, "bounds": False})
+                             "path": path, "d": d, "bounds": False, "suppressed": suppressed})
             print(f"{path.name}: {len(subs)} submissions, use cases {', '.join(ucs)}; skipped paths (identifiers, free text): {len(skipped)}", file=sys.stderr)
     else:
         for name, date, path, d in parsed:
@@ -957,6 +990,11 @@ def main(argv=None):
         sections = {r["section"] for l in runs for r in l["d"]["rows"]}
         hits = {k: sum(1 for s in sections if re.search(c["detect"], s)) for k, c in DOMAINS.items() if c["detect"]}
         mode = mode or (max(hits, key=hits.get) if max(hits.values()) > 0 else "allgemein")
+        for l in runs:
+            l["suppressed"] = DOMAINS[mode]["suppressed"]
+            if not l["suppressed"] and n_suppressed(v for r in l["d"]["rows"] for v in r["values"].values()):
+                raise SystemExit(f"{l['path']}: suppressed cells (\"<5\"), but oncology is not suppressed (decision of the data holders, 26.11.2026); "
+                                 "rebuild the matrix with the current dnpm_evaluation_matrix.py")
     cfg = DOMAINS[mode]
 
     names = list(dict.fromkeys(l["zr_name"] for l in runs))
@@ -979,13 +1017,20 @@ def main(argv=None):
 
     main_values = {(r["section"], r["item"]): r["values"] for r in main_run["d"]["rows"]}
     labels_back = {lab: e for l in runs for e, lab in l["d"]["labels"].items()}
-    series = []
+    series, suppressed_series = [], []      # suppressed_series: runs ("Lauf") of the time series that are suppressed
     if main_run["d"].get("time_series"):
         res, periods, ss = series_from_matrix(main_run["d"], main_values)
         series.append((main_run["path"].stem, res, main_run["ds"], periods, ss))
+        if main_run["suppressed"]:
+            suppressed_series.append(main_run["path"].stem)
     for p in args.time_series:
         series.append(read_time_series(p, labels_back, main_values))
         extra.append(p)
+        if cfg["suppressed"]:
+            suppressed_series.append(series[-1][0])
+        elif n_suppressed(v for *_, cells in series[-1][4] for v in cells.values()):
+            raise SystemExit(f"{p}: suppressed cells (\"<5\"), but oncology is not suppressed (decision of the data holders, 26.11.2026); "
+                             "rebuild it with the current dnpm_evaluation_matrix.py")
 
     label_texts = [lab for l in runs for e, lab in l["d"]["labels"].items() if e != TOTAL] + [e for l in runs for e in l["d"]["entities"] if e != TOTAL]
     synthetic = args.synthetic or (not args.real and any(SYNTHETIC.search(x) for x in label_texts))
@@ -999,6 +1044,7 @@ def main(argv=None):
         "built": built.strftime("%d.%m.%Y %H:%M"), "sources": sources,
         "sourcesShort": ", ".join(files) if len(", ".join(files)) <= 80 else f"{files[0]} + {len(files) - 1} weitere",
         "notes": [str(n) for n in main_run["d"].get("notes") or []],
+        "unterdrueckung": {"aktiv": any(l["suppressed"] for l in runs), "laeufe": suppressed_series, "fuss": footer([l["suppressed"] for l in runs])},
     }
     title = args.title or cfg["title"]
     html = build_page(args.template, args.vendor, db, values, title, cfg["text"], cfg["nav"], download=not args.offline)
@@ -1008,7 +1054,8 @@ def main(argv=None):
     print(f"{args.output}  {args.output.stat().st_size / 1048576:.1f} MiB (database {len(db) / 1048576:.2f} MiB); mode {mode}, "
           f"{len(names)} period(s), {len(info['states'])} data state(s), {info['series_values']} time series values, synthetic={'yes' if synthetic else 'no'}")
     for l in runs:
-        print(f"  {l['path'].name}: period '{l['zr_name']}', data state {l['ds']} ({l['ds_source']})" + ("" if l["bounds"] else ", complementary suppression: no bounds"))
+        print(f"  {l['path'].name}: period '{l['zr_name']}', data state {l['ds']} ({l['ds_source']})"
+              + (", not suppressed" if not l["suppressed"] else "" if l["bounds"] else ", complementary suppression: no bounds"))
     return 0
 
 

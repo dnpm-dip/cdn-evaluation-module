@@ -1082,6 +1082,82 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(lines[-1].strip(), "Durchgang 1/2: 100 % von 2.0 GB")
 
 
+class MergeReviewTests(unittest.TestCase):
+    """Findings of the review of the merge with upstream 0.1.6 (streaming input)"""
+
+    def test_run_reads_an_iterator_like_a_list(self):
+        rows = [row("a", datenkranz("t1")), row("b", datenkranz("t2", submitted="2025-04-01"))]
+        self.assertEqual(dm.run(iter(rows), iter([]), None, None, REFERENCE), dm.run(rows, [], None, None, REFERENCE))
+
+    def test_a_complete_case_missing_in_the_second_pass_is_refused(self):
+        rows = [row("a", datenkranz("t1")), row("b", datenkranz("t2"))]
+        passes = {1: rows, 2: rows[:1]}
+        with self.assertRaisesRegex(ValueError, "changed between the two passes"):
+            dm.run_passes(lambda n: iter(passes[n]), lambda: [], None, None, REFERENCE)
+
+    def test_a_number_cut_at_the_end_of_the_buffer(self):
+        data = export_json([row("a", datenkranz("t1"))])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "in.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"count": 1.5, "flag": 12e1, ' + json.dumps(data)[1:])
+            for chunk in range(1, 40):      # some chunk ends the buffer after "1." or "12e"
+                with self.subTest(chunk=chunk), mock_chunk(chunk):
+                    rows, _ = dm.load_submissions(path)
+                    self.assertEqual(len(rows), 1)
+
+    def test_columns_after_the_rows_keep_the_reason(self):
+        data = export_json([row("a", datenkranz("t1"))])
+        data["tables"][0]["rows"][0]["reasonResearchConsentMissing"] = "technical-issues"
+        table = data["tables"][0]
+        data["tables"][0] = {"name": table["name"], "rows": table["rows"], "columns": table["columns"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "in.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            rows, _ = dm.load_submissions(path)
+        self.assertEqual(rows[0].reason, "technical-issues")
+
+    def test_reason_column_known_from_rows_after_the_cutoff(self):
+        entries = [{"case": "a", "site": "LE-A", "submittedAt": "2025-03-01T10:00:00", "content": datenkranz("t1")},
+                   {"case": "b", "site": "LE-A", "submittedAt": "2025-06-01T10:00:00",
+                    "content": datenkranz("t2", submitted="2025-06-01"), "reasonResearchConsentMissing": None}]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "in.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(entries, f)
+            cutoff = date(2025, 4, 15)
+            rows, failures = dm.load_submissions(path)
+            expected = dm.run(rows, failures, None, None, cutoff, cutoff=cutoff)
+            actual = dm.run_file(dm.InputFile(path), None, None, cutoff, cutoff=cutoff)
+        self.assertEqual(actual, expected)
+        self.assertFalse(any("keine Spalte reasonResearchConsentMissing" in n for n in actual["notes"]))
+
+    def test_a_failure_before_the_latest_converted_submission_is_not_stale(self):
+        rows = [row("a", datenkranz("t1", submitted="2025-03-10"))]
+        failures = [dm.Failure("LE-A", json.dumps(["LE-A", "a"]), "t0", "2025-03-01T00:00:00", "conversion failed")]
+        result = run(rows, failures=failures)
+        self.assertEqual(get(result, "Fälle", "davon Episode mit älterem Stand ausgewertet (eine spätere Einreichung nicht konvertierbar)"), 0)
+        self.assertFalse(problems(result, dm.P_NOT_CONVERTED)[0]["detail"].startswith("Episode mit älterem Stand"))
+
+    def test_therapy_started_after_the_reference_date_is_not_started_yet(self):
+        later = {"reference": "r1", "therapyStartDate": "2026-12-01"}
+        result = cases(datenkranz("t1", therapies=[therapy_rec("r1")], follow_ups=[follow_up(therapies=[later])]))
+        s = dm.FU_SECTION
+        self.assertEqual(get(result, s, "Kategorie 1: empfohlene Therapie begonnen (Intervall 3 Monate)"), 0)
+        self.assertEqual(get(result, s, "Kategorie 2: Therapie- oder Studienempfehlung, nicht begonnen (Intervall 3 Monate)"), 1)
+
+    def test_death_in_a_month_after_the_reference_date(self):
+        result = cases(datenkranz("t1", follow_ups=[follow_up(fu_date="2026-12", vital="deceased", death="2026-12")]))
+        self.assertEqual(get(result, dm.FU_SECTION, f"Stand am Stichtag: {dm.FU_DECEASED}"), 0)
+
+    def test_a_later_plan_without_care_plan_keeps_the_documented_gfk2(self):
+        later = datenkranz("t2", type_="followup", submitted="2025-05-01", therapies=[therapy_rec("r1")])
+        del later["plan"]["carePlanOd"]
+        result = run([row("a", datenkranz("t1")), row("a", later)])
+        self.assertEqual(get(result, "GFK2 (MTB): Ergebnis", "GFK2 dokumentiert (plan.carePlanOd)"), 1)
+
+
 @contextlib.contextmanager
 def mock_chunk(size):
     previous = dm.JsonStream.CHUNK

@@ -221,6 +221,17 @@ class DatenkranzModeTests(Base):
         self.assertEqual(db.execute("SELECT COUNT(*) FROM zeitreihe z WHERE unterdrueckt = 1 AND kennzahl NOT LIKE '%diagnoses[].code: %'").fetchone()[0], 0)
         self.assertIn('"navA": "Felder"', html)
 
+    def test_rare_codes_not_named(self):
+        # a row named by a code of 1 to 4 cases would show that the code occurs: such codes share one row
+        subs = submissions()
+        subs[0]["content"]["case"]["diagnosisRd"]["diagnoses"].append({"code": "ORPHA:12345"})
+        html, db = self.build("--mode", "datenkranz", self.write("export.json", subs))
+        kats = {r[0] for r in db.execute("SELECT kategorie FROM kennzahl")}
+        self.assertNotIn("case.diagnosisRd.diagnoses[].code: ORPHA:12345", kats)
+        self.assertNotIn("ORPHA:12345", html)
+        self.assertIn("case.diagnosisRd.diagnoses[].code: " + bd.OTHER_CODES.format(min_cell=5), kats)
+        self.assertIn("case.diagnosisRd.diagnoses[].code: ORPHA:558", kats)      # 43 cases
+
     def test_no_group_with_one_suppressed_cell(self):
         p = self.write("export.json", submissions(n_a=23, n_b=9))
         _, db = self.build("--mode", "datenkranz", p)

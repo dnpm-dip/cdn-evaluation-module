@@ -2176,8 +2176,10 @@ def render(ev, cells, size, hidden, unprotected, escalated, min_cell, joint_note
         notes.append("Grund für einen fehlenden Broad Consent: metadata.reasonResearchConsentMissing der letzten DIP-Einreichung "
                      "(Spalte des Exports); das Mapping in den Datenkranz übernimmt ihn nicht. Nach Monat: Monat der Erstmeldung.")
     if unmapped_heads:
-        notes.append("Orphanet-Gruppenköpfe ohne Vorlagengruppe, gezählt unter 'unbekannt: Gruppenkopf': "
-                     + ", ".join(sorted(unmapped_heads)) + "; HEAD_GROUP ergänzen.")
+        # on stderr for the KDK, not in the notes: naming a head would show that its cases occur, which the
+        # suppressed rows hide ("unbekannt: Gruppenkopf" may be <5 for 0)
+        print(f"{period}: Orphanet-Gruppenköpfe ohne Vorlagengruppe, gezählt unter 'unbekannt: Gruppenkopf': "
+              + ", ".join(sorted(unmapped_heads)) + "; HEAD_GROUP ergänzen.", file=sys.stderr)
 
     return {
         "title": f"AUSWERTUNG {period}",

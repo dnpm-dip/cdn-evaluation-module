@@ -1082,6 +1082,18 @@ class CodeScopeTests(unittest.TestCase):
                 self.assertEqual(new, {**old, "suppress_scope": "all"})
 
 
+class SubmittedOrderTests(unittest.TestCase):
+
+    def test_episode_without_initial_by_its_first_submission_in_utc(self):
+        # 2025-03-31T23:30-02:00 is 2025-04-01T01:30Z, after 2025-04-01T00:30Z: the April submission is the first
+        march = datenkranz("t1", type_="followup", submitted="2025-03-31")
+        april = datenkranz("t2", type_="followup", submitted="2025-04-01")
+        rows = [row("a", march, "2025-03-31T23:30:00-02:00"), row("a", april, "2025-04-01T00:30:00Z")]
+        result = run(rows, resolution=ts.QUARTER)
+        self.assertEqual(get(result, ts.B_SUBMISSIONS, ts.WITHOUT_INITIAL, "2025-Q2"), 1)
+        self.assertEqual(get(result, ts.B_SUBMISSIONS, ts.WITHOUT_INITIAL, "2025-Q1"), 0)
+
+
 @unittest.skipIf(plots is None, "plot_time_series.py needs matplotlib")
 class PlotTests(unittest.TestCase):
 

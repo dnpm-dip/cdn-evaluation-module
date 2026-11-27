@@ -395,6 +395,8 @@ USE_CASE = {"rare": "RD", "oncological": "MTB", "hereditary": "MTB"}
 # (case.diagnosisRd.diagnoses[].code); every other row (fill rates, other values, cases, submissions) is exact.
 ONCOLOGY_USE_CASES = {"MTB"}
 DIAGNOSIS_CODE_PATH = re.compile(r"(^|\.)diagnoses\[\]\.code$")
+# the row of the diagnosis codes of fewer than min_cell cases (mode datenkranz, suppressed use cases)
+OTHER_CODES = "andere Codes (je unter {min_cell} Fällen)"
 
 
 def is_code_row(r):
@@ -561,8 +563,18 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
             section = p.split(".")[0].split("[")[0]
             filled = row(section, p, cases_key, "Fälle")
             parts = []
+            label = (lambda v: v)
+            if suppressed and kind[p] == "enum" and DIAGNOSIS_CODE_PATH.search(p):
+                # a row per code would show by its name alone that the code occurs: codes of fewer than min_cell
+                # cases in the whole selection are counted together in one row
+                total = defaultdict(int)
+                for _, _, f in cases:
+                    for v in f.get(p, ()):
+                        total[v] += 1
+                rare = {v for v, n in total.items() if n < min_cell}
+                label = (lambda v, rare=rare: OTHER_CODES.format(min_cell=min_cell) if v in rare else v)
             if kind[p] in ("enum", "date"):                  # value rows in sorted order (months ascending)
-                seen = sorted({(v[:7] if kind[p] == "date" else v) for _, _, f in cases for v in f.get(p, ())}, key=lambda v: (str(type(v)), str(v)))
+                seen = sorted({(v[:7] if kind[p] == "date" else label(v)) for _, _, f in cases for v in f.get(p, ())}, key=lambda v: (str(type(v)), str(v)))
                 for v in seen:
                     row(section, f"{p}: {json.dumps(v) if isinstance(v, bool) else v}", filled, f"Fälle mit {p}")
             for le, month, f in cases:
@@ -571,7 +583,7 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
                     continue
                 cnt.add(filled, le, month)
                 if kind[p] == "enum":
-                    for v in sorted(vs, key=str):
+                    for v in sorted({label(v) for v in vs}, key=str):
                         k = row(section, f"{p}: {json.dumps(v) if isinstance(v, bool) else v}", filled, f"Fälle mit {p}")
                         cnt.add(k, le, month)
                         parts.append(k)
@@ -635,7 +647,7 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
             "notes": [f"{out((cases_key, TOTAL, 'gesamt'))['value']} Fälle (Episoden mit Erstmeldung, Use Case {name}), Stand je Fall aus der letzten Nicht-Test-Einreichung; "
                       "Füllgrad und Werte je Fall (ein Fall zählt je Wert einmal), Monat = Monat der Erstmeldung, bei Einreichungen der Monat der Einreichung.",
                       (f"Unterdrückt werden wie in der RD-Matrix nur die Zeilen, die zeigen, welche Erkrankung ein Fall hat: die Werte der Diagnosecodes "
-                       f"(diagnoses[].code). Dort sind Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso Werte mit einer Basis unter "
+                       f"(diagnoses[].code; Codes mit weniger als {min_cell} Fällen zusammen in der Zeile 'andere Codes'). Dort sind Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso Werte mit einer Basis unter "
                        f"{min_cell}; ergänzend unterdrückt, ebenfalls als <{min_cell} und nur in diesen Zeilen, damit sich keine unterdrückte Zelle aus Gesamt "
                        "und den übrigen LE oder aus dem Gesamtzeitraum und den Monaten ergibt; eine Zelle <5 kann daher auch 5 oder mehr Fälle zählen. "
                        "Alle anderen Zahlen (Einreichungen, Fälle, Füllgrade, andere Werte) sind exakt, auch unter 5." if suppressed else

@@ -376,8 +376,11 @@ class JsonStream:
         while True:
             try:
                 value, end = self.decoder.raw_decode(self.buf, self.pos)
-                # a value ending with the buffer may continue in the file (a number), unless at the end
-                if end < len(self.buf) or self.eof:
+                # a value ending with the buffer may continue in the file (a number), unless at the end; a number
+                # may also be cut inside ("1." of "1.5", "1e" of "1e5"): it is decoded as its prefix, so a number
+                # is only taken where something else follows it within the buffer
+                number = isinstance(value, (int, float)) and not isinstance(value, bool)
+                if self.eof or (end < len(self.buf) and not (number and not self.buf[end:].strip(" \t\n\r.eE+-0123456789"))):
                     self.pos = end
                     return value
             except json.JSONDecodeError as e:
@@ -478,7 +481,7 @@ class InputFile:
                 continue
             tables = set()
             for _ in stream.array():
-                table, exported = None, False
+                table, exported = None, None    # None: columns not read yet
                 for field in stream.object():
                     if field == "name":
                         table = stream.value()
@@ -491,8 +494,10 @@ class InputFile:
                         for _ in stream.array():
                             r = stream.value()
                             if table == "datenkranz" and r.get("useCase") in (None, "MTB"):
+                                # without columns before the rows (a reserialized export): whether the row has it
+                                has_reason = exported if exported is not None else REASON in r
                                 yield SubmissionRow(key(r), r.get("submittedAt") or "", r.get("content"), r.get("site"),
-                                                    r.get(REASON) if exported else NOT_EXPORTED)
+                                                    r.get(REASON) if has_reason else NOT_EXPORTED)
                             elif table == "failures" and r.get("useCase") in (None, "MTB"):
                                 failures.append(Failure(r.get("site"), key(r), r.get("tan"), r.get("submittedAt") or "",
                                                         str(r.get("error") or "")))
@@ -922,7 +927,10 @@ def evaluate_case(case, reference_date, min_medical_days):
     # plan and molecular: the latest submission that has them (each submission carries the whole case); an empty
     # plan or care plan ({} from a partial submission) is no plan and doesn't displace an earlier one
     plan = next((s["plan"] for s in reversed(case.submissions) if meaningful_plan(s.get("plan"))), None)
-    care_plan = dig(plan, "carePlanOd") if isinstance(dig(plan, "carePlanOd"), dict) else {}
+    # the care plan (GFK2 documented) of the latest submission that has one: a later plan with recommendations
+    # but without carePlanOd doesn't take back an earlier documented GFK2
+    care_plan = next((dig(s, "plan", "carePlanOd") for s in reversed(case.submissions)
+                      if isinstance(dig(s, "plan", "carePlanOd"), dict) and dig(s, "plan", "carePlanOd")), {})
     therapies = [r for r in items(dig(plan, "recommendedSystemicTherapies")) if isinstance(r, dict)]
     studies = [r for r in items(dig(plan, "recommendedStudies")) if isinstance(r, dict)]
     if plan is not None and bool(care_plan.get("studyRecommended")) != bool(studies):
@@ -943,9 +951,10 @@ def evaluate_case(case, reference_date, min_medical_days):
     deceased = any(f.get("vitalStatus") == "deceased" for _, _, f in follow_ups)
     death_dates = [parse_date(f.get("deathDate")) for _, _, f in follow_ups if f.get("deathDate")]
     # deceased at the reference date: a follow-up up to it (or undated) with a death up to it (or undated); a later
-    # export evaluated at an earlier date doesn't change the state then
-    deceased_at = any(f.get("vitalStatus") == "deceased" and (d is None or d <= reference_date)
-                      and (parse_date(f.get("deathDate")) or date.min) <= reference_date for d, _, f in follow_ups)
+    # export evaluated at an earlier date doesn't change the state then; a month (YYYY-MM) as its 15th, as above
+    deceased_at = any(f.get("vitalStatus") == "deceased"
+                      and (milestone_date(f.get("followUpDate")) or date.min) <= reference_date
+                      and (milestone_date(f.get("deathDate")) or date.min) <= reference_date for _, _, f in follow_ups)
     if follow_up is not None and (deceased and not death_dates or death_dates and not deceased):
         problems.append((P_DEATH, "vitalStatus deceased ohne deathDate" if deceased else "deathDate bei vitalStatus living"))
 
@@ -1062,16 +1071,17 @@ def evaluate_case(case, reference_date, min_medical_days):
     )
 
 
-def follow_up_category(e):
-    """The category of a case with GFK2 in the follow-up schedule (FU_CATEGORIES)"""
-    if e.implemented:
+def follow_up_category(e, reference_date):
+    """The category of a case with GFK2 in the follow-up schedule (FU_CATEGORIES) at the reference date: a
+    recommendation counts as started from its therapyStartDate on (undated: as started)"""
+    if any((milestone_date(t.get("therapyStartDate")) or date.min) <= reference_date for t in e.implemented):
         return FU_STARTED
     return FU_NOT_STARTED if e.therapies or e.studies else FU_NO_RECOMMENDATION
 
 
 def follow_up_interval(e, reference_date):
     """The follow-up interval in months of a case with GFK2 at the reference date"""
-    category = follow_up_category(e)
+    category = follow_up_category(e, reference_date)
     if category == FU_NOT_STARTED and add_months(e.gfk2, FU_NOT_STARTED_MONTHS) <= reference_date:
         return dict((k, m) for k, _, m in FU_CATEGORIES)[FU_NO_RECOMMENDATION]
     return dict((k, m) for k, _, m in FU_CATEGORIES)[category]
@@ -1417,7 +1427,7 @@ def matrix_rows(cases, subs, losses, problem_counts, reference_date):
     # follow-up schedule after the MTB (FU_CATEGORIES): the sequenced cases with a GFK2 date
     of_gfk2 = [e for e in with_mtb if e.gfk2]
     gfk2_label = "sequenzierte Fälle mit GFK2-Datum"
-    category = {e.key: follow_up_category(e) for e in of_gfk2}
+    category = {e.key: follow_up_category(e, reference_date) for e in of_gfk2}
     state = {e.key: follow_up_state(e, reference_date) for e in of_gfk2}
     s = FU_SECTION
     for key, label, months in FU_CATEGORIES:
@@ -1532,6 +1542,7 @@ def run(rows, failures, start, end, reference_date, min_medical_days=14, resolut
     The matrix with its time series, from the submissions (SubmissionRow) and failures of the export; the
     result's "problems" (case keys of all LEs) are for the Rückfragen files only, not for the JSON
     """
+    rows, failures = list(rows), list(failures)    # read twice: an iterator would be empty the second time
     return run_passes(lambda label: iter(rows), lambda: failures, start, end, reference_date, min_medical_days,
                       resolution, cutoff)
 
@@ -1582,9 +1593,9 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_medical
     test_facts, unreadable_rows, submitters = [], [], {}
     tests, reasons_exported = 0, False
     for row in read_rows(1):
+        reasons_exported = reasons_exported or row.reason is not NOT_EXPORTED     # of the export, also after --cutoff
         if not kept(row):
             continue
-        reasons_exported = reasons_exported or row.reason is not NOT_EXPORTED
         kind, submission = row_kind(row)
         if kind == UNREADABLE_ROW:
             unreadable_rows.append(SubmissionRow(row.case, row.submitted_at, None, row.site, row.reason))
@@ -1631,6 +1642,7 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_medical
                     if initial_date and parse_date(dig(case.latest, "metaData", "molecularBoardDecisionDate")) is None:
                         no_gfk1.append((case.le, period_of(initial_date, resolution)))
                 if e is not None:
+                    e.last_submitted = submitted_order(rows[-1])
                     e.initial_date = initial_date
                     e.period = period_of(initial_date, resolution)
                     for kind, detail in e.problems:
@@ -1656,7 +1668,7 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_medical
             del pending[row.case]
             finished.append(finish(row.case, rows))
         del rows, row
-    if pending:
+    if pending or len(finished) != len(expected):
         raise ValueError("the input changed between the two passes (cases with fewer submissions than in the first)")
 
     # in the order of build_cases: the cases with initial, then those without, each by their first submission
@@ -1670,16 +1682,18 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_medical
         d = parse_date(row.submitted_at)
         if in_range(d):
             problem(problems, leistungserbringer(row), P_UNREADABLE, row.case, None, "Einreichung ohne lesbare metaData.submission", d)
-    evaluated_keys = {e.key for e in evaluated}
+    last_submitted = {e.key: e.last_submitted for e in evaluated}
     stale = Counter()
     for f in failures:
         d = parse_date(f.submitted_at)
         if not in_range(d):
             continue
-        if f.case in evaluated_keys:
+        # stale: the case is evaluated with an older state, the failed submission came after its latest converted one
+        later = f.case in last_submitted and submitted_order(f) > last_submitted[f.case]
+        if later:
             stale[(str(f.site or "?"), period_of(d, resolution) if d else None)] += 1
         problem(problems, str(f.site or "?"), P_NOT_CONVERTED, f.case, f.tan,
-                ("Episode mit älterem Stand ausgewertet; " if f.case in evaluated_keys else "") + f.error[:300], d)
+                ("Episode mit älterem Stand ausgewertet; " if later else "") + f.error[:300], d)
 
     les = sorted({e.le for e in evaluated} | {p["le"] for p in problems} | {x.le for x in subs})
 

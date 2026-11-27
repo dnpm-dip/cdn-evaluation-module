@@ -111,8 +111,11 @@ def rd_initial_dates(rows):
     return [rd.submission_date(case.initial) for case in cases]
 
 
-def dnpm_initial_dates(rows):
-    """The dates of the initial submissions of the oncology cases (as dnpm_evaluation_matrix selects them)"""
+def dnpm_initial_dates(rows, cutoff=None):
+    """The dates of the initial submissions of the oncology cases (as dnpm_evaluation_matrix selects them, without
+    the submissions after the cutoff)"""
+    if cutoff:
+        rows = [r for r in rows if not (dnpm.submission_date(r) and dnpm.submission_date(r) > cutoff)]
     cases, *_ = dnpm.build_cases(rows)
     dates = (dnpm.submission_date(dnpm.initial_submission(c)) for c in cases)
     return [d for d in dates if d]
@@ -184,7 +187,7 @@ def run_dnpm(path, args):
     out_dir = os.path.join(args.output_dir, DNPM)
     prepare_dir(out_dir, DNPM, args.replace)
     reference_date = args.reference_date or args.cutoff or date.today()
-    periods_ = periods_of(dnpm_initial_dates(rows), args)
+    periods_ = periods_of(dnpm_initial_dates(rows, args.cutoff), args)
     if not periods_:
         return 0
     resolution = dnpm.MONTH if args.period == MONTH else dnpm.QUARTER

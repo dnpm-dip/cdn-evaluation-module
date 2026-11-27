@@ -1,5 +1,7 @@
 """Tests of rd_evaluation_matrix.py: python3 -m unittest discover scripts/rd_evaluation_matrix"""
 
+import contextlib
+import io
 import json
 import os
 import random
@@ -487,7 +489,13 @@ class FollowUpTests(unittest.TestCase):
 class DiseaseGroupTests(unittest.TestCase):
 
     def test_groups_per_block_add_up_to_the_case_count(self):
-        result = cases(
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = self.eight_cases()
+        self.check_groups(result, err.getvalue())
+
+    def eight_cases(self):
+        return cases(
             datenkranz("t1", birth="1980-01"),                                      # bone disease, adult
             datenkranz("t2", orpha="ORPHA:98006", assessment="noGeneticDiagnosis"),  # neurologic, pediatric
             datenkranz("t3", icd10="G71.0", orpha="ORPHA:98006"),                   # neuromuscular by ICD-10-GM
@@ -497,6 +505,8 @@ class DiseaseGroupTests(unittest.TestCase):
             datenkranz("t7", orpha="ORPHA:616874", assessment="noGeneticDiagnosis"),
             datenkranz("t8", orpha="ORPHA:4711"),                                   # not in the linearisation
         )
+
+    def check_groups(self, result, err):
         total = {g: get(result, "Erkrankungsgruppen gesamt", g) for g in rdm.DISEASE_GROUPS}
         adult = {g: get(result, "Erkrankungsgruppen Adult", g) for g in rdm.DISEASE_GROUPS}
         pediatric = {g: get(result, "Erkrankungsgruppen Pädiatrisch", g) for g in rdm.DISEASE_GROUPS}
@@ -507,7 +517,9 @@ class DiseaseGroupTests(unittest.TestCase):
         self.assertEqual([total[g] for g in rdm.UNKNOWN_GROUPS], [1, 1, 1, 2])
         neurologic = "Neurologische Erkrankungen, Entwicklungsstörungen: Undiagnostiziert"
         self.assertEqual(get(result, "Erkrankungsgruppen gesamt", neurologic, field="percent"), 100.0)
-        self.assertTrue(any("123456" in note for note in result["notes"]))
+        # the unmapped head only on stderr for the KDK: in the notes it would show that its cases occur
+        self.assertIn("123456", err)
+        self.assertFalse(any("123456" in note for note in result["notes"]))
         # diagnosed cases without group are clarified with the LE
         self.assertEqual(sorted(p["tan"] for p in problems(result, rdm.P_DIAGNOSIS_WITHOUT_GROUP)), ["t4", "t5", "t6", "t8"])
 

@@ -678,7 +678,8 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
         if content.get("metaData", {}).get("submission", {}).get("diseaseType") != "rare":
             continue
         kind, submitted = rdm.submission_type(content), readable_submission_date(content)
-        if kind != "test" and (row.case not in first_rows or row.submitted_at < first_rows[row.case].submitted_at):
+        if kind != "test" and (row.case not in first_rows
+                               or rdm.submitted_order(row) < rdm.submitted_order(first_rows[row.case])):
             first_rows[row.case] = row
         le = rdm.leistungserbringer(row)
         if submitted is None:

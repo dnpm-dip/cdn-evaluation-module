@@ -85,7 +85,8 @@ time series blocks come from the data. Unknown matrices get generic key figures.
   In the month charts, a month that would follow from the whole period minus the others is hidden too.
 - Mode `datenkranz` suppresses the use case RD (and submissions without a known use case) like the RD matrix, only
   in the rows of the diagnosis codes: the values of `…diagnoses[].code` (`DIAGNOSIS_CODE_PATH`; not their fill
-  rate). There: counts from 1 to `--min-cell` − 1 (default 5), every value with a base below that, and,
+  rate). A code of fewer than `--min-cell` cases in the use case gets no row of its own (its name would show that it
+  occurs): such codes are counted together in the row `andere Codes (je unter 5 Fällen)` (`OTHER_CODES`). There: counts from 1 to `--min-cell` − 1 (default 5), every value with a base below that, and,
   complementarily within these rows, the smallest further nonzero cell in every group with exactly one suppressed
   cell (a row over Gesamt and the LEs, the whole period and its months), until none is left. Every other row
   (submissions, cases, fill rates, other values) is exact, also below 5. The use case MTB is exact. There

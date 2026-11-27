@@ -105,6 +105,13 @@ class RunTests(unittest.TestCase):
             mm.main(["missing.json", "--suppress-scope", "diagnoses"])
         self.assertIn("replaced by 'codes'", err.getvalue())
 
+    def test_oncology_periods_end_with_the_cutoff(self):
+        # an initial submission after --cutoff is dropped by the evaluation, so it opens no period either
+        entries = [{"case": c, "site": "LE-A", "submittedAt": f"{d}T10:00:00", "content": dnt.datenkranz(c, submitted=d)}
+                   for c, d in (("a", "2026-03-10"), ("b", "2026-10-10"))]
+        results, _ = self.run_mm("dnpm", entries, "--cutoff", "2026-06-30", "--reference-date", "2026-06-30")
+        self.assertEqual(list(results), ["dnpm_2026-Q1", "dnpm_gesamt"])
+
     def test_rd_only_per_quarter_and_the_period_range(self):
         # RD (SE) matrices only per quarter: --period month is refused for rd and both, before anything is read
         for kind in ("rd", "both"):

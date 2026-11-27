@@ -985,5 +985,112 @@ class InputOutputTests(unittest.TestCase):
         self.assertTrue(problem_lines[1].startswith(f"LE-A (LE-A-ID);{dm.P_GFK2_AFTER_SUBMISSION};"))
 
 
+def export_json(rows, failures=(), columns_with_reason=True):
+    """An export-datenkranz result of SubmissionRows (keys site, patient = case, episodeOfCare), with an RD row"""
+    columns = ["site", "useCase", "patient", "episodeOfCare", "tan", "submittedAt", "content"]
+    columns += ["reasonResearchConsentMissing"] if columns_with_reason else []
+    data = [{"site": r.site, "useCase": "MTB", "patient": r.case, "episodeOfCare": "e1", "tan": f"t{i}",
+             "submittedAt": r.submitted_at, "content": r.content,
+             **({"reasonResearchConsentMissing": None} if columns_with_reason else {})} for i, r in enumerate(rows)]
+    data.insert(1, {**data[0], "useCase": "RD", "patient": "rd"})
+    return {"statistic": "export-datenkranz", "params": {"n": 12345},
+            "tables": [{"name": "datenkranz", "columns": columns, "rows": data},
+                       {"name": "failures", "columns": ["site", "useCase", "patient", "episodeOfCare", "tan", "submittedAt", "error"],
+                        "rows": list(failures)}],
+            "notes": ["Größe ü", 1.5e3]}
+
+
+class StreamingTests(unittest.TestCase):
+    """The input read as a stream in two passes (InputFile, run_file): the same as read at once"""
+
+    def rows(self):
+        return ([row("a", datenkranz("t1", submitted="2025-03-01")),
+                 row("b", datenkranz("t2", submitted="2025-03-02")),
+                 row("a", datenkranz("t3", type_="followup", submitted="2025-05-01")),     # case a interleaved
+                 row("c", datenkranz("t4", type_="followup", submitted="2025-04-01")),     # without initial
+                 row("d", datenkranz("t5", type_="test", submitted="2025-04-01")),
+                 row("e", {"metaData": "kaputt"}, "2025-04-02T10:00:00")]                   # unreadable
+                + [row(f"n{i}", datenkranz(f"n{i}", submitted=f"2025-06-{10 + i}", mtb=None)) for i in range(8)])
+
+    def write(self, tmp, data, indent=None):
+        path = os.path.join(tmp, "in.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent, ensure_ascii=False)
+        return path
+
+    def test_export_read_in_small_chunks_equals_json_load(self):
+        failures = [{"site": "LE-A", "useCase": "MTB", "patient": "x", "episodeOfCare": "e1", "tan": "tx",
+                     "submittedAt": "2025-03-01T10:00:00", "error": "conversion failed"},
+                    {"site": "LE-A", "useCase": "RD", "patient": "y", "episodeOfCare": "e1", "tan": "ty",
+                     "submittedAt": "2025-03-01T10:00:00", "error": "rd"}]
+        data = export_json(self.rows(), failures)
+        with tempfile.TemporaryDirectory() as tmp:
+            for indent in (None, 2):
+                path = self.write(tmp, data, indent)
+                for chunk in (1, 7, 1 << 22):
+                    with self.subTest(indent=indent, chunk=chunk), mock_chunk(chunk):
+                        rows, failed = dm.load_submissions(path)
+                        self.assertEqual([r.content for r in rows], [r.content for r in self.rows()])
+                        self.assertEqual({r.case for r in rows}, {json.dumps([r.site, r.case, "e1"]) for r in self.rows()})
+                        self.assertTrue(all(r.reason is None for r in rows))
+                        self.assertEqual([(f.tan, f.error) for f in failed], [("tx", "conversion failed")])
+
+    def test_run_file_equals_run_on_all_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for data in (export_json(self.rows()), export_json(self.rows(), columns_with_reason=False),
+                         [{"case": r.case, "site": r.site, "submittedAt": r.submitted_at, "content": r.content,
+                           **({"reasonResearchConsentMissing": "abgelehnt"} if i == 0 else {})}
+                          for i, r in enumerate(self.rows())]):
+                path = self.write(tmp, data, 2)
+                for kwargs in ({}, {"cutoff": date(2025, 4, 15)}, {"start": date(2025, 3, 2), "end": date(2025, 7, 1)}):
+                    with self.subTest(kind=type(data).__name__, **kwargs), mock_chunk(5):
+                        start, end, cutoff = kwargs.get("start"), kwargs.get("end"), kwargs.get("cutoff")
+                        rows, failures = dm.load_submissions(path)
+                        expected = dm.run(rows, failures, start, end, cutoff or REFERENCE, cutoff=cutoff)
+                        actual = dm.run_file(dm.InputFile(path), start, end, cutoff or REFERENCE, cutoff=cutoff)
+                        self.assertEqual(actual, expected)
+                        self.assertEqual(get(actual, "Fälle", CASES), 9 if start else 2 if cutoff else 10)
+
+    def test_broken_inputs_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            text = json.dumps(export_json(self.rows()))
+            for content, message in ((text[:len(text) // 2], "invalid JSON"), (text + " {}", "extra data"),
+                                     ('{"tables": [{"name": "other", "rows": []}]}', "no table 'datenkranz'"),
+                                     ('{"rows": []}', "neither"), ('"text"', "neither"),
+                                     ('{"tables": [{"rows": [], "name": "datenkranz"}]}', "before its name")):
+                with self.subTest(message=message):
+                    path = os.path.join(tmp, "in.json")
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    with self.assertRaisesRegex(ValueError, message):
+                        dm.run_file(dm.InputFile(path), None, None, REFERENCE)
+
+    def test_input_changed_between_the_passes_is_refused(self):
+        rows = self.rows()
+        passes = {1: rows, 2: rows[:2]}
+        with self.assertRaisesRegex(ValueError, "changed between the two passes"):
+            dm.run_passes(lambda n: iter(passes[n]), lambda: [], None, None, REFERENCE)
+
+    def test_progress_without_terminal_one_line_per_ten_percent(self):
+        out = io.StringIO()
+        progress = dm.Progress("Durchgang 1/2", 2_000_000_000, out)
+        for done in range(0, 2_000_000_001, 100_000_000):
+            progress.update(done)
+        progress.finish()
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 11)
+        self.assertEqual(lines[-1].strip(), "Durchgang 1/2: 100 % von 2.0 GB")
+
+
+@contextlib.contextmanager
+def mock_chunk(size):
+    previous = dm.JsonStream.CHUNK
+    dm.JsonStream.CHUNK = size
+    try:
+        yield
+    finally:
+        dm.JsonStream.CHUNK = previous
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1208,7 +1208,8 @@ def partitions(columns, cells, groups):
     by_column = {}
     for q in cells.values():
         if isinstance(q[1], frozenset):
-            by_column.setdefault(q[0], {}).setdefault(q[1], {})[q] = None     # distinct quantities, in and out of scope
+            by_column.setdefault(q[0], {}).setdefault(q[1], {})[q] = None     # distinct quantities (a set is shown in many
+            #   cells: without the dedup the product in each() multiplies out the repetitions), in and out of scope
     for column, rows in columns.items():
         known = by_column.get(column, {})
         sections = {}   # section -> base set -> [(set, value quantity)], [base quantities]

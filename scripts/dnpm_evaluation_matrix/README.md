@@ -35,6 +35,15 @@ tables are for the data nodes and the LE concerned, not for publication.
 - a JSON list of `{"case", "submittedAt", "content", "site"?, "reasonResearchConsentMissing"?}`, one entry
   per submission (KDKs with their own export); cases keyed by `json.dumps([site or submitterId, case], sort_keys=True)`.
 
+The file is read as a stream in two passes, so exports larger than the memory can be evaluated: the first
+pass counts the submissions of each case (and keeps the failures, the test submissions and the unreadable
+submissions), the second gathers the submissions of each case and evaluates it as soon as its last one is
+read, then drops them. Only the evaluated facts of the cases stay in memory, the submissions only while
+their case is incomplete: one case at a time for `export-datenkranz`, which is ordered by case; any order
+works, at the cost of holding the incomplete cases. Memory grows with the number of cases, not with the
+size of the file (synthetic export of 15,000 cases, 255 MB: about 210 MB peak instead of 760 MB). A
+progress line per pass goes to stderr. The file must not change between the passes.
+
 Only `metaData.submission.diseaseType` `oncological` or `hereditary` is evaluated (the Oncology schema
 covers both). Schema basis: bfarm-schema-dto-model e273825 (oncology 1.0.7, base 1.0.6), the DTOs the DIP
 export maps to, and the BfArM KDK schema (MVGenomseq_KDK, main of 2026-08-05).

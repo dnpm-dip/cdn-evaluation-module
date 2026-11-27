@@ -27,13 +27,11 @@ Output (<output> without extension):
                               rows per month or quarter (no case keys)
   <output>.csv                long table LE | Abschnitt | Kategorie | Einheit | Wert | Bezug | Basis | Anteil
   <output>_zeitreihe.csv      long table LE | Zeitraum | Abschnitt | Kategorie | Einheit | Wert | Bezug | Basis | Anteil
-  <output>_rueckfragen.csv    cases to clarify with their LE (contains case keys: only for the LEs);
-                              with --rueckfragen-per-le also one <output>_rueckfragen_<LE>.csv per LE
-Counts 1 to --min-cell - 1 (default 5) are suppressed ("<5") in all outputs except the Rückfragen, as
-is every value whose base is that small, and every statistic computed from fewer values; further
-counts are suppressed with the same marker so that none of these can be derived from totals (README.md).
---suppress-scope diagnoses (default) suppresses only the diagnosis rows (DIAGNOSIS_SECTIONS, DIAGNOSIS_ITEMS) and
-shows every other count and statistic exactly; --suppress-scope all suppresses every row.
+  <output>_rueckfragen.csv    cases to clarify with their LE (contains case keys of all LEs: only for the KDK);
+                              with --rueckfragen-per-le (recommended) instead one <output>_rueckfragen_<LE>.csv
+                              per LE and no file of all LEs
+No cell is suppressed: every count and statistic is exact, also below 5 (decision of the data holders, the
+oncology matrix is for the data nodes and the LE concerned, not for publication; the RD matrix is suppressed).
 The follow-up sections after the network's MTB follow-up SOP (FU_SECTIONS: category, due / current / overdue at
 --reference-date, days from GFK2 to the first follow-up, mandatory fields, response) are described in README.md.
 
@@ -53,7 +51,7 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from types import SimpleNamespace
 
@@ -88,6 +86,16 @@ GRADING = (
 BEHAVIOUR = (("0", "/0 gutartig"), ("1", "/1 unsicheres Verhalten"), ("2", "/2 in situ"),
              ("3", "/3 bösartig (Primärtumor)"), ("6", "/6 bösartig (Metastase)"),
              ("9", "/9 bösartig, unklar ob primär"))
+BEHAVIOUR_CODES = frozenset(code for code, _ in BEHAVIOUR)
+
+
+def behaviour_code(histology):
+    """The ICD-O-3 behaviour code of a morphology code (8140/3 -> 3), None without one of BEHAVIOUR_CODES (no "/", or
+    an unknown character after it): the behaviour rows then add up to the cases with a behaviour code"""
+    code = histology.split("/")[-1].strip()[:1] if "/" in histology else None
+    return code if code in BEHAVIOUR_CODES else None
+
+
 M_STATES = ("M0", "M1 (Fernmetastasen)", "MX", "TNM ohne erkennbare M-Kategorie", "kein TNM")
 
 # Tumour entity groups by the ICD-10-GM code of case.diagnosisOd.mainDiagnosis: (label, letter, ranges
@@ -164,10 +172,11 @@ FU_CATEGORIES = (
 FU_NOT_STARTED_MONTHS = 24      # a recommendation not started is followed up for 2 years, then as category 3
 FU_LOST_MONTHS = 12             # no contact for a year: lost to follow-up
 FU_RESPONSE_WEEKS = 8           # first staging 6-8 weeks after the start of a therapy
-FU_DECEASED, FU_NOT_DUE, FU_CURRENT, FU_OVERDUE = (
+FU_DECEASED, FU_NOT_DUE, FU_LOST, FU_CURRENT, FU_OVERDUE = (
     "verstorben (kein Follow-up mehr fällig)", "noch nicht fällig (GFK2 weniger als ein Intervall vor dem Stichtag)",
+    f"lost to follow-up (nicht verstorben, kein Kontakt in den {FU_LOST_MONTHS} Monaten vor dem Stichtag; nicht fällig)",
     "fällig, aktuell (Follow-up im Intervall vor dem Stichtag)", "fällig, überfällig (kein Follow-up im Intervall vor dem Stichtag)")
-FU_STATES = (FU_DECEASED, FU_NOT_DUE, FU_CURRENT, FU_OVERDUE)
+FU_STATES = (FU_DECEASED, FU_NOT_DUE, FU_LOST, FU_CURRENT, FU_OVERDUE)
 FU_SECTION = "Follow-up nach SOP-Intervall (sequenzierte Fälle mit GFK2)"
 FU_CATEGORY_SECTION = "Follow-up nach SOP-Intervall je Kategorie"
 FU_DAYS_SECTION = "Dauer GFK2 bis erstes Follow-up"
@@ -237,6 +246,8 @@ PROBLEMS = (P_GFK1_AFTER_SUBMISSION, P_GFK2_AFTER_SUBMISSION, P_GFK2_BEFORE_GFK1
 STALE = "stale"     # losses: non-convertible submissions of an evaluated episode
 NO_GFK1 = "ohne GFK1: Fälle"    # losses: cases not readable for want of metaData.molecularBoardDecisionDate
 LOSSES = (P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE, STALE, NO_GFK1)
+
+SAME_DAY = "davon GFK2 am Tag der GFK1 (0 Tage, nicht in Mittelwert, Median und Quartilen; Rückfrage)"
 
 # Process timeline: milestones in days relative to GFK1 (label, must lie after GFK1)
 TIMELINE = "Zeitstrahl: Tage relativ zur GFK1"
@@ -365,8 +376,11 @@ class JsonStream:
         while True:
             try:
                 value, end = self.decoder.raw_decode(self.buf, self.pos)
-                # a value ending with the buffer may continue in the file (a number), unless at the end
-                if end < len(self.buf) or self.eof:
+                # a value ending with the buffer may continue in the file (a number), unless at the end; a number
+                # may also be cut inside ("1." of "1.5", "1e" of "1e5"): it is decoded as its prefix, so a number
+                # is only taken where something else follows it within the buffer
+                number = isinstance(value, (int, float)) and not isinstance(value, bool)
+                if self.eof or (end < len(self.buf) and not (number and not self.buf[end:].strip(" \t\n\r.eE+-0123456789"))):
                     self.pos = end
                     return value
             except json.JSONDecodeError as e:
@@ -467,7 +481,7 @@ class InputFile:
                 continue
             tables = set()
             for _ in stream.array():
-                table, exported = None, False
+                table, exported = None, None    # None: columns not read yet
                 for field in stream.object():
                     if field == "name":
                         table = stream.value()
@@ -480,8 +494,10 @@ class InputFile:
                         for _ in stream.array():
                             r = stream.value()
                             if table == "datenkranz" and r.get("useCase") in (None, "MTB"):
+                                # without columns before the rows (a reserialized export): whether the row has it
+                                has_reason = exported if exported is not None else REASON in r
                                 yield SubmissionRow(key(r), r.get("submittedAt") or "", r.get("content"), r.get("site"),
-                                                    r.get(REASON) if exported else NOT_EXPORTED)
+                                                    r.get(REASON) if has_reason else NOT_EXPORTED)
                             elif table == "failures" and r.get("useCase") in (None, "MTB"):
                                 failures.append(Failure(r.get("site"), key(r), r.get("tan"), r.get("submittedAt") or "",
                                                         str(r.get("error") or "")))
@@ -509,6 +525,42 @@ class InputFile:
             yield SubmissionRow(key(e), e.get("submittedAt") or "", e.get("content"), e.get("site"),
                                 e.get(REASON) if REASON in e or self.exported else NOT_EXPORTED)
         self.exported, self.failures = exported, []
+
+
+def submissions_from(data, path="input"):
+    """
+    load_submissions of the parsed input file (monthly_matrices parses it once for RD and oncology): the same rows
+    and failures as InputFile reads them
+    """
+    def export_key(r):
+        return json.dumps([r.get("site"), r.get("patient"), r.get("episodeOfCare")])
+
+    if isinstance(data, dict) and "tables" in data:
+        tables = [t for t in data["tables"] if isinstance(t, dict)] if isinstance(data["tables"], list) else []
+        if "datenkranz" not in [t.get("name") for t in tables]:
+            raise ValueError(f"{path}: no table 'datenkranz', not a result of export-datenkranz")
+        rows, failures = [], []
+        for t in tables:
+            exported = REASON in (t.get("columns") or []) if "columns" in t else None
+            for r in t.get("rows") or []:
+                if t.get("name") == "datenkranz" and r.get("useCase") in (None, "MTB"):
+                    has_reason = exported if exported is not None else REASON in r
+                    rows.append(SubmissionRow(export_key(r), r.get("submittedAt") or "", r.get("content"), r.get("site"),
+                                              r.get(REASON) if has_reason else NOT_EXPORTED))
+                elif t.get("name") == "failures" and r.get("useCase") in (None, "MTB"):
+                    failures.append(Failure(r.get("site"), export_key(r), r.get("tan"), r.get("submittedAt") or "",
+                                            str(r.get("error") or "")))
+        return rows, failures
+    if isinstance(data, list):
+        def key(e):
+            le = e.get("site") or dig(e.get("content"), "metaData", "submission", "submitterId")
+            return json.dumps([le, e.get("case")], sort_keys=True)
+
+        entries = [e for e in data if isinstance(e, dict)]
+        exported = any(REASON in e for e in entries)
+        return [SubmissionRow(key(e), e.get("submittedAt") or "", e.get("content"), e.get("site"),
+                              e.get(REASON) if exported else NOT_EXPORTED) for e in entries], []
+    raise ValueError(f"{path}: neither a result of export-datenkranz nor a list of submissions")
 
 
 def load_submissions(path):
@@ -558,8 +610,12 @@ def submission_type(content):
 
 
 def submission_date(row):
-    """metaData.submission.date of a submission, else the time the export has for it"""
-    return parse_date(dig(row.content, "metaData", "submission", "date")) or parse_date(row.submitted_at)
+    """metaData.submission.date of a submission, else the date (UTC) of the time the export has for it"""
+    given = parse_date(dig(row.content, "metaData", "submission", "date"))
+    if given:
+        return given
+    kind, t, _ = submitted_order(row)
+    return t.date() if kind == 0 else parse_date(row.submitted_at)
 
 
 def period_of(d, resolution):
@@ -611,7 +667,7 @@ class Case:
 
     @property
     def initial(self):
-        return next(r for r in self.rows if submission_type(r.content) == "initial")
+        return initial_submission(self)
 
 
 def leistungserbringer(row):
@@ -619,6 +675,30 @@ def leistungserbringer(row):
     if row.site:
         return str(row.site)
     return str(dig(row.content, "metaData", "submission", "submitterId") or "?")
+
+
+def submitted_order(row):
+    """The sort key of a submission by submittedAt, parsed (time zones to UTC), else as text after the parsed ones"""
+    try:
+        t = datetime.fromisoformat(str(row.submitted_at).replace("Z", "+00:00"))
+        if t.tzinfo is not None:
+            t = t.astimezone(timezone.utc).replace(tzinfo=None)
+        return (0, t, "")
+    except ValueError:
+        return (1, datetime.min, str(row.submitted_at))
+
+
+def initial_submission(case):
+    """The initial submission a case is dated by: of several the one with the earliest date (metaData.submission.date,
+    else the time of the export), of equal dates the first sent"""
+    return min((r for r in case.rows if submission_type(r.content) == "initial"),
+               key=lambda r: (submission_date(r) or date.max, submitted_order(r)))
+
+
+def meaningful_plan(plan):
+    """A plan with content: a non-empty carePlanOd or recommendations ({} and {"carePlanOd": {}} are none)"""
+    return isinstance(plan, dict) and bool((isinstance(plan.get("carePlanOd"), dict) and plan["carePlanOd"])
+                                           or items(plan.get("recommendedSystemicTherapies")) or items(plan.get("recommendedStudies")))
 
 
 def build_cases(rows):
@@ -643,7 +723,7 @@ def build_cases(rows):
 
     cases, without_initial = [], []
     for key, subs in by_key.items():
-        subs = sorted(subs, key=lambda r: r.submitted_at)     # stable: equal times keep the input order
+        subs = sorted(subs, key=submitted_order)     # stable: equal times keep the input order
         case = Case(key, leistungserbringer(subs[0]), subs)
         (cases if any(submission_type(s) == "initial" for s in case.submissions) else without_initial).append(case)
     return cases, tests, without_initial, unreadable, submitters
@@ -697,8 +777,8 @@ def permits_research_use(research_consents, reference_date):
 
     def permitted(provision):
         start, end = parse_date(dig(provision, "period", "start")), parse_date(dig(provision, "period", "end"))
-        return (provision.get("type") == "permit" and start is not None and start > minus_years(reference_date, 5)
-                and (end is None or end > reference_date))
+        return (provision.get("type") == "permit" and start is not None
+                and minus_years(reference_date, 5) < start <= reference_date and (end is None or end >= reference_date))
 
     decisions = {}
     for rc in items(research_consents):
@@ -711,6 +791,8 @@ def permits_research_use(research_consents, reference_date):
             provision = find(consent, code)
             if provision is None:
                 decisions.pop(code, None)
+            elif provision.get("type") == "permit" and (parse_date(dig(provision, "period", "start")) or date.min) > reference_date:
+                continue    # a permit that starts after the date is not in effect yet: it neither permits nor denies
             else:
                 decisions[code] = permitted(provision)
     return any(decisions.values())
@@ -878,9 +960,13 @@ def evaluate_case(case, reference_date, min_medical_days):
     priors = [p for p in items(dig(latest, "case", "priorDiagnostics")) if isinstance(p, dict)]
     procedures = [p for p in items(dig(latest, "case", "priorProcedures")) if isinstance(p, dict)]
 
-    # plan and molecular: the latest submission that has them (each submission carries the whole case)
-    plan = next((s["plan"] for s in reversed(case.submissions) if isinstance(s.get("plan"), dict)), None)
-    care_plan = dig(plan, "carePlanOd") if isinstance(dig(plan, "carePlanOd"), dict) else {}
+    # plan and molecular: the latest submission that has them (each submission carries the whole case); an empty
+    # plan or care plan ({} from a partial submission) is no plan and doesn't displace an earlier one
+    plan = next((s["plan"] for s in reversed(case.submissions) if meaningful_plan(s.get("plan"))), None)
+    # the care plan (GFK2 documented) of the latest submission that has one: a later plan with recommendations
+    # but without carePlanOd doesn't take back an earlier documented GFK2
+    care_plan = next((dig(s, "plan", "carePlanOd") for s in reversed(case.submissions)
+                      if isinstance(dig(s, "plan", "carePlanOd"), dict) and dig(s, "plan", "carePlanOd")), {})
     therapies = [r for r in items(dig(plan, "recommendedSystemicTherapies")) if isinstance(r, dict)]
     studies = [r for r in items(dig(plan, "recommendedStudies")) if isinstance(r, dict)]
     if plan is not None and bool(care_plan.get("studyRecommended")) != bool(studies):
@@ -894,10 +980,17 @@ def evaluate_case(case, reference_date, min_medical_days):
     follow_up = max(follow_ups, key=lambda x: (x[0] or date.min, x[1]), default=(None, None, None))[2]
     # each follow-up once (a submission may repeat the earlier ones), and the dates of a contact
     fu_entries = list({json.dumps(f, sort_keys=True): f for _, _, f in follow_ups}.values())
-    fu_dates = sorted({d for d, _, _ in follow_ups if d})
-    contact_dates = sorted(set(fu_dates) | {d for d in (parse_date(f.get("lastContactDate")) for f in fu_entries) if d})
+    # the dates of the follow-ups and contacts, a month (YYYY-MM) as its 15th as on the timeline, sorted; the same
+    # for the state (current, lost) and the days to the first follow-up
+    fu_dates = sorted({d for d in (milestone_date(f.get("followUpDate")) for _, _, f in follow_ups) if d})
+    contact_dates = sorted(set(fu_dates) | {d for d in (milestone_date(f.get("lastContactDate")) for f in fu_entries) if d})
     deceased = any(f.get("vitalStatus") == "deceased" for _, _, f in follow_ups)
     death_dates = [parse_date(f.get("deathDate")) for _, _, f in follow_ups if f.get("deathDate")]
+    # deceased at the reference date: a follow-up up to it (or undated) with a death up to it (or undated); a later
+    # export evaluated at an earlier date doesn't change the state then; a month (YYYY-MM) as its 15th, as above
+    deceased_at = any(f.get("vitalStatus") == "deceased"
+                      and (milestone_date(f.get("followUpDate")) or date.min) <= reference_date
+                      and (milestone_date(f.get("deathDate")) or date.min) <= reference_date for _, _, f in follow_ups)
     if follow_up is not None and (deceased and not death_dates or death_dates and not deceased):
         problems.append((P_DEATH, "vitalStatus deceased ohne deathDate" if deceased else "deathDate bei vitalStatus living"))
 
@@ -924,9 +1017,8 @@ def evaluate_case(case, reference_date, min_medical_days):
     # process timeline: each milestone in days from GFK1, None if the case has no date for it
     mv_dates = [milestone_date(sc.get("date")) for sc in items(dig(meta, "mvConsent", "scope"))
                 if isinstance(sc, dict) and sc.get("domain") == "mvSequencing"]
-    initial_row = next(r for r in case.rows if submission_type(r.content) == "initial")
+    initial_row = initial_submission(case)
     therapy_starts = [d for d in (milestone_date(t.get("therapyStartDate")) for t in implemented) if d]
-    fu_dates = [d for d in (milestone_date(f.get("followUpDate")) for _, _, f in follow_ups) if d]
     milestone_dates = {
         "MV-Einwilligung": min((d for d in mv_dates if d), default=None),
         "Erstdiagnose": milestone_date(main.get("date")),
@@ -950,9 +1042,16 @@ def evaluate_case(case, reference_date, min_medical_days):
         problems.append((P_BEFORE_BIRTH, ", ".join(f"{name} {d}" for name, d in early) + f" vor Geburtsmonat {born}"))
 
     state, from_dip = consent_state(meta, case.rows[-1].reason, submitted(latest) or reference_date)
+    # QS 12 on the reason in effect: noScopeJustification, and the DIP's reasonResearchConsentMissing where the matrix
+    # takes the reason from it
     justifications = {rc.get("noScopeJustification") for rc in items(meta.get("researchConsents")) if isinstance(rc, dict)}
-    if submitted(latest) and submitted(latest) >= QS12_FROM and justifications & NOT_PATIENT_RELATED:
-        problems.append((P_JUSTIFICATION, "noScopeJustification: " + ", ".join(sorted(justifications & NOT_PATIENT_RELATED))))
+    dip_reason = case.rows[-1].reason
+    if submitted(latest) and submitted(latest) >= QS12_FROM:
+        given = sorted(j for j in justifications & NOT_PATIENT_RELATED if j)
+        if given:
+            problems.append((P_JUSTIFICATION, "noScopeJustification: " + ", ".join(given)))
+        elif from_dip and DIP_REASONS.get(dip_reason) in NOT_PATIENT_RELATED:
+            problems.append((P_JUSTIFICATION, f"reasonResearchConsentMissing (DIP): {dip_reason}"))
 
     complex_biomarkers = [b for b in items(dig(molecular, "complexBiomarkers")) if isinstance(b, dict)]
     tmbs = [b["tmb"] for b in complex_biomarkers if isinstance(b.get("tmb"), (int, float)) and not isinstance(b.get("tmb"), bool)]
@@ -978,7 +1077,7 @@ def evaluate_case(case, reference_date, min_medical_days):
         entity=entity_group(main.get("code")),
         topography_matches=(topography[:3].upper() == str(main.get("code") or "")[:3].upper()) if topography else None,
         topography=topography, main_code=str(main.get("code") or ""),
-        behaviour=histology.split("/")[-1][:1] if "/" in histology else None,
+        behaviour=behaviour_code(histology),
         ecog=diagnosis.get("ecogPerformanceStatusScore"),
         grading=diagnosis.get("grading"),
         m_state=m_state(tnm), tnm=bool(tnm), additional_classification=bool(items(diagnosis.get("additionalClassification"))),
@@ -987,7 +1086,7 @@ def evaluate_case(case, reference_date, min_medical_days):
         additional_diagnoses=bool(items(diagnosis.get("additionalDiagnoses"))),
         prior_types={p.get("type") for p in priors}, priors=bool(priors),
         procedures=procedures,
-        has_plan=plan is not None, care_plan=care_plan, therapies=therapies, studies=studies,
+        has_plan=bool(care_plan), care_plan=care_plan, therapies=therapies, studies=studies,
         other_recommendations=set(items(care_plan.get("otherRecommendations"))),
         has_molecular=molecular is not None,
         small=[fill_marks(v, SMALL_FILL_FIELDS) for v in small], cnvs=[fill_marks(v, CNV_FILL_FIELDS) for v in cnvs],
@@ -996,7 +1095,7 @@ def evaluate_case(case, reference_date, min_medical_days):
                           for f in ("ploidy", "tmb", "hrdHigh", "lstHigh", "taiHigh")},
         germline_variants=any(v.get("genomicSource") == "germline" for v in small + cnvs),
         follow_up_submissions=sum(1 for s in case.submissions if submission_type(s) == "followup"),
-        follow_up=follow_up, deceased=deceased, death_date=bool(death_dates),
+        follow_up=follow_up, deceased=deceased_at, death_date=bool(death_dates),
         fu_therapies=list(fu_therapies.values()), implemented=implemented,
         implemented_ids={str(t.get("reference")) for t in implemented},
         unlinked=[t for t in fu_therapies.values() if str(t.get("reference")) not in recommended],
@@ -1008,33 +1107,42 @@ def evaluate_case(case, reference_date, min_medical_days):
     )
 
 
-def follow_up_category(e):
-    """The category of a case with GFK2 in the follow-up schedule (FU_CATEGORIES)"""
-    if e.implemented:
+def follow_up_category(e, reference_date):
+    """The category of a case with GFK2 in the follow-up schedule (FU_CATEGORIES) at the reference date: a
+    recommendation counts as started from its therapyStartDate on (undated: as started)"""
+    if any((milestone_date(t.get("therapyStartDate")) or date.min) <= reference_date for t in e.implemented):
         return FU_STARTED
     return FU_NOT_STARTED if e.therapies or e.studies else FU_NO_RECOMMENDATION
 
 
 def follow_up_interval(e, reference_date):
     """The follow-up interval in months of a case with GFK2 at the reference date"""
-    category = follow_up_category(e)
+    category = follow_up_category(e, reference_date)
     if category == FU_NOT_STARTED and add_months(e.gfk2, FU_NOT_STARTED_MONTHS) <= reference_date:
         return dict((k, m) for k, _, m in FU_CATEGORIES)[FU_NO_RECOMMENDATION]
     return dict((k, m) for k, _, m in FU_CATEGORIES)[category]
 
 
 def within(dates, months, reference_date):
-    """A date in the months before the reference date (up to it)"""
-    return any(d <= reference_date and add_months(d, months) > reference_date for d in dates)
+    """A date in the months before the reference date (up to it): (reference date - months, reference date], the
+    months counted back from the reference date, so that a month end doesn't shorten the window"""
+    since = add_months(reference_date, -months)
+    return any(since < d <= reference_date for d in dates)
 
 
 def follow_up_state(e, reference_date):
-    """The follow-up state of a case with GFK2 at the reference date (FU_STATES)"""
+    """
+    The follow-up state of a case with GFK2 at the reference date (FU_STATES). As the SOP has it, the follow-up ends
+    with lost to follow-up: a living case whose GFK2 is at least FU_LOST_MONTHS before the reference date and that has
+    no contact (followUpDate or lastContactDate) in these months is lost, not due and not overdue
+    """
     months = follow_up_interval(e, reference_date)
     if e.deceased:
         return FU_DECEASED
     if add_months(e.gfk2, months) > reference_date:
         return FU_NOT_DUE
+    if add_months(e.gfk2, FU_LOST_MONTHS) <= reference_date and not within(e.contact_dates, FU_LOST_MONTHS, reference_date):
+        return FU_LOST
     return FU_CURRENT if within(e.fu_dates, months, reference_date) else FU_OVERDUE
 
 
@@ -1226,7 +1334,13 @@ def matrix_rows(cases, subs, losses, problem_counts, reference_date):
         if attr in ("medical_days", "documentary_days"):
             count(s, "nicht berechenbar: noch keine GFK2", lambda e: not e.has_gfk2)
             count(s, "nicht berechenbar: unmögliches Datum (siehe Rückfragen)", lambda e: e.has_gfk2 and e.impossible)
-        stats(s, "", [getattr(e, attr) for e in cases if getattr(e, attr) is not None], DAYS)
+        values = [getattr(e, attr) for e in cases if getattr(e, attr) is not None]
+        if attr == "medical_days":
+            # GFK2 on the day of GFK1 is no processing time (sequencing and evaluation lie between): counted apart,
+            # not in the statistics, and clarified with the LE (P_SHORT_MEDICAL)
+            count(s, SAME_DAY, lambda e: e.medical_days == 0)
+            values = [d for d in values if d != 0]
+        stats(s, "", values, DAYS)
 
     # process timeline: per milestone the cases with an offset and its quartiles; offsets before GFK1 of a
     # milestone that must follow it are counted apart and left out of the quartiles. No minimum or maximum:
@@ -1290,7 +1404,7 @@ def matrix_rows(cases, subs, losses, problem_counts, reference_date):
     for code in EVIDENCE:
         count(s, f"Evidenzgrad {code}", lambda r: r.get("evidenceLevel") == code, studies, "Studienempfehlungen")
 
-    s = "Umsetzung (sequenzierte Fälle mit Therapieempfehlung)"
+    s = "Umsetzung (sequenzierte Fälle mit Therapie- oder Studienempfehlung)"
     with_recs = [e for e in with_mtb if e.therapies or e.studies]
     base_label = "Fälle mit Therapie- oder Studienempfehlung"
     count(s, "mit Follow-up", lambda e: e.follow_up is not None, with_recs, base_label)
@@ -1349,7 +1463,7 @@ def matrix_rows(cases, subs, losses, problem_counts, reference_date):
     # follow-up schedule after the MTB (FU_CATEGORIES): the sequenced cases with a GFK2 date
     of_gfk2 = [e for e in with_mtb if e.gfk2]
     gfk2_label = "sequenzierte Fälle mit GFK2-Datum"
-    category = {e.key: follow_up_category(e) for e in of_gfk2}
+    category = {e.key: follow_up_category(e, reference_date) for e in of_gfk2}
     state = {e.key: follow_up_state(e, reference_date) for e in of_gfk2}
     s = FU_SECTION
     for key, label, months in FU_CATEGORIES:
@@ -1357,7 +1471,7 @@ def matrix_rows(cases, subs, losses, problem_counts, reference_date):
     for st in FU_STATES:
         count(s, f"Stand am Stichtag: {st}", lambda e: state[e.key] == st, of_gfk2, gfk2_label)
     due = [e for e in of_gfk2 if state[e.key] in (FU_CURRENT, FU_OVERDUE)]
-    count(s, "Follow-up aktuell, von fälligen", lambda e: state[e.key] == FU_CURRENT, due, "fällige Fälle")
+    count(s, "Follow-up aktuell, von fälligen", lambda e: state[e.key] == FU_CURRENT, due, "fällige Fälle (ohne lost to follow-up)")
     count(s, f"Kategorie 2 ab {FU_NOT_STARTED_MONTHS} Monate nach GFK2 (danach Intervall wie Kategorie 3)",
           lambda e: add_months(e.gfk2, FU_NOT_STARTED_MONTHS) <= reference_date,
           [e for e in of_gfk2 if category[e.key] == FU_NOT_STARTED], "Fälle der Kategorie 2")
@@ -1448,224 +1562,32 @@ def matrix_rows(cases, subs, losses, problem_counts, reference_date):
     return rows
 
 
-# Partitions: count rows whose items add up to a total that is shown (section regex, item regex); within a
-# column, one suppressed item would follow from the total and the others
-PARTITIONS = (
-    (r"Fälle", r"davon (nicht eingeschlossen|eingeschlossen, nicht|sequenziert)"),
-    (r"Einreichungen \(nach Einreichungsdatum\)", r"Einreichungen (initial|followup|addition|correction|anderer)"),
-    (r"Einreichungen \(nach Einreichungsdatum\)", r"Erstmeldungen libraryType"),
-    (r"Einreichungen \(nach Einreichungsdatum\)", r"Erstmeldungen Forschungseinwilligung"),
-    (r"Broad Consent \(Stand.*", r"(Broad Consent übermittelt|nicht übermittelt)"),
-    (r"Geschlecht|Alter bei Einschluss.*|Versicherung|Sequenzierung \(.*|Tumorentität \(.*|Tumorstadium.*"
-     r"|ECOG bei Einschluss|Grading.*", r""),
-    (r"Vortherapien.*", r"Anzahl systemischer"),
-    (r"GFK2 \(MTB\): Ergebnis \(sequenzierte Fälle\)", r"(mindestens eine Therapie- oder|ohne Therapie- und)"),
-    (r"Systemische Therapieempfehlungen.*", r"Evidenzgrad"),
-    (r"Systemische Therapieempfehlungen.*", r"Art "),
-    (r"Systemische Therapieempfehlungen.*", r"Strategie"),
-    (r"Studienempfehlungen.*", r"Register"),
-    (r"Studienempfehlungen.*", r"Evidenzgrad"),
-    (r"Umsetzung.*", r"Ende:"),
-    (r"Umsetzung.*", r"Ansprechen:"),
-    (r"Follow-up: Erstmeldung mindestens.*", r"(ohne|mit \d)"),
-    (re.escape(FU_SECTION), r"Kategorie \d"),
-    (re.escape(FU_SECTION), r"Stand am Stichtag"),
-    *((re.escape(FU_CATEGORY_SECTION), rf"Kategorie {k}: (?!Follow-up)") for k, _, _ in FU_CATEGORIES),
-    (re.escape(FU_RESPONSE_SECTION), r"Vitalstatus"),
-)
-
-
-def partition_of(row):
-    return next(((row.section, i) for i, (section, item) in enumerate(PARTITIONS)
-                 if re.fullmatch(section, row.section) and re.match(item, row.item)), None)
-
-
-# Scope of the small-cell suppression (--suppress-scope, as in rd_evaluation_matrix.py): only the diagnosis rows
-# (default), or every row
-SUPPRESS_DIAGNOSES, SUPPRESS_ALL = "diagnoses", "all"
-SUPPRESS_SCOPES = (SUPPRESS_DIAGNOSES, SUPPRESS_ALL)
-# The diagnosis rows: the tumour diagnosis of a case (entity group of the ICD-10-GM main diagnosis, ICD-O-3
-# morphology and topography, germline diagnosis, M category, grading, hereditary tumour, reported germline
-# variant) and the counts broken down by it. With SUPPRESS_DIAGNOSES only their cells are suppressed, every other
-# count and statistic is exact.
-STAGE_SECTION = "Tumorstadium (M-Kategorie aus tnmClassifications)"
-GRADING_SECTION = "Grading (Differenzierungsgrad)"
-FILL_CASES = "Füllgrad optionaler Felder (Fälle)"
-DIAGNOSIS_SECTIONS = (
-    "Tumorentität (Hauptdiagnose ICD-10-GM, gruppiert)",
-    "Tumorentität (sequenzierte Fälle)",
-    "Diagnose: Kodierung",
-    "GFK2 (MTB): Ergebnis nach Tumorentität (sequenzierte Fälle)",
-    STAGE_SECTION,
-    GRADING_SECTION,
-)
-# Single diagnosis rows of other sections (section, item): the hereditary cases, the reported germline variants,
-# and the fill rates of grading and TNM, which are the cases minus the categories "nicht angegeben" / "kein TNM"
-DIAGNOSIS_ITEMS = (
-    ("Fälle", "davon hereditär (diseaseType hereditary)"),
-    ("Molekulare Befunde (sequenzierte Fälle)", "Keimbahnvariante berichtet (genomicSource germline)"),
-    (FILL_CASES, "case.diagnosisOd.grading"),
-    (FILL_CASES, "case.diagnosisOd.tnmClassifications"),
-    (FILL_CASES, "TNM oder additionalClassification"),
-)
-# Diagnosis rows that add up to a total shown elsewhere, exactly with SUPPRESS_DIAGNOSES (GFK2 dokumentiert, ...),
-# or to one of them (the cases with a behaviour code): partitions of the diagnosis scope beside PARTITIONS
-DIAGNOSIS_PARTITIONS = (
-    (r"Diagnose: Kodierung", r"Histologie "),
-    (r"GFK2 \(MTB\): Ergebnis nach Tumorentität.*", r".*: GFK2 dokumentiert$"),
-    (r"GFK2 \(MTB\): Ergebnis nach Tumorentität.*", r".*: Therapie- oder Studienempfehlung$"),
-)
-# Diagnosis rows of different sections that add up to the cases (exact): a fill rate and the category "not given"
-DIAGNOSIS_KEY_PARTITIONS = (
-    (f"{FILL_CASES} | case.diagnosisOd.grading", f"{GRADING_SECTION} | {MISSING}"),
-    (f"{FILL_CASES} | case.diagnosisOd.tnmClassifications", f"{STAGE_SECTION} | kein TNM"),
-)
-# Diagnosis rows that equal each other when the other part is 0 (TNM or additionalClassification = TNM without
-# additionalClassification): one is suppressed wherever the other is
-DIAGNOSIS_LINKED = (
-    (f"{FILL_CASES} | TNM oder additionalClassification", f"{FILL_CASES} | case.diagnosisOd.tnmClassifications"),
-)
-# Bases of diagnosis rows that are the count of another diagnosis row (base label: row key): suppressed with it
-DIAGNOSIS_BASES = {
-    "Fälle mit bestätigter Keimbahndiagnose": "Diagnose: Kodierung | Keimbahndiagnose bestätigt (germlineDiagnosisConfirmed)",
-    **{f"sequenzierte Fälle {g}": f"Tumorentität (sequenzierte Fälle) | {g}" for g in ENTITY_LABELS},
-    **{f"sequenzierte Fälle mit GFK2 {g}": f"{DIAGNOSIS_SECTIONS[3]} | {g}: GFK2 dokumentiert" for g in ENTITY_LABELS},
-}
-
-
-def is_diagnosis_row(row):
-    """A row of the diagnosis sections (DIAGNOSIS_SECTIONS) or a single diagnosis row (DIAGNOSIS_ITEMS)"""
-    return row.section in DIAGNOSIS_SECTIONS or (row.section, row.item) in DIAGNOSIS_ITEMS
-
-
-def suppress(matrix, entities, periods, min_cell, scope=SUPPRESS_ALL):
-    """
-    {(row index, entity, period): {value, base, percent}} of the rows of every entity and period
-    (matrix[(entity, period)], WHOLE for the matrix itself): suppressed() as primary suppression, then
-    complementary suppression of counts: in every group of cells that add up to a shown or derivable
-    total - a row across the LEs and Gesamt, a partition within a column, a row across the periods and
-    the whole period - in which exactly one cell is suppressed, the smallest other nonzero cell is
-    suppressed as well (an LE or period before Gesamt or the whole period), until no group changes.
-    Complementary cells get the same marker '<min_cell' as primary ones (deliberately indistinguishable).
-    With SUPPRESS_DIAGNOSES only the diagnosis rows (is_diagnosis_row) are suppressed and form groups, every
-    other row is exact. The groups then also include DIAGNOSIS_PARTITIONS, whose total can be exact: where
-    the other cells of a group with one suppressed cell are zeros, a zero is suppressed (one with a nonzero
-    base; in a row the one of Gesamt, else preferably one whose Gesamt is nonzero), so that the suppressed
-    cell isn't the total minus the shown zeros; and a base that is the count of another diagnosis row
-    (DIAGNOSIS_BASES) is suppressed with that count.
-    Returns (values, counts): counts = {period kind: {"primary": n, "complementary": n}} for the matrix
-    (WHOLE) and the time series ("series")
-    """
-    template = matrix[(TOTAL, WHOLE)]
-    all_periods = [WHOLE] + periods
-    diagnoses = scope == SUPPRESS_DIAGNOSES
-
-    def cell(k):
-        return matrix[(k[1], k[2])][k[0]]
-
-    count_rows = [i for i, r in enumerate(template) if r.unit == COUNT and (not diagnoses or is_diagnosis_row(r))]
-    hidden = {(i, le, p) for i in count_rows for le in entities for p in all_periods
-              if 0 < cell((i, le, p)).n < min_cell or 0 < (cell((i, le, p)).base or 0) < min_cell}
-    primary = set(hidden)
-    groups = [("row", [(i, le, p) for le in entities]) for i in count_rows for p in all_periods]
-    groups += [("periods", [(i, le, p) for p in all_periods]) for i in count_rows for le in entities]
-    parts = {}
-    for i in count_rows:
-        if partition_of(template[i]):
-            parts.setdefault(partition_of(template[i]), []).append(i)
-    if diagnoses:
-        for n, (section, item) in enumerate(DIAGNOSIS_PARTITIONS):
-            parts[("diagnosis", n)] = [i for i in count_rows if re.fullmatch(section, template[i].section)
-                                       and re.match(item, template[i].item)]
-        for n, keys in enumerate(DIAGNOSIS_KEY_PARTITIONS):
-            parts[("diagnosis keys", n)] = [i for i in count_rows if template[i].key in keys]
-    groups += [("part", [(i, le, p) for i in rows]) for rows in parts.values() for le in entities for p in all_periods]
-
-    def zero_first(kind):
-        """the zero to suppress: one with cases in its base (a zero of a base 0 is known), then as said above"""
-        if kind == "row":
-            return lambda k: (cell(k).base == 0, k[1] != TOTAL)
-        return lambda k: (cell(k).base == 0, cell((k[0], TOTAL, k[2])).n == 0, k[1] == TOTAL, k[2] == WHOLE)
-
-    index = {r.key: i for i, r in enumerate(template)}
-    linked = [(index[a], index[b]) for a, b in DIAGNOSIS_LINKED if diagnoses and a in index and b in index]
-    changed = True
-    while changed:
-        changed = False
-        for a, b in linked + [(b, a) for a, b in linked]:
-            for le in entities:
-                for p in all_periods:
-                    if (a, le, p) in hidden and (b, le, p) not in hidden:
-                        hidden.add((b, le, p))
-                        changed = True
-        for kind, group in groups:
-            if sum(k in hidden for k in group) == 1:
-                rest = [k for k in group if k not in hidden and cell(k).n > 0]
-                if rest:
-                    hidden.add(min(rest, key=lambda k: (k[1] == TOTAL, k[2] == WHOLE, cell(k).n)))
-                    changed = True
-                elif diagnoses and len(group) > 1:
-                    hidden.add(min((k for k in group if k not in hidden), key=zero_first(kind)))
-                    changed = True
-    same_as_base = {j: index[DIAGNOSIS_BASES[r.base_label]] for j, r in enumerate(template)
-                    if diagnoses and r.base_label in DIAGNOSIS_BASES and DIAGNOSIS_BASES[r.base_label] in index}
-    in_scope = set(count_rows) if diagnoses else set(range(len(template)))
-    values = {}
-    counts = {kind: {"primary": 0, "complementary": 0} for kind in (WHOLE, "series")}
-    for i in range(len(template)):
-        for le in entities:
-            for p in all_periods:
-                # out of scope exact: nothing is below a min_cell of 1
-                n, base, pct = suppressed(cell((i, le, p)), min_cell if i in in_scope else 1)
-                kind = counts[WHOLE if p == WHOLE else "series"]
-                if (i, le, p) in hidden - primary:
-                    n, pct = f"<{min_cell}", None
-                    kind["complementary"] += 1
-                elif n == f"<{min_cell}":
-                    kind["primary"] += 1
-                if i in same_as_base and (same_as_base[i], le, p) in hidden and base != f"<{min_cell}":
-                    base, pct = f"<{min_cell}", None
-                values[(i, le, p)] = {"value": n, "base": base, "percent": pct}
-    return values, counts
-
-
-def suppressed(row, min_cell):
-    """
-    (value, base, percent) of a row: counts 1..min_cell-1 replaced by '<min_cell', as is every count
-    whose base is that small (also a zero: it would tell of each of these cases), and every statistic
-    computed from fewer than min_cell values
-    """
-    hidden = f"<{min_cell}"
+def cell_values(row):
+    """{value, base, percent} of a row: every value exact (the oncology matrix isn't suppressed)"""
     if row.unit != COUNT:
-        return (hidden if row.n is not None and row.support < min_cell else row.n), None, None
-    n, base, pct = row.n, row.base, percent(row.n, row.base)
-    if 0 < n < min_cell:
-        n, pct = hidden, None
-    if base is not None and 0 < base < min_cell:
-        n, base, pct = hidden, hidden, None
-    return n, base, pct
+        return {"value": row.n, "base": None, "percent": None}
+    return {"value": row.n, "base": row.base, "percent": percent(row.n, row.base)}
 
 
 # ---------------------------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------------------------
 
-def run(rows, failures, start, end, reference_date, min_cell=5, min_medical_days=14, resolution=MONTH, cutoff=None,
-        suppress_scope=SUPPRESS_DIAGNOSES):
+def run(rows, failures, start, end, reference_date, min_medical_days=14, resolution=MONTH, cutoff=None):
     """
     The matrix with its time series, from the submissions (SubmissionRow) and failures of the export; the
     result's "problems" (case keys of all LEs) are for the Rückfragen files only, not for the JSON
     """
-    return run_passes(lambda label: iter(rows), lambda: failures, start, end, reference_date, min_cell,
-                      min_medical_days, resolution, cutoff, suppress_scope)
+    rows, failures = list(rows), list(failures)    # read twice: an iterator would be empty the second time
+    return run_passes(lambda label: iter(rows), lambda: failures, start, end, reference_date, min_medical_days,
+                      resolution, cutoff)
 
 
-def run_file(source, start, end, reference_date, min_cell=5, min_medical_days=14, resolution=MONTH, cutoff=None,
-             suppress_scope=SUPPRESS_DIAGNOSES):
+def run_file(source, start, end, reference_date, min_medical_days=14, resolution=MONTH, cutoff=None):
     """run on an InputFile, read in two passes so that only the submissions of unfinished cases are in memory"""
     labels = {1: "Durchgang 1/2 (Übersicht)", 2: "Durchgang 2/2 (Auswertung)"}
-    return run_passes(lambda n: source.rows(labels[n]), lambda: source.failures, start, end, reference_date, min_cell,
-                      min_medical_days, resolution, cutoff, suppress_scope)
+    return run_passes(lambda n: source.rows(labels[n]), lambda: source.failures, start, end, reference_date,
+                      min_medical_days, resolution, cutoff)
 
 
 CASE_ROW, TEST_ROW, UNREADABLE_ROW = "case", "test", "unreadable"
@@ -1683,8 +1605,8 @@ def row_kind(row):
     return CASE_ROW, submission
 
 
-def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5, min_medical_days=14, resolution=MONTH,
-               cutoff=None, suppress_scope=SUPPRESS_DIAGNOSES):
+def run_passes(read_rows, read_failures, start, end, reference_date, min_medical_days=14, resolution=MONTH,
+               cutoff=None):
     """
     run, with the submissions read twice (read_rows(1), read_rows(2) give them in the same order), the failures
     after the first time (read_failures()). The first pass counts the submissions of each case and keeps the
@@ -1693,8 +1615,6 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
     evaluated facts of a case stay in memory, its submissions only as long as the case isn't complete (one
     case at a time for the export, which is ordered by case). Same result as with build_cases over all rows.
     """
-    if suppress_scope not in SUPPRESS_SCOPES:
-        raise ValueError(f"suppress_scope must be one of {SUPPRESS_SCOPES}: {suppress_scope}")
     if cutoff and reference_date > cutoff:
         raise ValueError(f"reference date {reference_date} after the cutoff {cutoff}")
 
@@ -1709,9 +1629,9 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
     test_facts, unreadable_rows, submitters = [], [], {}
     tests, reasons_exported = 0, False
     for row in read_rows(1):
+        reasons_exported = reasons_exported or row.reason is not NOT_EXPORTED     # of the export, also after --cutoff
         if not kept(row):
             continue
-        reasons_exported = reasons_exported or row.reason is not NOT_EXPORTED
         kind, submission = row_kind(row)
         if kind == UNREADABLE_ROW:
             unreadable_rows.append(SubmissionRow(row.case, row.submitted_at, None, row.site, row.reason))
@@ -1741,12 +1661,12 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
         A complete case: (0 with initial / 1 without, rank, evaluated facts or None, its problems, the facts of
         its submissions in the range)
         """
-        rows = sorted(rows, key=lambda r: r.submitted_at)     # stable: equal times keep the input order
+        rows = sorted(rows, key=submitted_order)     # stable: equal times keep the input order
         case = Case(key, leistungserbringer(rows[0]), rows)
         with_initial = any(submission_type(s) == "initial" for s in case.submissions)
         problems, e = [], None
         if with_initial:
-            initial_date = submission_date(case.initial)
+            initial_date = submission_date(case.initial)     # the earliest initial (initial_submission)
             if in_range(initial_date):
                 try:
                     if initial_date is None:
@@ -1758,6 +1678,7 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
                     if initial_date and parse_date(dig(case.latest, "metaData", "molecularBoardDecisionDate")) is None:
                         no_gfk1.append((case.le, period_of(initial_date, resolution)))
                 if e is not None:
+                    e.last_submitted = submitted_order(rows[-1])
                     e.initial_date = initial_date
                     e.period = period_of(initial_date, resolution)
                     for kind, detail in e.problems:
@@ -1783,7 +1704,7 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
             del pending[row.case]
             finished.append(finish(row.case, rows))
         del rows, row
-    if pending:
+    if pending or len(finished) != len(expected):
         raise ValueError("the input changed between the two passes (cases with fewer submissions than in the first)")
 
     # in the order of build_cases: the cases with initial, then those without, each by their first submission
@@ -1797,16 +1718,18 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
         d = parse_date(row.submitted_at)
         if in_range(d):
             problem(problems, leistungserbringer(row), P_UNREADABLE, row.case, None, "Einreichung ohne lesbare metaData.submission", d)
-    evaluated_keys = {e.key for e in evaluated}
+    last_submitted = {e.key: e.last_submitted for e in evaluated}
     stale = Counter()
     for f in failures:
         d = parse_date(f.submitted_at)
         if not in_range(d):
             continue
-        if f.case in evaluated_keys:
+        # stale: the case is evaluated with an older state, the failed submission came after its latest converted one
+        later = f.case in last_submitted and submitted_order(f) > last_submitted[f.case]
+        if later:
             stale[(str(f.site or "?"), period_of(d, resolution) if d else None)] += 1
         problem(problems, str(f.site or "?"), P_NOT_CONVERTED, f.case, f.tan,
-                ("Episode mit älterem Stand ausgewertet; " if f.case in evaluated_keys else "") + f.error[:300], d)
+                ("Episode mit älterem Stand ausgewertet; " if later else "") + f.error[:300], d)
 
     les = sorted({e.le for e in evaluated} | {p["le"] for p in problems} | {x.le for x in subs})
 
@@ -1837,7 +1760,7 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
     periods = periods_between(first, last, resolution) if first and last and first <= last else []
     matrix = {(le, p): evaluate(le, p) for le in entities for p in [WHOLE] + periods}
     template = matrix[(TOTAL, WHOLE)]
-    values, suppressed_counts = suppress(matrix, entities, periods, min_cell, suppress_scope)
+    values = {(i, le, p): cell_values(r) for (le, p), rows_ in matrix.items() for i, r in enumerate(rows_)}
 
     def described(i, r, cells):
         return {"key": r.key, "section": r.section, "item": r.item, "unit": r.unit, "base_label": r.base_label,
@@ -1856,36 +1779,16 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
         period = (f"gesamter Export (Erstmeldungen {min(initial_dates).strftime('%m.%Y')} - "
                   f"{max(initial_dates).strftime('%m.%Y')})" if initial_dates else "gesamter Export")
 
-    def masked(n):
-        return f"<{min_cell}" if suppress_scope == SUPPRESS_ALL and 0 < n < min_cell else n
-
     labels = {le: f"{le} ({', '.join(sorted(submitters[le]))})" if le in submitters else le for le in les}
     unit = "Monat" if resolution == MONTH else "Quartal"
     notes = [
-        f"{masked(len(evaluated))} Fälle (Episoden mit Erstmeldung, diseaseType oncological/hereditary) ausgewertet, Stand je Fall "
+        f"{len(evaluated)} Fälle (Episoden mit Erstmeldung, diseaseType oncological/hereditary) ausgewertet, Stand je Fall "
         "aus der letzten Nicht-Test-Einreichung; plan und molecular aus der letzten Einreichung, die sie enthält; "
         "Follow-ups und deren Therapien über alle Einreichungen. Definitionen: scripts/dnpm_evaluation_matrix/README.md.",
-        f"{masked(tests)} Testeinreichungen nicht in den Fällen (nur im Abschnitt Einreichungen gezählt).",
-        (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso jeder Wert mit einer Basis unter "
-         f"{min_cell} (auch die 0) und Kennzahlen aus weniger als {min_cell} Werten (nicht in den Rückfragen). "
-         f"Ergänzend unterdrückt, ebenfalls als <{min_cell}, damit sich keine unterdrückte Zelle aus Gesamt und den übrigen LE, "
-         "aus der Basis und den übrigen Kategorien oder aus dem Gesamtzeitraum und den übrigen Zeiträumen ergibt "
-         f"({suppressed_counts[WHOLE]['complementary']} Zellen der Matrix zusätzlich zu {suppressed_counts[WHOLE]['primary']}); "
-         f"eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr Fälle zählen. "
-         "Die Tabellen sind für die Datenknoten und den jeweiligen LE bestimmt, nicht zur Veröffentlichung."
-         if min_cell > 1 and suppress_scope == SUPPRESS_ALL else
-         (f"Unterdrückt werden nur die Diagnosezeilen, die Abschnitte {', '.join(DIAGNOSIS_SECTIONS)} und die Zeilen "
-          f"{', '.join(f'{sec}: {item}' for sec, item in DIAGNOSIS_ITEMS)}. Dort sind "
-          f"Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso jeder Wert mit einer Basis unter "
-          f"{min_cell} (auch die 0; nicht in den Rückfragen). Ergänzend unterdrückt, ebenfalls als <{min_cell}, damit "
-          "sich keine unterdrückte Zelle aus Gesamt und den übrigen LE, aus der Basis und den übrigen Kategorien (auch "
-          "einer exakt gezeigten Summe wie GFK2 dokumentiert über die Tumorentitäten) oder aus dem Gesamtzeitraum und den "
-          "übrigen Zeiträumen ergibt, die kleinste weitere Zelle über 0, sonst eine 0; eine Basis, die die Zahl einer "
-          f"unterdrückten Diagnosezeile ist, mit ihr ({suppressed_counts[WHOLE]['complementary']} Zellen der Matrix "
-          f"zusätzlich zu {suppressed_counts[WHOLE]['primary']}); eine Zelle <{min_cell} kann daher auch 0 oder "
-          f"{min_cell} und mehr Fälle zählen. Alle anderen Zahlen und Kennzahlen sind exakt angegeben, auch unter "
-          f"{min_cell}. Die Tabellen sind für die Datenknoten und den jeweiligen LE bestimmt, nicht zur Veröffentlichung.")
-         if min_cell > 1 else "Keine Zellen unterdrückt (--min-cell 1): nur für den internen Gebrauch der Datenknoten."),
+        f"{tests} Testeinreichungen nicht in den Fällen (nur im Abschnitt Einreichungen gezählt).",
+        "Keine Zellen unterdrückt: alle Zahlen und Kennzahlen exakt, auch unter 5 (Entscheidung der Datenhalter: die "
+        "onkologische Matrix wird nicht unterdrückt). Die Tabellen sind für die Datenknoten und den jeweiligen LE bestimmt, "
+        "nicht zur Veröffentlichung.",
         "Population: GFK2-Ergebnis, Umsetzung und molekulare Befunde beziehen sich auf die sequenzierten Fälle "
         "(decisionToInclude nicht false und libraryType wgs, wgs_lr, wes oder panel).",
         "Umsetzung: eine Empfehlung gilt als begonnen, wenn followUpOds[].therapies[].reference ihren identifier "
@@ -1909,9 +1812,8 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
         "Stichtag. Nicht aus dem Datenkranz: Kostenübernahme, Gründe für eine nicht begonnene Therapie, Therapiestatus, "
         "Studieneinschluss, Beurteilungsmethode und radiologische Validierung des Ansprechens, frühere Staging-Termine "
         "(nur das letzte Ansprechen je Therapie), der Status lost to follow-up selbst (das DIP-Mapping lässt das Follow-up dann weg).",
-        f"{TIMELINE}: je Meilenstein Datum minus GFK1 in Tagen, Fälle mit Datum sowie 1. Quartil, Median und 3. Quartil"
-        + (f" (ab {min_cell} Fällen). " if suppress_scope == SUPPRESS_ALL else ". ")
-        + "MV-Einwilligung: frühestes mvConsent.scope[mvSequencing].date; Erstdiagnose: "
+        f"{TIMELINE}: je Meilenstein Datum minus GFK1 in Tagen, Fälle mit Datum sowie 1. Quartil, Median und 3. Quartil. "
+        "MV-Einwilligung: frühestes mvConsent.scope[mvSequencing].date; Erstdiagnose: "
         "mainDiagnosis.date; GFK2 (MTB) wie oben; Erstmeldung beim KDK: Datum der Erstmeldung; Beginn empfohlene "
         "Therapie: frühester therapyStartDate einer begonnenen Empfehlung; Erstes Follow-up: frühestes "
         "followUpOds[].followUpDate über alle Einreichungen. Monatsangaben (YYYY-MM) zählen als 15. des Monats. "
@@ -1927,14 +1829,11 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
         notes.append("Der Export enthält keine Spalte reasonResearchConsentMissing: Gründe fehlender Einwilligung nur "
                      "aus noScopeJustification, die das DIP-Mapping nicht befüllt.")
     if unreadable_rows:
-        notes.append(f"{masked(len(unreadable_rows))} Einreichungen ohne lesbare metaData.submission (Rückfrage 'Fall nicht auswertbar').")
+        notes.append(f"{len(unreadable_rows)} Einreichungen ohne lesbare metaData.submission (Rückfrage 'Fall nicht auswertbar').")
 
     return {
         "title": f"AUSWERTUNG MTB {period}",
         "period": period,
-        "min_cell": min_cell,
-        "suppress_scope": suppress_scope,
-        "suppressed": suppressed_counts[WHOLE],
         "reference_date": reference_date.isoformat(),
         "cutoff": cutoff.isoformat() if cutoff else None,
         "entities": entities,
@@ -1943,7 +1842,7 @@ def run_passes(read_rows, read_failures, start, end, reference_date, min_cell=5,
         "problems": sorted(({k: v for k, v in p.items() if k != "period"} for p in problems),
                            key=lambda p: (p["le"], PROBLEMS.index(p["problem"]), str(p["case"]))),
         "notes": notes,
-        "time_series": {"resolution": resolution, "periods": periods, "suppressed": suppressed_counts["series"],
+        "time_series": {"resolution": resolution, "periods": periods,
                         "rows": series_rows},
     }
 
@@ -1987,6 +1886,31 @@ def write_problems_csv(path, problems, labels, delimiter=";"):
             writer.writerow([labels.get(p["le"], p["le"]), p["problem"], p["case"], p["tan"] or "", p["detail"]])
 
 
+def write_rueckfragen(output, result, delimiter=";", per_le=False):
+    """The Rückfragen: <output>_rueckfragen.csv of all LEs, or per_le only <output>_rueckfragen_<LE>.csv per LE (each
+    LE gets only its own case keys). Returns the paths written"""
+    if not per_le:
+        write_problems_csv(f"{output}_rueckfragen.csv", result["problems"], result["labels"], delimiter)
+        return [f"{output}_rueckfragen.csv"]
+    paths = per_le_paths(output, result["entities"][1:])
+    for le, path in paths.items():
+        write_problems_csv(path, [p for p in result["problems"] if p["le"] == le], result["labels"], delimiter)
+    return list(paths.values())
+
+
+def per_le_paths(output, les):
+    """{LE: <output>_rueckfragen_<LE>.csv}, the LE with characters other than letters, digits, . _ - as _; refuses
+    two LEs with the same file (also differing only in case, as on macOS and Windows): one would get the other's
+    case keys"""
+    paths = {le: f"{output}_rueckfragen_{re.sub(r'[^A-Za-z0-9._-]', '_', str(le))}.csv" for le in les}
+    seen = {}
+    for le, path in paths.items():
+        other = seen.setdefault(path.lower(), le)
+        if other != le:
+            raise SystemExit(f"LEs {other!r} and {le!r} would write the same file {path}; rename one (site of the export)")
+    return paths
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input", help="result JSON of export-datenkranz, or a JSON list of submissions")
@@ -1998,16 +1922,13 @@ def main(argv=None):
                         help="date consents and due follow-ups are evaluated at, not after --cutoff; best the date of "
                              "the export (default: --cutoff, else today)")
     parser.add_argument("--resolution", choices=(MONTH, QUARTER), default=MONTH, help="of the time series (default: %(default)s)")
-    parser.add_argument("--min-cell", type=int, default=5, help="counts below are suppressed, 1 disables (default: %(default)s)")
-    parser.add_argument("--suppress-scope", choices=SUPPRESS_SCOPES, default=SUPPRESS_DIAGNOSES,
-                        help="suppress small counts only in the diagnosis rows (DIAGNOSIS_SECTIONS), all other numbers "
-                             "exact, or in all rows (default: %(default)s)")
     parser.add_argument("--min-medical-days", type=int, default=14,
                         help="shorter durations from GFK1 to GFK2 are listed for clarification (default: %(default)s)")
     parser.add_argument("--delimiter", default=";", help="CSV delimiter (default: %(default)s, for Excel with German locale)")
     parser.add_argument("--output", default="dnpm-evaluation-matrix", help="output path without extension (default: %(default)s)")
     parser.add_argument("--rueckfragen-per-le", action="store_true",
-                        help="also write the Rückfragen of each LE to <output>_rueckfragen_<LE>.csv")
+                        help="write the Rückfragen only per LE, <output>_rueckfragen_<LE>.csv, not the file of all LEs "
+                             "(recommended: hand each LE only its own cases)")
     args = parser.parse_args(argv)
     if args.start and args.end and args.start >= args.end:
         parser.error("--from must be before --until")
@@ -2015,23 +1936,19 @@ def main(argv=None):
     if args.cutoff and args.reference_date > args.cutoff:
         parser.error("--reference-date must not be after --cutoff")
 
-    result = run_file(InputFile(args.input, progress=True), args.start, args.end, args.reference_date, args.min_cell,
-                      args.min_medical_days, args.resolution, args.cutoff, args.suppress_scope)
+    result = run_file(InputFile(args.input, progress=True), args.start, args.end, args.reference_date,
+                      args.min_medical_days, args.resolution, args.cutoff)
 
     with open(f"{args.output}.json", "w", encoding="utf-8") as f:     # without the case keys of the Rückfragen
         json.dump({k: v for k, v in result.items() if k != "problems"}, f, ensure_ascii=False, indent=1)
     write_csv(f"{args.output}.csv", result, args.delimiter)
     write_series_csv(f"{args.output}_zeitreihe.csv", result, args.delimiter)
-    write_problems_csv(f"{args.output}_rueckfragen.csv", result["problems"], result["labels"], args.delimiter)
-    if args.rueckfragen_per_le:
-        for le in result["entities"][1:]:
-            write_problems_csv(f"{args.output}_rueckfragen_{re.sub(r'[^A-Za-z0-9._-]', '_', le)}.csv",
-                               [p for p in result["problems"] if p["le"] == le], result["labels"], args.delimiter)
+    written = write_rueckfragen(args.output, result, args.delimiter, args.rueckfragen_per_le)
 
     for note in result["notes"]:
         print(note, file=sys.stderr)
     print(f"Rückfragen an LEs: siehe {args.output}_rueckfragen*.csv", file=sys.stderr)
-    print(f"Written: {args.output}.json, {args.output}.csv, {args.output}_zeitreihe.csv, {args.output}_rueckfragen.csv",
+    print(f"Written: {args.output}.json, {args.output}.csv, {args.output}_zeitreihe.csv, " + ", ".join(written),
           file=sys.stderr)
 
 

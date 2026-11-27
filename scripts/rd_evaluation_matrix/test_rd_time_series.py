@@ -29,7 +29,7 @@ PATDAT_STORE_AND_USE = "2.16.840.1.113883.3.1937.777.24.5.3.1"
 REFUSES = "patient refuses to sign consent"
 
 
-def run(rows, start=None, end=None, failures=(), min_cell=1, resolution=ts.MONTH, due_days=None, scope=rdm.SUPPRESS_ALL):
+def run(rows, start=None, end=None, failures=(), min_cell=1, resolution=ts.MONTH, due_days=None, scope=rdm.SUPPRESS_CODES):
     """The time series; suppression in all blocks unless scope says otherwise (the tests of the rules of the suppression)"""
     return ts.run(rows, list(failures), start, end, REFERENCE, min_cell, resolution, due_days, suppress_scope=scope)
 
@@ -647,18 +647,11 @@ class TimelineTests(unittest.TestCase):
         broken = datenkranz("t1")
         del broken["metaData"]["molecularBoardDecisionDate"]
         result = cases(broken, datenkranz("t2"), min_cell=5)
-        self.assertEqual(get(result, self.T, ts.NO_GFK1), "<5")
+        self.assertEqual(get(result, self.T, ts.NO_GFK1), 1)       # not a code line: exact
         self.assertEqual(get(cases(broken, datenkranz("t2")), self.T, ts.NO_GFK1), 1)
         self.assertEqual(get(cases(broken, datenkranz("t2")), ts.B_CASES, ts.UNREADABLE), 1)
 
-    def test_small_cells_hide_count_and_quartiles(self):
-        contents = [self.enriched(f"t{i}", zse=("2024-01-01",) if i < 3 else ()) for i in range(8)]
-        result = cases(*contents, min_cell=5)
-        self.assertEqual(get(result, self.T, "ZSE-Erstkontakt: Fälle"), "<5")
-        for label in ("1. Quartil", "Median", "3. Quartil"):
-            self.assertIsNone(get(result, self.T, f"ZSE-Erstkontakt: {label} (Tage)"))
-        self.assertEqual(get(result, self.T, "GFK2: Fälle"), 8)
-        self.assertEqual(get(result, self.T, "GFK2: Median (Tage)"), 31.0)
+
 
     def test_per_le_and_month(self):
         rows = submission_series("a", datenkranz("t1", submitted="2025-03-01"), site="LE1")
@@ -731,148 +724,6 @@ class SubmissionTests(unittest.TestCase):
         # of the failures, the one without submittedAt; the one of February is out of the period
         self.assertEqual(get(march, b, ts.NOT_CONVERTED, le="LE2"), 1)
         self.assertTrue(any("Kein Fall mit Erstmeldung" in note for note in march["notes"]))
-
-
-class SuppressionTests(unittest.TestCase):
-
-    def rows(self):
-        rows = []
-        for i in range(8):
-            consents = [broad_consent(kind="permit" if i < 2 else "deny")] if i < 6 else []
-            rows += submission_series(
-                f"case-{i:04d}", datenkranz(f"TAN-{i:04d}-1", consents=consents),
-                datenkranz(f"TAN-{i:04d}-2", type_="followup", submitted="2025-07-01", consents=consents,
-                           follow_up=follow_up(f"2025-06-{10 + i}") if i < 4 else None),
-                site="LE1")
-        rows += submission_series("case-0009", datenkranz("TAN-0009-1"), site="LE2")
-        return rows
-
-    def test_counts_rates_and_medians(self):
-        result = run(self.rows(), min_cell=5)
-        b, le = ts.B_CONSENT, "LE1"
-
-        def values(item, block=b, le=le):
-            return tuple(get(result, block, item, le=le, field=f) for f in ("value", "base", "percent"))
-
-        self.assertEqual(values(ts.CASES, ts.B_CASES), (8, None, None))
-        self.assertEqual(values(ts.CASES, ts.B_CASES, "LE2"), ("<5", None, None))
-        self.assertEqual(values(ts.CONSENT_TRANSMITTED), (6, 8, 75.0))
-        # 2 of 8 and of 6: count suppressed, no rate
-        self.assertEqual(values(ts.CONSENT_VALID), ("<5", 8, None))
-        self.assertEqual(values(ts.CONSENT_RATE), ("<5", 6, None))
-        # of the 2 cases without consent nothing is counted, neither the 2 without reason nor a zero
-        self.assertEqual(values(ts.CONSENT_MISSING), ("<5", 8, None))
-        self.assertEqual(values(f"{ts.CONSENT_MISSING}: {ts.NO_JUSTIFICATION}"), (None, "<5", None))
-        self.assertEqual(values(f"{ts.CONSENT_MISSING}: {ts.JUSTIFICATIONS[0]}"), (None, "<5", None))
-        # a zero of at least 5 cases is shown
-        self.assertEqual(values(f"{ts.CONSENT_INVALID}: {ts.INVALID[2][1]}"), (0, 6, 0.0))
-        # durations of 8 cases (4 by followUpDate, 4 by the submission), in total of 9 cases
-        days = [get(result, ts.B_FOLLOW_UP, ts.DAYS, le=le, field=f) for f in ("n", "base", "median", "q1", "q3")]
-        self.assertEqual(days, [8, 8, 132.0, 121.8, 141.0])
-        self.assertEqual(values(ts.DAYS_FROM_DATE, ts.B_FOLLOW_UP), ("<5", 8, None))
-        # of fewer than 5 values, no median or quartiles: 4 durations of 5 cases
-        few = run(self.rows()[:8] + self.rows()[-1:], min_cell=5)
-        self.assertEqual([get(few, ts.B_FOLLOW_UP, ts.DAYS, field=f) for f in ("n", "base", "median", "q1", "q3")],
-                         ["<5", 5, None, None, None])
-
-    def test_counts_within_fewer_cases_are_left_out(self):
-        result = run(self.rows(), min_cell=5, due_days=30)
-        values = ("value", "base", "percent", "median", "q1", "q3", "n")
-        # of the single case of LE2 the number of cases only, and what isn't counted in the cases
-        of_le2 = [r for r in result["rows"] if r["le"] == "LE2" and r["period"] in ("2025-03", ts.WHOLE)]
-        self.assertEqual(len(of_le2), 2 * len([r for r in result["rows"] if r["le"] == "LE2" and r["period"] == ts.WHOLE]))
-        for r in of_le2:
-            if r["block"] not in (ts.B_CASES, ts.B_SUBMISSIONS) and r["item"] != ts.NO_GFK1:
-                self.assertEqual([r[v] for v in values], [None] * 7, r["item"])
-        self.assertEqual(get(result, ts.B_CASES, ts.CASES, le="LE2"), "<5")
-        self.assertEqual(get(result, ts.B_CASES, ts.UNREADABLE, le="LE2"), 0)
-        self.assertEqual(get(result, ts.B_SUBMISSIONS, "Einreichungen initial", le="LE2"), "<5")
-        # nowhere a count, be it zero, next to a suppressed base
-        for r in result["rows"]:
-            if r["base"] == "<5":
-                self.assertEqual((r["value"], r["n"], r["percent"], r["median"]), (None, None, None, None), r["item"])
-        # the 2 refusals among the 8 cases of LE1 would follow from the base of the rate that includes them
-        refusing = self.rows()
-        for r in refusing[12:16]:
-            r.content["metaData"]["researchConsents"] = [{"presentationDate": "2025-01-01", "noScopeJustification": REFUSES}]
-        result = run(refusing, min_cell=5)
-        rate = [get(result, ts.B_CONSENT, ts.CONSENT_RATE_REFUSALS, le="LE1", field=f) for f in ("value", "base", "percent")]
-        self.assertEqual(rate, [None, None, None])
-        self.assertEqual(get(result, ts.B_CONSENT, ts.CONSENT_RATE, le="LE1", field="base"), 6)
-        # unsuppressed, every count is given
-        plain = run(refusing, min_cell=1)
-        self.assertEqual([get(plain, ts.B_CONSENT, ts.CONSENT_RATE_REFUSALS, le="LE1", field=f) for f in ("value", "base")], [2, 8])
-        # (a quartile of no values is empty)
-        self.assertFalse([r["item"] for r in plain["rows"] if r["value"] is None and r["n"] is None and not quartile(r)])
-
-    def test_unsuppressed_with_min_cell_1(self):
-        result = run(self.rows(), min_cell=1)
-        self.assertEqual(get(result, ts.B_CONSENT, ts.CONSENT_RATE, le="LE1", field="percent"), 33.3)
-        self.assertEqual(get(result, ts.B_CASES, ts.CASES, le="LE2"), 1)
-        self.assertTrue(any("--min-cell 1" in note for note in result["notes"]))
-
-    def test_no_case_keys_or_tans_in_the_output(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "in.json")
-            with open(path, "w") as f:
-                json.dump([{"case": json.loads(r.case), "submittedAt": r.submitted_at, "content": r.content, "site": r.site}
-                           for r in self.rows()], f)
-            out = os.path.join(tmp, "series")
-            main(path, "--output", out, "--min-cell", "1")
-            self.assertEqual(sorted(os.listdir(tmp)), ["in.json", "series.csv", "series.json"])
-            for name in ("series.csv", "series.json"):
-                with open(os.path.join(tmp, name), encoding="utf-8-sig") as f:
-                    text = f.read()
-                self.assertNotIn("TAN-", text)
-                self.assertNotIn("case-", text)
-
-
-def synthetic_series(seed=11, sizes=(("LE-A", 48), ("LE-B", 17), ("LE-C", 7))):
-    """A random synthetic case set over three LEs and six months"""
-    rnd = random.Random(seed)
-    rows = []
-    for le, size in sizes:
-        for i in range(size):
-            submitted = f"2025-0{rnd.randint(1, 6)}-{rnd.randint(10, 28)}"
-            content = datenkranz(
-                f"{le}-{i}", submitted=submitted, gfk1="2024-12-01", plan_date=rnd.choice(["2024-12-20", None]),
-                gender=rnd.choice(["female", "male", "male", "other"]), coverage=rnd.choice(["GKV"] * 6 + ["PKV"]),
-                assessment=rnd.choice(list(rdm.ASSESSMENT_STATUS)), library=rnd.choice(["wgs"] * 6 + ["panel"]),
-                consents=[broad_consent(kind=rnd.choice(["permit", "permit", "deny"]))] if rnd.random() < 0.7 else [],
-            )
-            rows.append(row(f"{le}-{i}", content, submitted + "T10:00:00", le))
-    return rows
-
-
-class ComplementarySuppressionTests(unittest.TestCase):
-    """No suppressed count of a period is the whole period minus the other periods"""
-
-    def test_no_period_is_alone_suppressed(self):
-        rows = synthetic_series()
-        full, result = run(rows, min_cell=1, due_days=30), run(rows, min_cell=5, due_days=30)
-        self.assertEqual(len(full["rows"]), len(result["rows"]))
-        figures, complementary = {}, 0
-        for f, r in zip(full["rows"], result["rows"]):
-            for field in ("value", "base"):
-                if f[field] is None or quartile(r):     # a quartile is a statistic, not a count
-                    continue
-                hidden = r[field] in (None, "<5")
-                figures.setdefault((r["le"], r["block"], r["item"], field), []).append(hidden)
-                if hidden:
-                    complementary += f[field] >= 5
-                    self.assertIsNone(r["percent"])
-                else:
-                    self.assertEqual(r[field], f[field], (r["le"], r["period"], r["item"], field))
-        self.assertGreater(complementary, 0)
-        for figure, hidden in figures.items():
-            self.assertEqual(len(hidden), len(result["periods"]), figure)
-            self.assertNotEqual(sum(hidden), 1, figure)
-        # the case count of all LEs over the whole period is shown
-        self.assertEqual(get(result, ts.B_CASES, ts.CASES), 72)
-        # the counts of the timeline are part of it, and suppressed over the periods as the others
-        timeline = {k: v for k, v in figures.items() if k[1] == ts.B_TIMELINE and k[3] == "value"}
-        self.assertIn(("LE-B", ts.B_TIMELINE, "GFK2: Fälle", "value"), timeline)
-        self.assertGreater(sum(sum(hidden) for hidden in timeline.values()), 0)
 
 
 class InputOutputTests(unittest.TestCase):
@@ -1011,87 +862,59 @@ class InputOutputTests(unittest.TestCase):
 PREVIOUS = "647f21b"    # the last commit before --suppress-scope: its output equals that of --suppress-scope all
 
 
-class DiagnosisScopeTests(unittest.TestCase):
-    """--suppress-scope diagnoses: only the diagnosis blocks are suppressed, all other numbers are exact"""
+class CodeScopeTests(unittest.TestCase):
+    """--suppress-scope codes (default): only the rows derived from the diagnosis codes are suppressed, as in the
+    matrix; the time series has no such block, so every number is exact, also the diagnosis status and rate"""
 
-    def test_the_diagnosis_blocks_are_those_of_the_matrix(self):
-        self.assertTrue(ts.is_diagnosis_line(ts.Line(ts.B_STATUS, rdm.DIAGNOSED)))
-        self.assertTrue(ts.is_diagnosis_line(ts.Line(ts.B_RATE, rdm.DIAGNOSED)))
-        self.assertFalse(ts.is_diagnosis_line(ts.Line(ts.B_SEX, "m")))
-        result = run(synthetic(), min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-        self.assertEqual({r["block"] for r in result["rows"] if ts.is_diagnosis_line(SimpleNamespace(
-            block=r["block"], item=r["item"]))}, {ts.B_STATUS, ts.B_RATE})
-        self.assertEqual(result["suppress_scope"], rdm.SUPPRESS_DIAGNOSES)
+    def test_the_time_series_has_no_code_block(self):
+        self.assertFalse(ts.is_code_line(ts.Line(ts.B_STATUS, rdm.DIAGNOSED)))
+        self.assertFalse(ts.is_code_line(ts.Line(ts.B_RATE, rdm.DIAGNOSED)))
+        self.assertTrue(ts.is_code_line(ts.Line("Orphacode", "Erkr. ohne Orphacode (keine Orphanet-Kodierung)")))
+        self.assertTrue(ts.is_code_line(ts.Line(rdm.DISEASE_GROUP_BLOCKS[0], rdm.NEUROMUSCULAR)))
+        result = run(synthetic(), min_cell=5, scope=rdm.SUPPRESS_CODES)
+        self.assertEqual([r for r in result["rows"] if ts.is_code_line(SimpleNamespace(block=r["block"], item=r["item"]))], [])
+        self.assertEqual(result["suppress_scope"], rdm.SUPPRESS_CODES)
 
-    def test_non_diagnosis_cells_exact_and_no_period_follows_from_the_others(self):
+    def test_every_cell_exact_also_the_diagnosis_status(self):
         for rows in (synthetic(), synthetic(seed=14, sizes=(("LE-A", 6), ("LE-B", 3)))):
             full = run(rows, resolution=ts.QUARTER)
-            result = run(rows, min_cell=5, resolution=ts.QUARTER, scope=rdm.SUPPRESS_DIAGNOSES)
-            hidden = 0
+            result = run(rows, min_cell=5, resolution=ts.QUARTER, scope=rdm.SUPPRESS_CODES)
             fields = ("value", "base", "percent", "median", "q1", "q3", "n")
-            for r, f in zip(result["rows"], full["rows"]):
-                diagnosis = r["block"] in (ts.B_STATUS, ts.B_RATE)
-                if not diagnosis or r["base_label"] in rdm.EXACT_DIAGNOSIS_BASES:
-                    self.assertEqual(r["base"], f["base"], (r["block"], r["item"]))
-                if diagnosis:
-                    hidden += sum(r[x] in ("<5", None) and f[x] is not None for x in ("value", "base"))
-                else:
-                    self.assertEqual({x: r[x] for x in fields}, {x: f[x] for x in fields}, (r["block"], r["item"]))
-            self.assertGreater(hidden, 0)
-            # per LE and diagnosis figure, never exactly one period suppressed
-            figures = {}
-            for r, f in zip(result["rows"], full["rows"]):
-                if r["block"] in (ts.B_STATUS, ts.B_RATE) and f["value"] is not None:
-                    figures.setdefault((r["le"], r["block"], r["item"]), []).append(r["value"] in ("<5", None))
-            self.assertEqual([k for k, v in figures.items() if sum(v) == 1], [])
+            self.assertEqual([{x: r[x] for x in fields} for r in result["rows"]], [{x: f[x] for x in fields} for f in full["rows"]])
+            self.assertTrue(any(isinstance(r["value"], int) and 0 < r["value"] < 5 for r in result["rows"] if r["block"] == ts.B_STATUS))
 
-    def test_small_counts_outside_the_diagnosis_blocks_are_shown(self):
+    def test_small_counts_are_shown_and_old_scopes_refused(self):
         result = cases(*[datenkranz(f"t{i}", gender="male" if i < 2 else "female",
                                     assessment="noGeneticDiagnosis" if i < 2 else "confirmedGeneticDiagnosis")
-                         for i in range(7)], min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
+                         for i in range(7)], min_cell=5, scope=rdm.SUPPRESS_CODES)
         self.assertEqual(get(result, ts.B_SEX, "m"), 2)
-        self.assertEqual(get(result, ts.B_STATUS, rdm.UNDIAGNOSED), "<5")
+        self.assertEqual(get(result, ts.B_STATUS, rdm.UNDIAGNOSED), 2)
         self.assertEqual(get(result, ts.B_STATUS, rdm.UNDIAGNOSED, field="base"), 7)
         self.assertTrue(result["notes"][0].startswith("7 Fälle"))
-        few = cases(datenkranz("t1"), datenkranz("t2"), min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-        self.assertEqual(get(few, ts.B_CASES, ts.CASES), 2)
-        self.assertIsNone(get(few, ts.B_STATUS, rdm.DIAGNOSED))       # a count within 2 cases is left out
-        self.assertEqual(get(few, ts.B_STATUS, rdm.DIAGNOSED, field="base"), 2)
-        with self.assertRaises(ValueError):
-            run([], scope="none")
+        self.assertTrue(any("die Zeitreihe hat keine solche Zeile" in n for n in result["notes"]))
+        for scope in ("none", "diagnoses"):
+            with self.assertRaises(ValueError):
+                run([], scope=scope)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as err:
+            ts.main(["missing.json", "--suppress-scope", "diagnoses"])
+        self.assertIn("replaced by 'codes'", err.getvalue())
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as err:
+            ts.main(["missing.json", "--suppress-scope", "all"])
+        self.assertIn("'all' was removed", err.getvalue())
 
-    def test_scope_all_is_unchanged(self):
-        # the previous version of the script (before --suppress-scope), from the git history
-        here = os.path.dirname(os.path.abspath(__file__))
-        try:
-            source = subprocess.run(["git", "show", f"{PREVIOUS}:scripts/rd_evaluation_matrix/rd_time_series.py"],
-                                    cwd=here, capture_output=True, check=True).stdout
-        except (OSError, subprocess.CalledProcessError):
-            self.skipTest(f"commit {PREVIOUS} not available")
-        with tempfile.TemporaryDirectory() as tmp:
-            with open(os.path.join(tmp, "previous_series.py"), "wb") as f:
-                f.write(source)
-            spec = importlib.util.spec_from_file_location("previous_series", os.path.join(tmp, "previous_series.py"))
-            previous = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(previous)
-            for rows in (synthetic(), synthetic(seed=14, sizes=(("LE-A", 6), ("LE-B", 3)))):
-                path = os.path.join(tmp, "in.json")
-                with open(path, "w") as f:
-                    json.dump([{"case": r.case, "site": r.site, "submittedAt": r.submitted_at, "content": r.content}
-                               for r in rows], f)
-                outputs = []
-                for name, script, scope in (("new", ts, ["--suppress-scope", "all"]), ("old", previous, [])):
-                    out = os.path.join(tmp, name)
-                    with contextlib.redirect_stderr(io.StringIO()):
-                        script.main([path, "--output", out, "--reference-date", "2026-11-01", "--period", "quarter",
-                                     "--follow-up-due-days", "180", *scope])
-                    with open(out + ".json", encoding="utf-8") as f:
-                        result = json.load(f)
-                    with open(out + ".csv", "rb") as f:
-                        outputs.append((result, f.read()))
-                (new, new_csv), (old, old_csv) = outputs
-                self.assertEqual(new_csv, old_csv)
-                self.assertEqual(new, {**old, "suppress_scope": "all"})
+
+
+
+class SubmittedOrderTests(unittest.TestCase):
+
+    def test_episode_without_initial_by_its_first_submission_in_utc(self):
+        # 2025-03-31T23:30-02:00 is 2025-04-01T01:30Z, after 2025-04-01T00:30Z: the April submission is the first
+        march = datenkranz("t1", type_="followup", submitted="2025-03-31")
+        april = datenkranz("t2", type_="followup", submitted="2025-04-01")
+        rows = [row("a", march, "2025-03-31T23:30:00-02:00"), row("a", april, "2025-04-01T00:30:00Z")]
+        result = run(rows, resolution=ts.QUARTER)
+        self.assertEqual(get(result, ts.B_SUBMISSIONS, ts.WITHOUT_INITIAL, "2025-Q2"), 1)
+        self.assertEqual(get(result, ts.B_SUBMISSIONS, ts.WITHOUT_INITIAL, "2025-Q1"), 0)
 
 
 @unittest.skipIf(plots is None, "plot_time_series.py needs matplotlib")
@@ -1120,23 +943,6 @@ class PlotTests(unittest.TestCase):
 
     def panels(self, fig):
         return [ax.get_title(loc="left") for ax in fig.axes if ax.get_visible()]
-
-    def test_suppressed_values_are_hidden_not_missing(self):
-        les, periods, lines, threshold = self.load(run(self.rows(), min_cell=5))
-        self.assertEqual((periods, threshold), (["2025-03", "2025-04"], 5))
-        figure = self.FIGURES["consent_uebermittelt"]
-        self.assertEqual(plots.value(figure, lines, "LE1 (260000001)", "2025-03"), 83.3)
-        # of the single case of LE2 the CSV has no values: suppressed, not without cases
-        self.assertIs(plots.value(figure, lines, "LE2 (260000001)", "2025-03"), plots.HIDDEN)
-        self.assertIs(plots.value(self.FIGURES["faelle"], lines, "LE2 (260000001)", "2025-03"), plots.HIDDEN)
-        # the rate whose base would disclose the refusals, of the one case without consent of LE1
-        figure = self.FIGURES["consent_zustimmung_ablehnung"]
-        self.assertIs(plots.value(figure, lines, "LE1 (260000001)", "2025-03"), plots.HIDDEN)
-        # and with 5 refusals next to 6 consents
-        contents = [datenkranz(f"t{i}", consents=[broad_consent()]) for i in range(6)]
-        contents += [without_consent(f"r{i}", ("2025-01-01", REFUSES)) for i in range(5)]
-        les, periods, lines, threshold = self.load(cases(*contents, min_cell=5))
-        self.assertEqual(plots.value(figure, lines, "260000001", "2025-03"), 54.5)
 
     def test_stacked_bar_shows_what_is_not_suppressed(self):
         figure = self.FIGURES["consent_fehlt"]

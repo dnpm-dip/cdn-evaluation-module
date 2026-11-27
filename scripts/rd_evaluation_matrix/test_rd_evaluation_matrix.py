@@ -1,11 +1,14 @@
 """Tests of rd_evaluation_matrix.py: python3 -m unittest discover scripts/rd_evaluation_matrix"""
 
+import contextlib
+import io
 import json
 import os
 import random
 import tempfile
 import unittest
 from datetime import date
+from types import SimpleNamespace
 
 import rd_evaluation_matrix as rdm
 
@@ -93,8 +96,8 @@ HEADS = {"558": "93419", "98006": "98006", "777": "98053", "999": "123456", "616
 REFERENCE = date(2026, 10, 30)
 
 
-def run(rows, heads=HEADS, start=None, end=None, failures=(), min_cell=1, scope=rdm.SUPPRESS_ALL):
-    """The matrix; suppression in all rows unless scope says otherwise (the tests of the rules of the suppression)"""
+def run(rows, heads=HEADS, start=None, end=None, failures=(), min_cell=1, scope=rdm.SUPPRESS_CODES):
+    """The matrix (min_cell 1: nothing suppressed)"""
     return rdm.run(rows, list(failures), heads, start, end, REFERENCE, min_cell=min_cell, suppress_scope=scope)
 
 
@@ -131,6 +134,17 @@ class CaseTests(unittest.TestCase):
         self.assertEqual([p["tan"] for p in problems(result, rdm.P_WITHOUT_INITIAL)], ["t4"])
         self.assertIn("2 Testeinreichungen verworfen.", result["notes"])
 
+    def test_latest_submission_by_parsed_submitted_at_across_time_zones(self):
+        # the follow-up is later in time (09:30 UTC) than the initial (10:00+02:00 = 08:00 UTC), but sorts first as text
+        rows = [
+            row("a", datenkranz("t1", assessment="noGeneticDiagnosis"), "2025-03-01T10:00:00+02:00"),
+            row("a", datenkranz("t2", type_="followup", submitted="2025-03-01"), "2025-03-01T09:30:00Z"),
+        ]
+        result = run(rows)
+        self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", "Diagnose"), 1)          # latest = t2
+        self.assertEqual([r.submitted_at for r in sorted([rows[1], rows[0]], key=rdm.submitted_order)],
+                         ["2025-03-01T10:00:00+02:00", "2025-03-01T09:30:00Z"])
+
     def test_period_applies_to_the_initial_submission_and_names_the_title(self):
         rows = [
             row("a", datenkranz("t1", submitted="2024-06-30")),
@@ -166,32 +180,6 @@ class LeTests(unittest.TestCase):
         self.assertEqual(get(result, "Diagnoserate", "Diagnose", "UKT", "percent"), 50.0)
         # every LE has the same rows
         self.assertTrue(all(set(r["values"]) == set(result["entities"]) for r in result["rows"]))
-
-    def test_small_counts_are_suppressed(self):
-        result = cases(*[datenkranz(f"t{i}", gender="male" if i < 2 else "female") for i in range(8)], min_cell=5)
-        self.assertEqual(get(result, "Geschlecht", "m"), "<5")
-        self.assertIsNone(get(result, "Geschlecht", "m", field="percent"))
-        # w would give m away as the case count minus w: suppressed as well (complementary); the case count is shown
-        self.assertEqual((get(result, "Geschlecht", "w"), get(result, "Geschlecht", "w", field="percent")), ("<5", None))
-        self.assertEqual(get(result, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)"), 8)
-        self.assertEqual(get(result, "Geschlecht", "d"), 0)
-        # a duration statistic from 8 values is shown, from 1 value suppressed
-        self.assertEqual(get(result, "Bearbeitungsdauer medizinisch", "Median (Tage)"), 31.0)
-        few = cases(datenkranz("t1"), min_cell=5)
-        self.assertEqual(get(few, "Bearbeitungsdauer medizinisch", "Median (Tage)"), "<5")
-
-    def test_gesamt_is_not_suppressed_unless_it_is_a_single_les_count(self):
-        rows = ([row(f"a{i}", datenkranz(f"a{i}", gender="male" if i < 2 else "female"), site="A") for i in range(8)]
-                + [row(f"b{i}", datenkranz(f"b{i}", gender="male" if i < 1 else "female"), site="B") for i in range(8)])
-        result = run(rows, min_cell=5)
-        # m: 2 + 1, small in both LEs, shown in Gesamt; so is w (13), which no longer protects m in Gesamt
-        self.assertEqual([get(result, "Geschlecht", "m", e) for e in (rdm.TOTAL, "A", "B")], [3, "<5", "<5"])
-        self.assertEqual([get(result, "Geschlecht", "w", e) for e in (rdm.TOTAL, "A", "B")], [13, "<5", "<5"])
-        self.assertEqual(get(result, "Geschlecht", "m", field="percent"), 18.8)
-        # a count of LE A alone (the other LE 0): Gesamt would give it away, so it is suppressed as well
-        single = run(rows[:8] + [row(f"b{i}", datenkranz(f"b{i}", gender="female"), site="B") for i in range(8)],
-                     min_cell=5)
-        self.assertEqual([get(single, "Geschlecht", "m", e) for e in (rdm.TOTAL, "A", "B")], ["<5", "<5", 0])
 
     def test_losses_per_le(self):
         failures = [rdm.Failure("UKT", '["UKT", "p9", "e1"]', "t9", "conversion failed: x")]
@@ -466,8 +454,8 @@ class FollowUpTests(unittest.TestCase):
         self.assertEqual(get(result, s, "diagnosisEstablished angegeben (true/false)"), 2)
         self.assertEqual(get(result, s, "deathDate, von Einträgen mit vitalStatus deceased"), 0)
         self.assertEqual(get(result, s, "deathDate, von Einträgen mit vitalStatus deceased", field="base"), 1)
-        # with an interval of 24 months no case is due yet; the rows are exact in the diagnosis scope
-        longer = rdm.run(rows, [], HEADS, None, None, REFERENCE, min_cell=5, follow_up_months=24)
+        # with an interval of 24 months no case is due yet
+        longer = rdm.run(rows, [], HEADS, None, None, REFERENCE, min_cell=1, follow_up_months=24)
         self.assertEqual(get(longer, rdm.FU_SECTION, f"Stand am Stichtag (Intervall 24 Monate): {rdm.FU_NOT_DUE}"), 3)
         self.assertTrue(any(n.startswith(rdm.FU_NOTE) for n in longer["notes"]))
 
@@ -475,7 +463,13 @@ class FollowUpTests(unittest.TestCase):
 class DiseaseGroupTests(unittest.TestCase):
 
     def test_groups_per_block_add_up_to_the_case_count(self):
-        result = cases(
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = self.eight_cases()
+        self.check_groups(result, err.getvalue())
+
+    def eight_cases(self):
+        return cases(
             datenkranz("t1", birth="1980-01"),                                      # bone disease, adult
             datenkranz("t2", orpha="ORPHA:98006", assessment="noGeneticDiagnosis"),  # neurologic, pediatric
             datenkranz("t3", icd10="G71.0", orpha="ORPHA:98006"),                   # neuromuscular by ICD-10-GM
@@ -485,6 +479,8 @@ class DiseaseGroupTests(unittest.TestCase):
             datenkranz("t7", orpha="ORPHA:616874", assessment="noGeneticDiagnosis"),
             datenkranz("t8", orpha="ORPHA:4711"),                                   # not in the linearisation
         )
+
+    def check_groups(self, result, err):
         total = {g: get(result, "Erkrankungsgruppen gesamt", g) for g in rdm.DISEASE_GROUPS}
         adult = {g: get(result, "Erkrankungsgruppen Adult", g) for g in rdm.DISEASE_GROUPS}
         pediatric = {g: get(result, "Erkrankungsgruppen Pädiatrisch", g) for g in rdm.DISEASE_GROUPS}
@@ -495,7 +491,9 @@ class DiseaseGroupTests(unittest.TestCase):
         self.assertEqual([total[g] for g in rdm.UNKNOWN_GROUPS], [1, 1, 1, 2])
         neurologic = "Neurologische Erkrankungen, Entwicklungsstörungen: Undiagnostiziert"
         self.assertEqual(get(result, "Erkrankungsgruppen gesamt", neurologic, field="percent"), 100.0)
-        self.assertTrue(any("123456" in note for note in result["notes"]))
+        # the unmapped head only on stderr for the KDK: in the notes it would show that its cases occur
+        self.assertIn("123456", err)
+        self.assertFalse(any("123456" in note for note in result["notes"]))
         # diagnosed cases without group are clarified with the LE
         self.assertEqual(sorted(p["tan"] for p in problems(result, rdm.P_DIAGNOSIS_WITHOUT_GROUP)), ["t4", "t5", "t6", "t8"])
 
@@ -610,201 +608,118 @@ def synthetic(seed=7, sizes=(("LE-A", 41), ("LE-B", 13), ("LE-C", 6))):
     return rows
 
 
-def partitions(result):
-    """Independently of the implementation: the partitions of a column as (total, parts), cells as (section, item, field)"""
-    def rows_of(section, items):
-        return [(section, item, "value") for item in items]
-
-    cases = ("Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "value")
-    status = "Diagnosestatus (alle Fälle)"
-    status_items = [r["item"] for r in result["rows"] if r["section"] == status]
-    sequenced = (status, status_items[0], "base")
-    rate = "Diagnoserate (abgeschlossene Fälle)"
-    by_age = "Diagnosestatus nach Altersgruppe"
-    reasons = "Broad Consent nicht übermittelt: Grund laut DIP"
-    missing = (reasons, rdm.REASON_LABELS[0], "base")
-    months = sorted({r["item"].split(":")[0] for r in result["rows"] if r["section"] == reasons + ", nach Monat der Erstmeldung"})
-    out = [
-        (cases, rows_of("Geschlecht", ["m", "w", "d", "unbekannt"])),
-        (cases, rows_of("Alter bei Einschluss (GFK1)", rdm.AGE_GROUPS)),
-        (cases, rows_of("Versicherung", ["GKV", "PKV", "andere"])),
-        (cases, rows_of("Sequenzierung (libraryType)", ["WGS", "lrWGS", "Panel", "Exom (WES)", "keine (noch nicht sequenziert)"])),
-        (cases, rows_of("Erkrankungsgruppen gesamt", rdm.DISEASE_GROUPS)),
-        (cases, [("Fälle", "davon nicht sequenziert (keine Indikation oder libraryType none, nicht im Diagnosestatus)", "value"),
-                 sequenced]),
-        (sequenced, rows_of(status, status_items)),
-        ((rate, rdm.DIAGNOSED, "base"), rows_of(rate, rdm.STATUSES)),
-        (missing, [(reasons, "Fälle ohne übermittelten Broad Consent", "value")]),
-        (missing, rows_of(reasons, rdm.REASON_LABELS)),
-        (missing, [(reasons + ", nach Monat der Erstmeldung", f"{m}: {rdm.REASON_LABELS[0]}", "base") for m in months]),
-    ]
-    for s in ("Bearbeitungsdauer medizinisch (GFK1 bis GFK2)", "Bearbeitungsdauer dokumentarisch (GFK2 bis Einreichung beim KDK)"):
-        out.append((cases, rows_of(s, ("Dauer berechenbar", "nicht berechenbar: noch keine GFK2",
-                                       "nicht berechenbar: unmögliches Datum (siehe Rückfragen)"))))
-    for group in rdm.AGE_GROUPS:
-        closed = (by_age, f"{group}: {rdm.DIAGNOSED}", "base")
-        out.append((closed, rows_of(by_age, [f"{group}: {st}" for st in rdm.STATUSES])))
-        out.append(((by_age, f"{group}: {rdm.OPEN}", "base"), [closed, (by_age, f"{group}: {rdm.OPEN}", "value")]))
-    return out
+def varied(seed):
+    """A random synthetic case set: 2 to 6 LEs of 1 to 60 cases, with neuromuscular ICD-10 codes, prior findings
+    (one per case, as the DIP sends them) and LEs without unsequenced cases"""
+    rnd = random.Random(seed)
+    rows = []
+    for k in range(rnd.randint(2, 6)):
+        le = f"LE-{k}"
+        all_sequenced = rnd.random() < 0.4
+        for i in range(rnd.choice([1, 1, 2, 3, 4, 5, 7, 12, 25, 60])):
+            prior = rnd.choice([None, {"genomicTestType": "none"}] + [
+                {"genomicTestType": t, "diagnosticDate": d} for t in ("exome", "panel", "genomeShortRead", "array")
+                for d in ("2019-03-01", "2024-05-01")])
+            content = datenkranz(
+                f"{le}-{i}", submitted=f"2025-0{rnd.randint(3, 5)}-0{rnd.randint(1, 9)}",
+                gender=rnd.choice(["female", "male"]),
+                birth=rnd.choice(["1950-01", "1985-06", "2000-03", "2010-09", "2020-02", "2024-12"]),
+                assessment=rnd.choice(list(rdm.ASSESSMENT_STATUS)),
+                library="wgs" if all_sequenced else rnd.choice(["wgs"] * 6 + ["wgs_lr", "panel", "none"]),
+                extent=rnd.choice(["singleGenome", "duoGenome", "trioGenome", "trioGenome"]),
+                include=all_sequenced or rnd.random() < 0.9, plan_date=rnd.choice(["2025-02-10", "2025-02-10", None]),
+                orpha=rnd.choice(["ORPHA:558", "ORPHA:98006", "ORPHA:777", "ORPHA:616874", None]),
+                icd10=rnd.choice(["Q87.4", "Q87.4", "G71.0", "G12.1"]), prior=prior,
+                consents=[broad_consent()] if rnd.random() < 0.6 else [],
+            )
+            rows.append(rdm.SubmissionRow(json.dumps([le, i]), "2025-06-01T10:00:00", content, le, None))
+    return rows
 
 
-class ComplementarySuppressionTests(unittest.TestCase):
-    """No suppressed count can be recovered as a difference of shown counts"""
+def code_cell(r, field):
+    """Independently of the implementation: a cell of the rows derived from the diagnosis codes, the base of such a
+    row unless it counts no code (the cases, the cases of an age block)"""
+    code = r["section"] in ("Orphacode", *rdm.DISEASE_GROUP_BLOCKS) or (
+        r["section"] == rdm.PROBLEMS_SECTION and r["item"] == rdm.P_DIAGNOSIS_WITHOUT_GROUP)
+    return code and (field == "value" or r["base_label"] not in ("Fälle", *(f"Fälle ({b})" for b in rdm.DISEASE_GROUP_BLOCKS)))
 
-    def setUp(self):
-        self.rows = synthetic()
-        self.full = run(self.rows, min_cell=1)
-        self.result = run(self.rows, min_cell=5)
 
-    def cell(self, result, entity, section, item, field):
-        matches = [r for r in result["rows"] if r["section"] == section and r["item"] == item]
-        self.assertEqual(len(matches), 1, (section, item))
-        return matches[0]["values"][entity][field]
+class PrimarySuppressionTests(unittest.TestCase):
+    """Only counts of 1 to 4 of an LE in the rows of the diagnosis codes are suppressed (decision of 27.11.2026): no
+    complementary suppression, Gesamt and every other cell exact"""
 
-    def test_no_suppressed_count_is_alone_in_its_row(self):
-        # (a) Gesamt is the sum of the LEs: exactly one suppressed cell of a row would be the difference
-        for r in self.result["rows"]:
-            if r["unit"] != rdm.COUNT:
-                continue
-            for field in ("value", "base"):
-                cells = [v[field] for v in r["values"].values()]
-                self.assertNotEqual(cells.count("<5"), 1, (r["key"], field, cells))
-
-    def test_no_suppressed_count_is_alone_in_a_partition(self):
-        # (b) within a column, the parts of a partition sum to its total
-        for entity in self.result["entities"]:
-            for total, parts in partitions(self.result):
-                if not parts:
-                    continue
-                full = [self.cell(self.full, entity, *c) for c in [total] + parts]
-                self.assertEqual(full[0], sum(full[1:]), (entity, total))
-                shown = [self.cell(self.result, entity, *c) for c in [total] + parts]
-                self.assertNotEqual(shown.count("<5"), 1, (entity, total, parts, shown))
-
-    def test_shown_values_are_true_and_suppressed_ones_were_small_or_complementary(self):
-        primary = complementary = 0
-        for r, f in zip(self.result["rows"], self.full["rows"]):
-            for entity in self.result["entities"]:
-                for field in ("value", "base"):
-                    shown, true = r["values"][entity][field], f["values"][entity][field]
-                    if shown == "<5":
-                        if r["unit"] == rdm.COUNT:
-                            self.assertIsNone(r["values"][entity]["percent"])
-                            if true < 5:
-                                primary += 1
-                            else:
-                                complementary += 1
+    def check(self, full, result, min_cell=5):
+        n = 0
+        for fr, r in zip(full["rows"], result["rows"]):
+            for e in result["entities"]:
+                for f in ("value", "base"):
+                    shown, true = r["values"][e][f], fr["values"][e][f]
+                    if shown == f"<{min_cell}":
+                        n += 1
+                        self.assertNotEqual(e, rdm.TOTAL, (r["key"], f))
+                        self.assertTrue(code_cell(r, f), (r["section"], r["item"], f))
+                        self.assertEqual(r["unit"], rdm.COUNT)
+                        self.assertTrue(0 < true < min_cell, (r["key"], e, f, true))
+                        self.assertIsNone(r["values"][e]["percent"])
                     else:
-                        self.assertEqual(shown, true, (r["key"], entity, field))
-        self.assertGreater(complementary, 0)
-        self.assertEqual(self.result["suppressed"], {"primary": primary, "complementary": complementary})
-        # the case count of all LEs stays
-        self.assertEqual(self.cell(self.result, rdm.TOTAL, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "value"), 60)
-        self.assertTrue(any(f"{complementary} Zellen zusätzlich zu {primary}" in n for n in self.result["notes"]))
+                        self.assertEqual(shown, true, (r["key"], e, f))
+                        # small code counts of an LE are never shown
+                        if e != rdm.TOTAL and r["unit"] == rdm.COUNT and code_cell(r, f) and true is not None:
+                            self.assertFalse(0 < true < min_cell, (r["key"], e, f, true))
+                if r["values"][e]["value"] != f"<{min_cell}" and r["values"][e]["base"] != f"<{min_cell}":
+                    self.assertEqual(r["values"][e]["percent"], fr["values"][e]["percent"], (r["key"], e))
+        self.assertEqual(result["suppressed"], {"cells": n, "complementary": 0})
+        return n
 
-    def test_without_suppression_nothing_is_added(self):
-        self.assertEqual(self.full["suppressed"], {"primary": 0, "complementary": 0})
-
-
-class DiagnosisScopeTests(unittest.TestCase):
-    """--suppress-scope diagnoses: only the diagnosis rows are suppressed, all other numbers are exact"""
-
-    def diag(self, result, r):
-        return r["section"] in rdm.DIAGNOSIS_SECTIONS or (r["section"], r["item"]) in rdm.DIAGNOSIS_ITEMS
-
-    def test_the_diagnosis_sections_exist(self):
-        result = run(synthetic(), min_cell=1)
-        sections = {r["section"] for r in result["rows"]}
-        self.assertEqual([s for s in rdm.DIAGNOSIS_SECTIONS if s not in sections], [])
-        for section, item in rdm.DIAGNOSIS_ITEMS:
-            get(result, section, item)
-
-    def test_only_diagnosis_rows_are_suppressed(self):
-        result = run([row(f"a{i}", datenkranz(f"a{i}", gender="male" if i < 2 else "female",
-                                              assessment="noGeneticDiagnosis" if i < 2 else "confirmedGeneticDiagnosis"),
-                          site="LE-A") for i in range(8)], min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-        self.assertEqual(result["suppress_scope"], rdm.SUPPRESS_DIAGNOSES)
-        # not diagnosis: exact, also below 5, with its percentage
-        self.assertEqual((get(result, "Geschlecht", "m"), get(result, "Geschlecht", "m", field="percent")), (2, 25.0))
-        # diagnosis: suppressed, and complementarily the other closed status against the exact sequenced cases
-        self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", rdm.UNDIAGNOSED, "LE-A"), "<5")
-        self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", rdm.DIAGNOSED, "LE-A"), "<5")
-        self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", rdm.DIAGNOSED, "LE-A", "base"), 8)
-        # a duration statistic from one value is shown exactly
-        few = cases(datenkranz("t1"), min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-        self.assertEqual(get(few, "Bearbeitungsdauer medizinisch", "Median (Tage)"), 31.0)
-        self.assertTrue(any(n.startswith("Unterdrückt werden nur die Diagnosezeilen") for n in result["notes"]))
-
-    def test_a_diagnosis_cell_is_not_the_exact_total_minus_shown_zeros(self):
-        # LE B: 3 sequenced cases, all with a diagnosis, 1 not sequenced. "Fälle" and "davon nicht sequenziert" are
-        # exact, so the sequenced cases (3) are, and with the other statuses shown as 0 the diagnoses would be 3:
-        # a zero of the partition is suppressed as well
-        rows = ([row(f"a{i}", datenkranz(f"a{i}", assessment=list(rdm.ASSESSMENT_STATUS)[i % 5]), site="A")
-                 for i in range(20)]
-                + [row(f"b{i}", datenkranz(f"b{i}"), site="B") for i in range(3)]
-                + [row("b9", datenkranz("b9", library="none"), site="B")])
-        result = run(rows, min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-        status = "Diagnosestatus (alle Fälle)"
-        self.assertEqual(get(result, "Fälle", "Fallzahl gesamt (Episoden mit Erstmeldung)", "B"), 4)
-        self.assertEqual(get(result, status, rdm.DIAGNOSED, "B", "base"), 3)
-        items = [r["item"] for r in result["rows"] if r["section"] == status]
-        shown = [get(result, status, item, "B") for item in items]
-        self.assertEqual(shown[0], "<5")
-        self.assertGreaterEqual(shown.count("<5"), 2, shown)
-        self.assertTrue(all(v in ("<5", 0) for v in shown), shown)
-        # the closed cases (base of the rate) are a diagnosis quantity: suppressed with it
-        self.assertEqual(get(result, "Diagnoserate", rdm.DIAGNOSED, "B", "base"), "<5")
-
-    def test_the_same_holds_for_gesamt(self):
-        # one sequenced case of a single LE, still open: Gesamt is that LE's count, and the sequenced cases of
-        # Gesamt (1) are exact, so a zero of Gesamt's status partition is suppressed too
-        rows = ([row("a0", datenkranz("a0", assessment="noGeneticDiagnosis", plan_date=None), site="A")]
-                + [row(f"b{i}", datenkranz(f"b{i}", library="none"), site="B") for i in range(6)])
-        result = run(rows, min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
-        status = "Diagnosestatus (alle Fälle)"
-        items = [r["item"] for r in result["rows"] if r["section"] == status]
-        self.assertEqual(get(result, status, items[0], field="base"), 1)
-        shown = [get(result, status, item) for item in items]
-        self.assertEqual(shown[-1], "<5")      # offen
-        self.assertEqual(shown.count("<5"), 2, shown)
-
-    def test_non_diagnosis_cells_exact_and_no_suppressed_cell_follows_from_shown_ones(self):
-        # a set with larger LEs, and one with tiny LEs, where partitions of zeros next to an exact total occur
-        for rows in (synthetic(), synthetic(seed=14, sizes=(("LE-A", 2), ("LE-B", 1)))):
-            with self.subTest(cases=len(rows)):
-                self.check_scope(rows)
-
-    def check_scope(self, rows):
-        full = run(rows, min_cell=1)
-        result = run(rows, min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)
+    def test_only_small_code_cells_of_the_les_on_random_sets(self):
         hidden = 0
-        for r, f in zip(result["rows"], full["rows"]):
-            for entity in result["entities"]:
-                for field in ("value", "base"):
-                    shown, true = r["values"][entity][field], f["values"][entity][field]
-                    if shown == "<5":
-                        hidden += 1
-                        self.assertTrue(self.diag(result, r), r["key"])
-                        self.assertTrue(field == "value" or r["base_label"] not in rdm.EXACT_DIAGNOSIS_BASES, r["key"])
-                    else:
-                        self.assertEqual(shown, true, (r["key"], entity, field))
-                if not self.diag(result, r):
-                    self.assertEqual(r["values"][entity]["percent"], f["values"][entity]["percent"], r["key"])
-            for field in ("value", "base"):
-                cells = [v[field] for v in r["values"].values()]
-                self.assertNotEqual(cells.count("<5"), 1, (r["key"], field, cells))
+        for seed in range(6):
+            for rows in (varied(seed), synthetic(seed)):
+                with self.subTest(seed=seed):
+                    hidden += self.check(run(rows, min_cell=1), run(rows, min_cell=5))
         self.assertGreater(hidden, 0)
-        for entity in result["entities"]:
-            for total, parts in partitions(result):
-                shown = [ComplementarySuppressionTests.cell(self, result, entity, *c) for c in [total] + parts]
-                self.assertNotEqual(shown.count("<5"), 1, (entity, total, parts, shown))
-        self.assertEqual(sum(result["suppressed"].values()), hidden)
 
-    def test_the_scopes_differ_and_an_unknown_one_is_refused(self):
-        rows = synthetic()
-        self.assertNotEqual(run(rows, min_cell=5)["rows"], run(rows, min_cell=5, scope=rdm.SUPPRESS_DIAGNOSES)["rows"])
-        with self.assertRaises(ValueError):
-            run(rows, scope="none")
+    def test_gesamt_and_the_status_rows_exact(self):
+        rows = ([row(f"a{i}", datenkranz(f"a{i}", orpha="ORPHA:558" if i < 2 else "ORPHA:98006",
+                                         assessment="noGeneticDiagnosis" if i < 1 else "confirmedGeneticDiagnosis"),
+                     site="A") for i in range(8)]
+                + [row(f"b{i}", datenkranz(f"b{i}", orpha="ORPHA:98006"), site="B") for i in range(8)])
+        result = run(rows, min_cell=5)
+        bone = "Knochenkrankheiten, Bindegewebe- und muskuloskelettale Krankheiten"
+        # the group count of 2 at A is suppressed, Gesamt (2) is shown: it gives it away (accepted, no complementary)
+        self.assertEqual([get(result, "Erkrankungsgruppen gesamt", bone, e) for e in (rdm.TOTAL, "A", "B")], [2, "<5", 0])
+        self.assertEqual(get(result, "Erkrankungsgruppen gesamt", "Neurologische Erkrankungen, Entwicklungsstörungen", "A"), 6)
+        # the diagnosis status and every other row exact, also below 5
+        self.assertEqual(get(result, "Diagnosestatus (alle Fälle)", rdm.STATUSES[0], "A"), 7)
+        self.assertEqual(get(result, "Geschlecht", "w", "A"), 8)
+        self.check(run(rows, min_cell=1), result)
+        note = next(n for n in result["notes"] if n.startswith("Unterdrückt sind nur Fallzahlen von 1 bis 4"))
+        self.assertIn("keine Sekundärunterdrückung, einzelne Werte können sich aus Summen ergeben", note)
+
+    def test_min_cell_1_suppresses_nothing_and_the_former_scopes_are_refused(self):
+        result = run(varied(2), min_cell=1)
+        self.assertEqual(result["suppressed"], {"cells": 0, "complementary": 0})
+        for scope in ("all", "diagnoses"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                rdm.main(["missing.json", "--suppress-scope", scope])
+
+
+class FillTemplateLineTests(unittest.TestCase):
+    """The line on the suppression above the matrix in the xlsx, for both scopes and for results of the former one"""
+
+    def test_lines(self):
+        try:
+            import fill_template
+        except ImportError:
+            self.skipTest("fill_template.py needs openpyxl")
+        line = lambda scope: fill_template.suppression_line({"min_cell": 5, "suppress_scope": scope})
+        self.assertTrue(line("codes").startswith("Nur Zeilen aus den Diagnosecodes"))
+        self.assertIn("auch Diagnosestatus und Diagnoserate", line("codes"))
+        primary = fill_template.suppression_line({"min_cell": 5, "suppress_scope": "codes",
+                                                  "suppressed": {"cells": 3, "complementary": 0}})
+        self.assertIn("keine Sekundärunterdrückung", primary)
+        self.assertTrue(line("diagnoses").startswith("Nur Diagnosezeilen"))    # written before 26.11.2026
+        self.assertTrue(line("all").startswith("Zellen mit weniger als 5"))
 
 
 if __name__ == "__main__":

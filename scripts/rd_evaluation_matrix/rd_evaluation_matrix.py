@@ -13,14 +13,17 @@ Input, either
     one entry per submission, for KDKs with their own export.
 
 Output (<output> without extension):
-  <output>.json          every value, in total and per LE, the cases to clarify with the LEs, notes
+  <output>.json          every value, in total and per LE, the cases to clarify with the LEs (not with
+                         --rueckfragen-per-le), notes
   <output>.csv           long table LE | Abschnitt | Kategorie | Einheit | Wert | Bezug | Basis | Anteil
-  <output>_rueckfragen.csv  cases to clarify with their LE (contains case keys: only for the LEs)
-Counts of an LE below --min-cell (default 5) are suppressed ("<5") in all outputs except the Rückfragen (Gesamt is
-shown unless it is the count of a single LE), and complementary
-cells with the same marker so that no suppressed count is the difference of shown ones (see suppressed_quantities).
---suppress-scope diagnoses (default) suppresses only the diagnosis rows (DIAGNOSIS_SECTIONS, DIAGNOSIS_ITEMS) and
-shows every other count, share and duration exactly; --suppress-scope all suppresses every row.
+  <output>_rueckfragen.csv  cases to clarify with their LE (contains case keys of all LEs: only for the KDK);
+                         with --rueckfragen-per-le (recommended) instead one <output>_rueckfragen_<LE>.csv per LE
+Only the rows derived from the diagnosis codes, which tell which disease a case has (CODE_SECTIONS, CODE_ITEMS:
+Orphacode, the disease groups with their status rows, "Diagnose ohne Erkrankungsgruppe"), are suppressed: there an
+LE's count of 1 to --min-cell - 1 (default 5, 1 disables) is shown as "<5", in all outputs except the Rückfragen
+(primary suppression only, decision of the data holders of 27.11.2026). There is no complementary suppression: a
+suppressed count can follow from shown sums (Gesamt, the group totals, the other quarters). Gesamt and every other
+count, share and duration are exact, also the diagnosis status and rates.
 Follow-up (FU_SECTIONS): cases with GFK2 due, current or overdue at --reference-date with the interval
 --follow-up-months (default 12), days from GFK2 to the first follow-up, mandatory fields of the follow-ups.
 The xlsx is written from the JSON by fill_template.py (needs openpyxl).
@@ -34,15 +37,16 @@ Example:
 import argparse
 import csv
 import json
+import os
 import re
 import statistics
 import sys
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
-from itertools import product
+from types import SimpleNamespace
 
 
 # ---------------------------------------------------------------------------------------------
@@ -244,40 +248,47 @@ STALE = "stale"   # losses: non-convertible submissions of an evaluated episode
 PROBLEMS = (P_GFK1_AFTER_SUBMISSION, P_GFK2_AFTER_SUBMISSION, P_SHORT_MEDICAL, P_NO_GENOME,
             P_PRIOR_AFTER_GFK1, P_DIAGNOSIS_WITHOUT_GROUP, P_NOT_CONVERTED, P_WITHOUT_INITIAL, P_UNREADABLE)
 
-# Scope of the small-cell suppression (--suppress-scope): only the diagnosis rows (default), or every count
-SUPPRESS_DIAGNOSES, SUPPRESS_ALL = "diagnoses", "all"
-SUPPRESS_SCOPES = (SUPPRESS_DIAGNOSES, SUPPRESS_ALL)
+# Scope of the small-cell suppression (--suppress-scope): only the rows derived from the diagnosis codes (default,
+# decision of the data holders of 26.11.2026: "nur auf die Diagnosen selbst (Diagnosecodes)"), or every count. The
+# former scope "diagnoses" (also the diagnosis status rows) is gone; results written with it carry
+# suppress_scope "diagnoses" (fill_template.py and the dashboard still read them).
+SUPPRESS_CODES = "codes"
+SUPPRESS_SCOPES = (SUPPRESS_CODES,)
 PROBLEMS_SECTION = "Rückfragen an LE (Anzahl, Einzelfälle siehe Rückfragen)"
 DISEASE_GROUP_BLOCKS = ("Erkrankungsgruppen gesamt", "Erkrankungsgruppen Adult (ab 18)",
                         "Erkrankungsgruppen Pädiatrisch (unter 18)")
-# The diagnosis rows: the diagnostic result of a case (status, rate, disease group, Orpha coding) and the counts
-# broken down by it. With SUPPRESS_DIAGNOSES only their cells are suppressed, every other number is exact.
-DIAGNOSIS_SECTIONS = (
-    "Diagnosestatus (alle Fälle)",
-    "Diagnoserate (abgeschlossene Fälle)",
-    "Diagnoserate nach WGS-Seq. Art (abgeschlossene Fälle mit WGS/lrWGS)",
-    "Diagnosestatus nach Altersgruppe",
-    *(f"Vorbefunde, Status {s} (Mehrfachnennung möglich)" for s in CASE_STATUSES),
-    *(f"Vorbefunde nach Jahr, Status {s}" for s in CASE_STATUSES),
-    "Orphacode",
-    *DISEASE_GROUP_BLOCKS,
-)
-DIAGNOSIS_ITEMS = ((PROBLEMS_SECTION, P_DIAGNOSIS_WITHOUT_GROUP),)
-# Bases of diagnosis rows that are shown exactly: they are counts of other rows or follow from exact ones (the
-# cases, the sequenced cases = cases - "davon nicht sequenziert", the age blocks of the disease groups = sums of
-# the age groups). Every other base of a diagnosis row (closed cases, cases of a status or a disease group,
-# sequenced cases of an age group) is suppressed with the row.
-EXACT_DIAGNOSIS_BASES = ("Fälle", "sequenzierte Fälle") + tuple(f"Fälle ({s})" for s in DISEASE_GROUP_BLOCKS)
+# The code rows: the rows that tell which disease a case has, derived from its diagnosis codes (Orphacode, ICD-10 for
+# the neuromuscular group): the Orpha coding, the disease groups in total, Adult and Pädiatrisch with their status rows
+# (group x status) and the Rückfrage "Diagnose ohne Erkrankungsgruppe". With SUPPRESS_CODES only their cells are
+# suppressed; every other number is exact, also the diagnosis status rows (Diagnosestatus, Diagnoserate, by WGS
+# extent and by age group, the prior findings by status): they tell whether a case has a diagnosis, not which one.
+CODE_SECTIONS = ("Orphacode", *DISEASE_GROUP_BLOCKS)
+CODE_ITEMS = ((PROBLEMS_SECTION, P_DIAGNOSIS_WITHOUT_GROUP),)
+# Bases of code rows that are shown exactly: they count no code (the cases of the matrix, of the age block of a
+# disease group block = the cases of its age groups). The base of a status row of a disease group (the cases of
+# the group) is suppressed with the row.
+EXACT_CODE_BASES = ("Fälle",) + tuple(f"Fälle ({s})" for s in DISEASE_GROUP_BLOCKS)
 
 
-def is_diagnosis_row(row):
-    """A row of the diagnosis sections (DIAGNOSIS_SECTIONS, DIAGNOSIS_ITEMS)"""
-    return row.section in DIAGNOSIS_SECTIONS or (row.section, row.item) in DIAGNOSIS_ITEMS
+def is_code_row(row):
+    """A row derived from the diagnosis codes (CODE_SECTIONS, CODE_ITEMS)"""
+    return row.section in CODE_SECTIONS or (row.section, row.item) in CODE_ITEMS
 
 
-def is_diagnosis_cell(row, field_):
-    """A cell suppressed with SUPPRESS_DIAGNOSES: the value of a diagnosis row, or its base unless that is exact"""
-    return is_diagnosis_row(row) and (field_ == "value" or row.base_label not in EXACT_DIAGNOSIS_BASES)
+def is_code_cell(row, field_):
+    """A cell suppressed with SUPPRESS_CODES: the value of a code row, or its base unless that is exact"""
+    return is_code_row(row) and (field_ == "value" or row.base_label not in EXACT_CODE_BASES)
+
+
+def scope_argument(value):
+    """--suppress-scope of the command lines: the former scopes are refused with a hint"""
+    if value == "diagnoses":
+        raise argparse.ArgumentTypeError("'diagnoses' was replaced by 'codes' (only the rows derived from the diagnosis "
+                                         "codes, the diagnosis status exact; decision of the data holders, 26.11.2026)")
+    if value == "all":
+        raise argparse.ArgumentTypeError("'all' was removed: only the rows derived from the diagnosis codes are "
+                                         "suppressed (decision of the data holders, 27.11.2026)")
+    return value
 
 
 # ---------------------------------------------------------------------------------------------
@@ -321,8 +332,11 @@ class Failure:
 def load_submissions(path):
     """The submissions of the input file, and the submissions the export couldn't convert"""
     with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+        return submissions_from(json.load(f), path)
 
+
+def submissions_from(data, path="input"):
+    """load_submissions of the parsed input file (monthly_matrices parses it once for RD and oncology)"""
     if isinstance(data, dict) and "tables" in data:
         tables = {t["name"]: t for t in data["tables"]}
         if "datenkranz" not in tables:
@@ -394,6 +408,18 @@ def submission_type(content):
     return submission_meta(content)["type"]
 
 
+def submitted_order(row):
+    """Sort key of a submission by submittedAt: parsed, time zones to UTC (a text sort misorders mixed offsets such
+    as "+01:00" and "Z"); a value that can't be parsed sorts after the parsed ones, by its text"""
+    try:
+        t = datetime.fromisoformat(str(row.submitted_at).replace("Z", "+00:00"))
+        if t.tzinfo is not None:
+            t = t.astimezone(timezone.utc).replace(tzinfo=None)
+        return (0, t, "")
+    except ValueError:
+        return (1, datetime.min, str(row.submitted_at))
+
+
 def submission_date(content):
     return parse_date(submission_meta(content)["date"])
 
@@ -443,13 +469,21 @@ def build_cases(rows, start=None, end=None):
 
     cases, without_initial = [], []
     for key, subs in by_key.items():
-        # stable sort: equal times keep the order of the input
-        subs = sorted(subs, key=lambda r: r.submitted_at)
+        # stable sort by the parsed submittedAt (time zones to UTC); equal times keep the order of the input
+        subs = sorted(subs, key=submitted_order)
         case = Case(key, leistungserbringer(subs[0]), [r.content for r in subs], [r.reason for r in subs])
         if not any(submission_type(s) == "initial" for s in case.submissions):
             without_initial.append((case.le, key, case.latest["metaData"].get("tanC")))
             continue
-        initial_date = submission_date(case.initial)
+        try:
+            initial_date = submission_date(case.initial)
+        except (KeyError, TypeError, ValueError):
+            initial_date = None
+        if initial_date is None:
+            # an initial submission without a readable date belongs to no period: like an episode without initial
+            # submission (a Rückfrage in every matrix of a run), not an abort of the whole run
+            without_initial.append((case.le, key, case.latest["metaData"].get("tanC")))
+            continue
         if (start and initial_date < start) or (end and initial_date >= end):
             continue
         cases.append(case)
@@ -499,8 +533,8 @@ def permits_research_use(research_consents, reference_date):
         start, end = parse_date(period.get("start")), parse_date(period.get("end"))
         return (
             provision.get("type") == "permit"
-            and start is not None and start > minus_years(reference_date, 5)
-            and (end is None or end > reference_date)
+            and start is not None and minus_years(reference_date, 5) < start <= reference_date
+            and (end is None or end >= reference_date)
         )
 
     decisions = {}
@@ -514,6 +548,8 @@ def permits_research_use(research_consents, reference_date):
             provision = find(consent, code)
             if provision is None:
                 decisions.pop(code, None)
+            elif provision.get("type") == "permit" and (parse_date((provision.get("period") or {}).get("start")) or date.min) > reference_date:
+                continue    # a permit that starts after the date is not in effect yet: it neither permits nor denies
             else:
                 decisions[code] = permitted(provision)
     return any(decisions.values())
@@ -621,7 +657,8 @@ def follow_up_state(gfk2, fu_dates, deceased, reference_date, months=FU_MONTHS):
         return FU_DECEASED
     if add_months(gfk2, months) > reference_date:
         return FU_NOT_DUE
-    current = any(d <= reference_date and add_months(d, months) > reference_date for d in fu_dates)
+    since = add_months(reference_date, -months)     # counted back, so that a month end doesn't shorten the window
+    current = any(since < d <= reference_date for d in fu_dates)
     return FU_CURRENT if current else FU_OVERDUE
 
 
@@ -1047,155 +1084,9 @@ def matrix_rows(cases, losses, problem_counts, with_groups, months=(), follow_up
     return rows
 
 
-# Small-cell suppression, to protect the cases of a single LE: Gesamt (the sum over all LEs) isn't suppressed itself.
-# Scope: with SUPPRESS_ALL every count, with SUPPRESS_DIAGNOSES (default) only the cells of the diagnosis rows
-# (is_diagnosis_cell); all other counts, shares and duration statistics are exact.
-# Primary: counts 1..min_cell-1 of an LE in scope. Complementary: a suppressed count must not be
-# recoverable as a difference, so in each group of counts with a known sum relation in which exactly one count is
-# suppressed, the smallest other nonzero count of an LE in scope is suppressed as well, until no group changes; a
-# Gesamt cell only where no LE cell is left (a row with a single nonzero LE: Gesamt is that LE's count). Groups:
-#   (a) a row across the LE columns and Gesamt (Gesamt = sum of the LEs), for the counts and for the bases;
-#   (b) per column, a partition: disjoint counts that make up a set that is shown too (the base of the rows of a
-#       section, the bases of a section that make up another count, or a count and its complement).
-# A count is the set it counts (case keys, variant ids): the same set shown twice, e.g. the case count and the base
-# "Fälle", is one quantity and suppressed in both places. Each zero is a quantity of its own. With
-# SUPPRESS_DIAGNOSES the cells in scope are quantities apart from the exact ones, even of the same set, and a
-# partition of diagnosis rows can have an exact total (the sequenced cases, the cases): where exactly one part is
-# suppressed and the others are zeros, a zero part is suppressed instead (as <min_cell, which it is), so that the
-# suppressed part isn't the exact total minus the shown zeros; preferably one in a row with a nonzero Gesamt, and a
-# zero suppressed alone in its row next to zeros takes the zero of Gesamt along. Lean, not a full audit of all
-# linear relations.
-
-def quantities(entities, in_scope=None):
-    """
-    The quantity of each count cell {(entity, row index, "value" | "base"): (entity, set or cell id, in scope)}, and
-    their sizes; in_scope(row, field) marks the cells that can be suppressed (None: all)
-    """
-    cells, size = {}, {}
-    for entity, rows in entities.items():
-        for i, r in enumerate(rows):
-            if r.unit != COUNT:
-                continue
-            for field_, n, members, own in (("value", r.n, r.members, ("row", i)), ("base", r.base, r.of, ("base", i))):
-                if n is None:
-                    continue
-                scoped = in_scope is None or in_scope(r, field_)
-                q = (entity, members if members else own, scoped)
-                cells[entity, i, field_] = q
-                size[q] = n
-    return cells, size
-
-
-def disjoint(sets):
-    """The nonempty sets in order, each left out if it overlaps one taken before"""
-    taken, union = [], frozenset()
-    for s in dict.fromkeys(sets):
-        if s and not s & union:
-            taken.append(s)
-            union |= s
-    return taken, union
-
-
-def suppression_groups(entities, cells):
-    """The groups (rule, quantities) of the complementary suppression, see above"""
-    groups = {}
-
-    def group(rule, members):
-        members = tuple(dict.fromkeys(members))
-        if len(members) > 1:
-            groups.setdefault(members, rule)
-
-    def each(rule, alternatives):
-        """A group for every choice of the quantities of its sets (a set can be in and out of scope)"""
-        for members in product(*alternatives):
-            group(rule, members)
-
-    for i, r in enumerate(entities[TOTAL]):
-        for field_ in ("value", "base"):
-            if (TOTAL, i, field_) in cells:
-                group("a", [cells[e, i, field_] for e in entities])
-
-    for entity, rows in entities.items():
-        known = {}      # nonempty set -> its distinct quantities (a set is shown in many cells: without the
-        #                 dedup the product in each() multiplies out the repetitions)
-        for q in dict.fromkeys(cells.values()):
-            if q[0] == entity and isinstance(q[1], frozenset):
-                known.setdefault(q[1], []).append(q)
-        sections = {}   # section -> base set -> [(set, value quantity)], [base quantities]
-        labelled = {}   # (section, base label, base set) -> the same: the structural partition, which in a small
-        #                 column can share its base set with another partition of the section by chance
-        for i, r in enumerate(rows):
-            if r.members is not None and r.of is not None and (entity, i, "value") in cells:
-                for parts, bases in (sections.setdefault(r.section, {}).setdefault(r.of, ([], [])),
-                                     labelled.setdefault((r.section, r.base_label, r.of), ([], []))):
-                    parts.append((r.members, cells[entity, i, "value"]))
-                    bases.append(cells[entity, i, "base"])
-
-        def partition(base, parts, bases):
-            taken, union = disjoint(s for s, _ in parts)
-            if base and union == base:
-                chosen = [next(q for s, q in parts if s == t) for t in taken]
-                zeros = [q for s, q in parts if not s]
-                for b in dict.fromkeys(bases):
-                    group("b", chosen + zeros + [b])
-
-        for (_, _, base), (parts, bases) in labelled.items():
-            partition(base, parts, bases)
-        for by_base in sections.values():
-            for base, (parts, bases) in by_base.items():
-                partition(base, parts, bases)
-            taken, union = disjoint(by_base)
-            if len(taken) > 1 and union in known:
-                each("b", [known[s] for s in taken] + [known[union]])
-        sizes = {len(s) for s in known}
-        for whole in known:
-            for part in known:
-                if 0 < len(part) < len(whole) and len(whole) - len(part) in sizes and part < whole:
-                    rest = whole - part
-                    if rest in known:
-                        each("b", [known[whole], known[part], known[rest]])
-    return [(rule, members) for members, rule in groups.items()]
-
-
-def suppressed_quantities(entities, min_cell, scope=SUPPRESS_ALL):
-    """The quantity of each count cell, the sizes, and the quantities to suppress (primary and complementary)"""
-    cells, size = quantities(entities, None if scope == SUPPRESS_ALL else is_diagnosis_cell)
-    hidden = {q for q in cells.values() if q[2] and q[0] != TOTAL and 0 < size[q] < min_cell}
-    if not hidden:
-        return cells, size, hidden
-    # the case count of all LEs only where the LE columns need it
-    protected = cells.get((TOTAL, 0, "value"))
-    groups = suppression_groups(entities, cells)
-    # a zero hidden in a row whose Gesamt is 0 tells nothing: such zeros come last
-    row_total = {q: size[cells[TOTAL, i, f]] for (_, i, f), q in cells.items() if (TOTAL, i, f) in cells}
-    changed = True
-    while changed:
-        changed = False
-        for rule, members in groups:
-            if sum(q in hidden for q in members) != 1:
-                continue
-            open_ = [q for q in members if q[2] and q not in hidden]
-            candidates = [q for q in open_ if size[q] > 0 and (rule == "a" or q != protected)]
-            if candidates:
-                of_les = [q for q in candidates if q[0] != TOTAL]
-                hidden.add(min(of_les or candidates, key=lambda q: size[q]))
-                changed = True
-            elif scope == SUPPRESS_DIAGNOSES and open_ and (any(not q[2] for q in members)
-                                                            or any(size[q] == 0 for q in members if q in hidden)):
-                # the others are exact or zero, or the one suppressed is a zero beside zeros: a zero is suppressed
-                # as well, else the exact ones or the zeros would give the count away; in a row the zero of Gesamt,
-                # in a column one in a row with a nonzero Gesamt if any
-                if rule == "a":
-                    hidden.add(next((q for q in open_ if q[0] == TOTAL), open_[0]))
-                else:
-                    hidden.add(min(open_, key=lambda q: row_total.get(q, 0) == 0))
-                changed = True
-    return cells, size, hidden
-
-
 def suppressed(row, min_cell, hide_value=None, hide_base=None):
     """(value, base, percent) of a row, a suppressed count or statistic replaced by '<min_cell', its percentage left
-    out. What to hide is decided by the caller (suppressed_quantities, hidden_statistic); None: by size alone
+    out. What to hide is decided by the caller (render); None: by size alone
     (a count 1..min_cell-1, a statistic from fewer values), as rd_time_series uses it"""
     hidden = f"<{min_cell}"
     if row.unit == VALUE:
@@ -1215,47 +1106,15 @@ def suppressed(row, min_cell, hide_value=None, hide_base=None):
     return n, base, pct
 
 
-def hidden_statistic(entities, name, i, min_cell):
-    """A statistic from fewer than min_cell values is hidden for an LE, and for Gesamt only if its values all come
-    from one LE (it would be that LE's)"""
-    row = entities[name][i]
-    if row.n is None or row.support >= min_cell:
-        return False
-    if name != TOTAL:
-        return True
-    return sum(1 for e, rows in entities.items() if e != TOTAL and rows[i].support) <= 1
-
-
-def suppression_note(min_cell, scope, primary, complementary):
+def suppression_note(min_cell, n):
     """The note on the suppressed cells (sheet Hinweise)"""
     if min_cell <= 1:
         return "Keine Zellen unterdrückt (--min-cell 1)."
-    if scope == SUPPRESS_ALL:
-        return (f"In den Spalten der LEs sind Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso Anteile "
-                f"mit Basis unter {min_cell} und Kennzahlen der Bearbeitungsdauer aus weniger als {min_cell} Werten (nicht in "
-                "den Rückfragen); Gesamt (Summe über alle LEs) wird gezeigt. "
-                f"Ergänzend unterdrückt, ebenfalls als <{min_cell}: in jeder Zeile über die LEs und Gesamt und in jeder "
-                "Aufteilung einer Spalte (Kategorien, die sich zu einer gezeigten Zahl summieren), in der sonst genau eine Zelle "
-                "unterdrückt wäre, die kleinste weitere Zelle einer LE über 0, bis keine unterdrückte Zahl als Differenz "
-                "berechenbar ist; Gesamt nur, wenn die Zahl allein von einer LE stammt "
-                f"({complementary} Zellen zusätzlich zu {primary}); eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr Fälle zählen.")
-    return (f"Unterdrückt werden nur die Diagnosezeilen: die Abschnitte {', '.join(DIAGNOSIS_SECTIONS)} und die Zeile "
-            + ", ".join(f"{s}: {i}" for s, i in DIAGNOSIS_ITEMS) + ". "
-            f"Dort sind in den Spalten der LEs Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso "
-            f"Bezugszahlen unter {min_cell} (außer {', '.join(EXACT_DIAGNOSIS_BASES)}) und die Anteile dazu (nicht in den "
-            f"Rückfragen); Gesamt (Summe über alle LEs) wird gezeigt. Ergänzend unterdrückt, ebenfalls als <{min_cell}: "
-            "in jeder Zeile über die LEs und Gesamt und in jeder Aufteilung einer Spalte (Kategorien, die sich zu einer "
-            "gezeigten Zahl summieren, auch zu einer exakt gezeigten wie den sequenzierten Fällen), in der sonst genau eine "
-            "Zelle unterdrückt wäre, die kleinste weitere Diagnosezelle einer LE über 0, sonst eine 0, bis keine "
-            "unterdrückte Zahl als Differenz berechenbar ist; Gesamt nur, wenn die Zahl allein von einer LE stammt "
-            f"({complementary} Zellen zusätzlich zu {primary}); eine Zelle <{min_cell} kann daher auch 0 oder {min_cell} "
-            "und mehr Fälle zählen. Alle anderen Zahlen, Anteile und Bearbeitungsdauern sind exakt angegeben, auch "
-            f"Fallzahlen unter {min_cell}.")
-
-
-def small(n, min_cell):
-    """A count for the notes, suppressed as in the matrix"""
-    return f"<{min_cell}" if 0 < n < min_cell else n
+    return (f"Unterdrückt sind nur Fallzahlen von 1 bis {min_cell - 1} (<{min_cell}) in den Diagnosezeilen (Erkrankungsgruppen "
+            "mit Status, Diagnose ohne Erkrankungsgruppe, Orphacode) der LEs; keine Sekundärunterdrückung, einzelne Werte "
+            "können sich aus Summen ergeben (Gesamt, die Summen der Gruppen, die übrigen Zeiträume). Gesamt und alle "
+            f"anderen Zahlen sind exakt angegeben, auch unter {min_cell}: auch Diagnosestatus, Diagnoserate und die "
+            f"Vorbefunde je Status, alle Anteile und Bearbeitungsdauern ({n} Zellen unterdrückt).")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1263,7 +1122,29 @@ def small(n, min_cell):
 # ---------------------------------------------------------------------------------------------
 
 def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medical_days=14,
-        suppress_scope=SUPPRESS_DIAGNOSES, follow_up_months=FU_MONTHS):
+        suppress_scope=SUPPRESS_CODES, follow_up_months=FU_MONTHS):
+    """The matrix of the cases with initial submission in [start, end) (None: open), suppressed (primary only)"""
+    ev = evaluate(rows, failures, heads, start, end, reference_date, min_medical_days, suppress_scope, follow_up_months)
+    return render(ev, min_cell)
+
+
+def run_joint(rows, failures, heads, periods, reference_date, min_cell=5, min_medical_days=14,
+              suppress_scope=SUPPRESS_CODES, follow_up_months=FU_MONTHS, start=None, end=None):
+    """The total matrix over [start, end) and one matrix per period (start, end) of periods, each suppressed on its
+    own (primary only). Returns (total result, [result per period])."""
+    periods = list(periods)
+    if not periods or any(a[1] != b[0] for a, b in zip(periods, periods[1:])):
+        raise ValueError("run_joint: the periods must be contiguous and in order")
+    if (start or periods[0][0]) != periods[0][0] or (end or periods[-1][1]) != periods[-1][1]:
+        raise ValueError("run_joint: the total matrix must cover exactly the periods (start, end)")
+    args = (reference_date, min_cell, min_medical_days, suppress_scope, follow_up_months)
+    return (run(rows, failures, heads, periods[0][0], periods[-1][1], *args),
+            [run(rows, failures, heads, s, e, *args) for s, e in periods])
+
+
+def evaluate(rows, failures, heads, start, end, reference_date, min_medical_days=14, suppress_scope=SUPPRESS_CODES,
+             follow_up_months=FU_MONTHS):
+    """The rows of every LE and Gesamt (entities) and what the notes need, before the suppression"""
     if suppress_scope not in SUPPRESS_SCOPES:
         raise ValueError(f"suppress_scope must be one of {SUPPRESS_SCOPES}: {suppress_scope}")
     cases, tests, without_initial, submitters = build_cases(rows, start, end)
@@ -1294,7 +1175,8 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         for kind, detail in e.problems:
             problem(e.le, kind, e.key, e.tan, detail)
     for le, key, tan in without_initial:
-        problem(le, P_WITHOUT_INITIAL, key, tan, "nur Folgemeldungen/Ergänzungen/Korrekturen, keine Erstmeldung")
+        problem(le, P_WITHOUT_INITIAL, key, tan, "nur Folgemeldungen/Ergänzungen/Korrekturen, keine Erstmeldung "
+                "(oder eine Erstmeldung ohne lesbares metaData.submission.date)")
     evaluated_keys = {e.key for e in evaluated}
     stale = Counter()
     for f in failures:
@@ -1336,19 +1218,30 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         period = (f"gesamter Export (Erstmeldungen {min(dates).strftime('%d.%m.%Y')} - {max(dates).strftime('%d.%m.%Y')})"
                   if dates else "gesamter Export")
 
-    cells, size, hidden = suppressed_quantities(entities, min_cell, suppress_scope)
-    primary = sum(1 for q in cells.values() if q in hidden and 0 < size[q] < min_cell)
-    complementary = sum(1 for q in cells.values() if q in hidden) - primary
+    del rows, failures
+    return SimpleNamespace(**{k: v for k, v in locals().items() if not callable(v) or k in ("losses", "counts")})
+
+
+def render(ev, min_cell):
+    """The result (JSON) of an evaluation: in the LE columns, the counts of 1 to min_cell - 1 of the code cells
+    (is_code_cell) suppressed, nothing else"""
+    entities, suppress_scope, reference_date = ev.entities, ev.suppress_scope, ev.reference_date
+    les, submitters, tests, period, start, end, heads = ev.les, ev.submitters, ev.tests, ev.period, ev.start, ev.end, ev.heads
+    min_medical_days, follow_up_months, problems = ev.min_medical_days, ev.follow_up_months, ev.problems
+    reasons_exported, unmapped_heads = ev.reasons_exported, ev.unmapped_heads
     template_rows = entities[TOTAL]
+    n_hidden = 0
+
+    def small_code(name, r, field_, n):
+        return name != TOTAL and n is not None and 0 < n < min_cell and r.unit == COUNT and is_code_cell(r, field_)
     result_rows = []
     for i, r in enumerate(template_rows):
         values = {}
         for name, entity_rows in entities.items():
-            if r.unit == VALUE:     # the durations aren't diagnosis rows
-                hide_value = suppress_scope == SUPPRESS_ALL and hidden_statistic(entities, name, i, min_cell)
-            else:
-                hide_value = cells.get((name, i, "value")) in hidden
-            n, base, pct = suppressed(entity_rows[i], min_cell, hide_value, cells.get((name, i, "base")) in hidden)
+            row = entity_rows[i]
+            hide_value, hide_base = small_code(name, r, "value", row.n), small_code(name, r, "base", row.base)
+            n_hidden += hide_value + hide_base
+            n, base, pct = suppressed(row, min_cell, hide_value, hide_base)
             values[name] = {"value": n, "base": base, "percent": pct}
         result_rows.append({"key": r.key, "section": r.section, "item": r.item, "unit": r.unit,
                             "base_label": r.base_label, "values": values})
@@ -1359,9 +1252,11 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         f"{result_rows[0]['values'][TOTAL]['value']} Fälle (Episoden mit Erstmeldung) ausgewertet, Stand je Fall aus der "
         "letzten Nicht-Test-Einreichung; Spezifikation: docs/rd-evaluation-matrix.txt.",
         f"{tests} Testeinreichungen verworfen.",
-        suppression_note(min_cell, suppress_scope, primary, complementary),
+        suppression_note(min_cell, n_hidden),
         "Diagnosestatus 'offen': Undiagnostiziert und noch keine Fallkonferenz nach dem Indikationsboard (GFK2); "
-        "die Diagnoserate bezieht sich auf die abgeschlossenen Fälle.",
+        "die Diagnoserate bezieht sich auf die abgeschlossenen Fälle. 'Undiagnostiziert' zählt daher nur Fälle mit GFK2: "
+        "alle Fälle mit noGeneticDiagnosis sind Undiagnostiziert + offen; LEs mit unterschiedlichem Anteil offener Fälle "
+        "nur so oder über die Diagnoserate vergleichen.",
         f"Broad Consent bewertet zum Datum der letzten Einreichung und zum Stichtag {reference_date.isoformat()}.",
         "Therapieempfehlungen: Zuordnung Strategie -> Kategorie (offen, mit den Stakeholdern abzustimmen): "
         + ", ".join(f"{k} -> {v}" for k, v in THERAPY_KIND.items()) + ". Ein Fall zählt je Zeile einmal, "
@@ -1388,15 +1283,18 @@ def run(rows, failures, heads, start, end, reference_date, min_cell=5, min_medic
         notes.append("Grund für einen fehlenden Broad Consent: metadata.reasonResearchConsentMissing der letzten DIP-Einreichung "
                      "(Spalte des Exports); das Mapping in den Datenkranz übernimmt ihn nicht. Nach Monat: Monat der Erstmeldung.")
     if unmapped_heads:
-        notes.append("Orphanet-Gruppenköpfe ohne Vorlagengruppe, gezählt unter 'unbekannt: Gruppenkopf': "
-                     + ", ".join(sorted(unmapped_heads)) + "; HEAD_GROUP ergänzen.")
+        # on stderr for the KDK, not in the notes: naming a head would show that its cases occur, which the
+        # suppressed rows hide ("unbekannt: Gruppenkopf" may be <5 for 0)
+        print(f"{period}: Orphanet-Gruppenköpfe ohne Vorlagengruppe, gezählt unter 'unbekannt: Gruppenkopf': "
+              + ", ".join(sorted(unmapped_heads)) + "; HEAD_GROUP ergänzen.", file=sys.stderr)
 
     return {
         "title": f"AUSWERTUNG {period}",
         "period": period,
         "min_cell": min_cell,
         "suppress_scope": suppress_scope,
-        "suppressed": {"primary": primary, "complementary": complementary},
+        # every suppressed cell counts 1 to min_cell - 1: no complementary suppression
+        "suppressed": {"cells": n_hidden, "complementary": 0},
         "entities": [TOTAL] + les,
         "labels": {TOTAL: TOTAL, **labels},
         "rows": result_rows,
@@ -1428,6 +1326,60 @@ def write_problems_csv(path, result, delimiter=";"):
             writer.writerow([result["labels"].get(p["le"], p["le"]), p["problem"], p["case"], p["tan"] or "", p["detail"]])
 
 
+def write_rueckfragen(output, result, delimiter=";", per_le=False):
+    """The Rückfragen: <output>_rueckfragen.csv of all LEs, or per_le only <output>_rueckfragen_<LE>.csv per LE (each
+    LE gets only its own case keys). Returns the paths written"""
+    if not per_le:
+        write_problems_csv(f"{output}_rueckfragen.csv", result, delimiter)
+        return [f"{output}_rueckfragen.csv"]
+    paths = per_le_paths(output, result["entities"][1:])
+    for le, path in paths.items():
+        write_problems_csv(path, {**result, "problems": [p for p in result["problems"] if p["le"] == le]}, delimiter)
+    return list(paths.values())
+
+
+def per_le_paths(output, les):
+    """{LE: <output>_rueckfragen_<LE>.csv}, the LE with characters other than letters, digits, . _ - as _; refuses
+    two LEs with the same file (also differing only in case, as on macOS and Windows): one would get the other's
+    case keys"""
+    paths = {le: f"{output}_rueckfragen_{re.sub(r'[^A-Za-z0-9._-]', '_', str(le))}.csv" for le in les}
+    seen = {}
+    for le, path in paths.items():
+        other = seen.setdefault(path.lower(), le)
+        if other != le:
+            raise SystemExit(f"LEs {other!r} and {le!r} would write the same file {path}; rename one (site of the export)")
+    return paths
+
+
+def write_json(path, result, per_le=False):
+    """The result JSON; with per_le without the Rückfragen (case keys of all LEs), so the xlsx has none either"""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({k: v for k, v in result.items() if not (per_le and k == "problems")}, f, ensure_ascii=False, indent=2)
+
+
+def write_outputs(output, result, delimiter=";", per_le=False):
+    """The JSON, the CSV and the Rückfragen of a result, as main writes them; a file of them written before an error
+    is removed again. Returns the paths"""
+    paths = [f"{output}.json", f"{output}.csv"] + (list(per_le_paths(output, result["entities"][1:]).values())
+                                                   if per_le else [f"{output}_rueckfragen.csv"])
+    try:
+        write_json(paths[0], result, per_le)
+        write_csv(paths[1], result, delimiter)
+        write_rueckfragen(output, result, delimiter, per_le)
+    except BaseException:
+        remove_files(paths)
+        raise
+    return paths
+
+
+def remove_files(paths):
+    for path in paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input", help="result JSON of export-datenkranz, or a JSON list of submissions")
@@ -1438,9 +1390,9 @@ def main(argv=None):
                         help="date the research consents are additionally evaluated at (default: today)")
     parser.add_argument("--min-cell", type=int, default=5,
                         help="counts below are suppressed, 1 disables (default: %(default)s)")
-    parser.add_argument("--suppress-scope", choices=SUPPRESS_SCOPES, default=SUPPRESS_DIAGNOSES,
-                        help="suppress small counts only in the diagnosis rows (DIAGNOSIS_SECTIONS), all other numbers "
-                             "exact, or in all rows (default: %(default)s)")
+    parser.add_argument("--suppress-scope", type=scope_argument, choices=SUPPRESS_SCOPES, default=SUPPRESS_CODES,
+                        help="small counts are suppressed only in the rows derived from the diagnosis codes "
+                             "(CODE_SECTIONS), all other numbers exact (the only scope; default: %(default)s)")
     parser.add_argument("--min-medical-days", type=int, default=14,
                         help="shorter GFK1-GFK2 durations are listed for clarification (default: %(default)s)")
     parser.add_argument("--follow-up-months", type=int, default=FU_MONTHS,
@@ -1448,6 +1400,9 @@ def main(argv=None):
                              "before the reference date (default: %(default)s)")
     parser.add_argument("--delimiter", default=";", help="CSV delimiter (default: %(default)s, for Excel with German locale)")
     parser.add_argument("--output", default="rd-evaluation-matrix", help="output path without extension (default: %(default)s)")
+    parser.add_argument("--rueckfragen-per-le", action="store_true",
+                        help="write the Rückfragen only per LE, <output>_rueckfragen_<LE>.csv, not the file of all LEs, "
+                             "and leave them out of the JSON (and so of the xlsx); recommended")
     args = parser.parse_args(argv)
 
     rows, failures = load_submissions(args.input)
@@ -1455,16 +1410,13 @@ def main(argv=None):
     result = run(rows, failures, heads, args.start, args.end, args.reference_date, args.min_cell, args.min_medical_days,
                  args.suppress_scope, args.follow_up_months)
 
-    with open(f"{args.output}.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    write_csv(f"{args.output}.csv", result, args.delimiter)
-    write_problems_csv(f"{args.output}_rueckfragen.csv", result, args.delimiter)
+    written = write_outputs(args.output, result, args.delimiter, args.rueckfragen_per_le)
 
     for note in result["notes"]:
         print(note, file=sys.stderr)
     n_problems = len(result["problems"])
-    print(f"{small(n_problems, result['min_cell']) if args.suppress_scope == SUPPRESS_ALL else n_problems} Rückfragen an LEs, siehe {args.output}_rueckfragen.csv", file=sys.stderr)
-    print(f"Written: {args.output}.json, {args.output}.csv, {args.output}_rueckfragen.csv", file=sys.stderr)
+    print(f"{n_problems} Rückfragen an LEs, siehe {args.output}_rueckfragen*.csv", file=sys.stderr)
+    print("Written: " + ", ".join(written), file=sys.stderr)
 
 
 if __name__ == "__main__":

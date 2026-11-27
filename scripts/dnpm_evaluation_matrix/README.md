@@ -18,10 +18,14 @@ python3 make_synthetic.py --output synthetic-export.json                # synthe
 Options: `--from`/`--until` (cases by the date of their initial submission, submissions and Rückfragen by
 their own date), `--cutoff` (data as of a date: later submissions are ignored, so a new export doesn't
 change old periods), `--reference-date` (consent validity, due follow-ups; default `--cutoff`, else today; must
-not be after `--cutoff`), `--resolution month|quarter`, `--min-cell` (default 5, 1 disables), `--suppress-scope diagnoses|all`
-(default `diagnoses`, see Suppression),
-`--min-medical-days` (default 14), `--delimiter`, `--output`, `--rueckfragen-per-le` (also one
-`<output>_rueckfragen_<LE>.csv` per LE, to hand each LE only its own cases).
+not be after `--cutoff`), `--resolution month|quarter`, `--min-medical-days` (default 14), `--delimiter`,
+`--output`, `--rueckfragen-per-le` (**recommended**: only one `<output>_rueckfragen_<LE>.csv` per LE and no file
+of all LEs, so that each LE gets only its own case keys).
+
+**No suppression.** By decision of the data holders (26.11.2026) the oncology matrix and its time series are not
+suppressed: every count, base, share and statistic is exact, also below 5, and there are no options for it
+(`--min-cell` and `--suppress-scope` were removed). Small-cell suppression applies to the RD matrix only. The
+tables are for the data nodes and the LE concerned, not for publication.
 
 ## Input
 
@@ -48,26 +52,26 @@ export maps to, and the BfArM KDK schema (MVGenomseq_KDK, main of 2026-08-05).
 
 | File | Content |
 |---|---|
-| `<output>.json` | `title`, `period`, `min_cell`, `suppressed`, `reference_date`, `cutoff`, `entities` (`Gesamt` + LEs), `labels`, `rows`, `notes`, `time_series` (no case keys: the Rückfragen are in the CSV files only) |
+| `<output>.json` | `title`, `period`, `reference_date`, `cutoff`, `entities` (`Gesamt` + LEs), `labels`, `rows`, `notes`, `time_series` (no case keys: the Rückfragen are in the CSV files only) |
 | `<output>.csv` | LE; Abschnitt; Kategorie; Einheit; Wert; Bezug; Basis; Anteil (%) |
 | `<output>_zeitreihe.csv` | LE; Zeitraum; Abschnitt; Kategorie; Einheit; Wert; Bezug; Basis; Anteil (%) |
-| `<output>_rueckfragen.csv` | LE; Problem; Fall; Einreichung (tanC); Detail (case keys of all LEs: for the KDK; pass each LE its own lines) |
-| `<output>_rueckfragen_<LE>.csv` | the same, one file per LE (`--rueckfragen-per-le`) |
+| `<output>_rueckfragen.csv` | LE; Problem; Fall; Einreichung (tanC); Detail (case keys of all LEs: for the KDK only); not written with `--rueckfragen-per-le` |
+| `<output>_rueckfragen_<LE>.csv` | the same, one file per LE (`--rueckfragen-per-le`, recommended) |
 
 `rows[]`: `{key, section, item, unit, base_label, values: {entity: {value, base, percent}}}` as in the RD
-script. `time_series`: `{resolution, periods: ["2025-09", ...], suppressed, rows: [{key, section, item, unit,
+script. `time_series`: `{resolution, periods: ["2025-09", ...], rows: [{key, section, item, unit,
 base_label, values: {entity: {period: {value, base, percent}}}}]}`, the same rows in the same order.
 `unit` is `Anzahl` for counts (value of base), else the unit of a statistic (`Tage`, `Anzahl je Fall`,
-`mut/Mb`; value only, `base`/`percent` null). A suppressed value is `"<5"`: it marks a primary (1–4)
-or a complementary suppression; the two are deliberately indistinguishable, see Suppression.
-`suppressed: {primary, complementary}` counts the suppressed cells of the matrix (top level) and of the
-time series (`time_series.suppressed`), as in the RD matrix. Notes and the title contain no count below `--min-cell` and no exact
-date (the title gives the months of the first and last initial submission, or the `--from`/`--until` period).
+`mut/Mb`; value only, `base`/`percent` null). All values are numbers (no `"<5"`). The title contains no exact
+date (it gives the months of the first and last initial submission, or the `--from`/`--until` period).
 
 ## Conventions
 
 - **Case**: an episode with an initial submission; tests are left out (counted in section Einreichungen).
-  Its state is that of the latest non-test submission (ordered by `submittedAt`). `plan` and `molecular`
+  Its state is that of the latest non-test submission (ordered by `submittedAt`, parsed as a time, time zones
+  converted to UTC; unparseable values after the others, as text). It is dated by its initial submission; of several
+  initial submissions of an episode by the one with the earliest date (`metaData.submission.date`, else
+  `submittedAt`). `plan` and `molecular`
   are taken from the latest submission that has them; follow-ups (`followUp.followUpOds[]`) and their
   therapies are collected over all submissions (deduplicated).
 - **Period**: a case belongs to the month/quarter of its initial submission (`metaData.submission.date`);
@@ -76,7 +80,7 @@ date (the title gives the months of the first and last initial submission, or th
   listed, also those without data.
 - **Population**: *sequenced* = `metaData.decisionToInclude` not false and `case.diagnosisOd.libraryType`
   in wgs, wgs_lr, wes, panel. GFK2 outcome, implementation and molecular findings refer to the sequenced
-  cases; *with GFK2* = sequenced and a `plan.carePlanOd`.
+  cases; *with GFK2* = sequenced and a `plan.carePlanOd` (a `plan` without `carePlanOd` is no documented GFK2).
 - **GFK1/GFK2**: the case conferences of the Modellvorhaben, named as in the RD matrix. GFK1 = erste
   Fallkonferenz (Indikation/Einschluss) = `metaData.molecularBoardDecisionDate` (RD: the same field; DIP:
   issue date of the indication care plan). GFK2 = zweite Fallkonferenz (Befundbesprechung, in oncology the
@@ -88,38 +92,6 @@ date (the title gives the months of the first and last initial submission, or th
 - **Implemented recommendation**: a `followUpOds[].therapies[].reference` equal to the `identifier` of a
   `recommendedSystemicTherapies[]` or `recommendedStudies[]` entry of the case (Technische Spezifikation:
   "Identifier der recommendedSystemicTherapies oder recommendedStudies").
-- **Suppression** (`--min-cell` k, default 5): counts 1..k-1 → `<k`; every count whose base is 1..k-1 → `<k`
-  (also a 0, it would describe each of these cases); statistics from fewer than k values → `<k`. Not
-  suppressed in the Rückfragen. Complementary suppression (also `"<k"`, so a `"<k"` cell may hold k or more), so that no suppressed count can be
-  derived: counts form groups that add up to a shown total, (a) a row across the LE columns and Gesamt,
-  (b) a partition within a column (the categories of e.g. Geschlecht, ECOG, Tumorentität, evidence level,
-  `PARTITIONS` in the script) and its base, (c) a row across the periods of the time series and the whole
-  period of the matrix. In every group with exactly one suppressed cell, the smallest other nonzero cell is
-  suppressed as well (an LE or a period before Gesamt or the whole period); repeated until no group
-  changes. Limits: bases and the counts of overlapping rows (e.g. a category's count reappearing as the
-  base of another section) are not part of the groups, and statistics (median etc.) are not additive, so
-  the tables are still for the KDK and the LE concerned, not for publication.
-- **Suppression scope** (`--suppress-scope`, default `diagnoses`): with `diagnoses` only the diagnosis rows are
-  suppressed, every other count and statistic (also the time series, the notes and durations of single cases)
-  is exact, also below k. The diagnosis rows (`DIAGNOSIS_SECTIONS`, `DIAGNOSIS_ITEMS`, `is_diagnosis_row()` in
-  the script) are the sections `Tumorentität (Hauptdiagnose ICD-10-GM, gruppiert)`, `Tumorentität (sequenzierte
-  Fälle)`, `Diagnose: Kodierung` (ICD-O-3 behaviour, topography, germline diagnosis),
-  `GFK2 (MTB): Ergebnis nach Tumorentität (sequenzierte Fälle)`, `Tumorstadium (M-Kategorie aus
-  tnmClassifications)` and `Grading (Differenzierungsgrad)`, and the rows `Fälle | davon hereditär (diseaseType
-  hereditary)`, `Molekulare Befunde (sequenzierte Fälle) | Keimbahnvariante berichtet (genomicSource germline)`
-  and, since they are the cases minus a diagnosis category, the fill rates `case.diagnosisOd.grading`,
-  `case.diagnosisOd.tnmClassifications` and `TNM oder additionalClassification` of `Füllgrad optionaler Felder
-  (Fälle)`. Not diagnosis rows: ECOG, the other molecular findings and fill rates, follow-up. The rules above
-  apply within the diagnosis rows, plus, since the other rows are now exact: `DIAGNOSIS_PARTITIONS` (the
-  behaviour codes with the cases with one; the per-entity rows "GFK2 dokumentiert" and "Therapie- oder
-  Studienempfehlung", whose sums are shown exactly in `GFK2 (MTB): Ergebnis`) and `DIAGNOSIS_KEY_PARTITIONS`
-  (fill rate of grading + grading `nicht angegeben`, fill rate of TNM + `kein TNM`, each = the exact cases) are
-  groups too; the stage and grading categories are partitions of the exact cases; where the other cells of a
-  group with one suppressed cell are zeros, a zero (with a nonzero base) is suppressed, so `<k` can also be 0;
-  rows that are equal when another count is 0 (`DIAGNOSIS_LINKED`: `TNM oder additionalClassification` and the
-  TNM fill rate) are suppressed together; and a base that is the count of another diagnosis row
-  (`DIAGNOSIS_BASES`, e.g. `sequenzierte Fälle <entity>`) is suppressed where that count is. `--suppress-scope all` suppresses every row; its output equals that of
-  the script before the option (only the JSON field `suppress_scope` is new).
 - Robustness: `null` where a list or object is expected is read as empty; a case that still can't be read
   (no `metaData.molecularBoardDecisionDate`, no `birthDate`, no `case.diagnosisOd`, no dated initial)
   becomes a Rückfrage "Fall nicht auswertbar" instead of aborting the run. Each submission's dates are
@@ -135,18 +107,18 @@ Base "Fälle" = all cases of the entity and period unless stated otherwise.
 | Fälle | total; hereditary; not included; included, not sequenced; sequenced; with ≥1 followup / addition / correction; non-convertible submissions; thereof evaluated with older state; episodes without initial; unreadable cases | `metaData.submission.diseaseType`, `metaData.decisionToInclude`, `case.diagnosisOd.libraryType`, `metaData.submission.type` |
 | Einreichungen (nach Einreichungsdatum) | submissions per type (initial, followup, addition, correction, test, other); total without test; follow-ups with death date / lastContactDate / therapy start; initial submissions with systemic therapy recommendation, per libraryType, per broad-consent state | `metaData.submission.type/date`, `followUp.followUpOds[].deathDate/lastContactDate/therapies[].therapyStartDate`, `plan.recommendedSystemicTherapies` |
 | Einwilligung | MV consent sequencing (latest `mvConsent.scope[]` of domain `mvSequencing` is `permit`); broad consent valid at the reference date | `metaData.mvConsent.scope[].domain/type/date`, `metaData.researchConsents[].scope` |
-| Broad Consent (Stand der letzten Einreichung) | transmitted and valid at the latest submission date (Consent.permitsResearchUse of service-base: research provisions 2.16.840.1.113883.3.1937.777.24.5.3.7/.8/.1 permit, start within 5 years, not ended); transmitted, not valid; not transmitted per reason (6 schema values, other, none); reason taken from the DIP column | `researchConsents[].noScopeJustification`, else DIP `reasonResearchConsentMissing` (patient-inability, patient-refusal, consent-not-returned, other-patient-reason, technical-issues, organizational-issues) |
+| Broad Consent (Stand der letzten Einreichung) | transmitted and valid at the latest submission date (Consent.permitsResearchUse of service-base: research provisions 2.16.840.1.113883.3.1937.777.24.5.3.7/.8/.1 permit, start within the 5 years up to the date and not after it, end not before it; the end day is still valid); transmitted, not valid; not transmitted per reason (6 schema values, other, none); reason taken from the DIP column | `researchConsents[].noScopeJustification`, else DIP `reasonResearchConsentMissing` (patient-inability, patient-refusal, consent-not-returned, other-patient-reason, technical-issues, organizational-issues) |
 | Geschlecht / Alter bei Einschluss (GFK1) / Versicherung | m, w, d, unbekannt; Pädiatrisch 0-17, 18-39, 40-59, 60-79, 80+ (age at GFK1, birth month as its 1st day); GKV, PKV, andere | `metaData.gender` (male/female/other), `birthDate`, `coverageType` |
 | Sequenzierung (eingeschlossene Fälle) | wgs, wgs_lr, wes, panel, none, missing, other | `case.diagnosisOd.libraryType` |
 | Tumorentität (all / sequenced) | 18 entity groups + no C/D code + missing (table below) | `case.diagnosisOd.mainDiagnosis.code` (ICD-10-GM) |
-| Diagnose: Kodierung | histology with behaviour code; behaviour /0 /1 /2 /3 /6 /9; topography 3-char equal to main diagnosis (base: main diagnosis C00-C76, C80); germline diagnosis confirmed; germlineDiagnoses given (of confirmed) | `histology.code` (ICD-O-3-M), `topography.code` (ICD-O-3-T), `germlineDiagnosisConfirmed`, `germlineDiagnoses` |
+| Diagnose: Kodierung | histology with behaviour code (one of /0 /1 /2 /3 /6 /9 after the "/", so the codes add up to it); behaviour /0 /1 /2 /3 /6 /9; topography 3-char equal to main diagnosis (base: main diagnosis C00-C76, C80); germline diagnosis confirmed; germlineDiagnoses given (of confirmed) | `histology.code` (ICD-O-3-M), `topography.code` (ICD-O-3-T), `germlineDiagnosisConfirmed`, `germlineDiagnoses` |
 | Tumorstadium (M-Kategorie) | M0, M1, MX, TNM without recognisable M, no TNM | `tnmClassifications[].display/text/code` matched by `[cpyra]*M[01X]` (e.g. "cM1a (UICC)"); a heuristic, SNOMED codes themselves are not resolved |
 | ECOG bei Einschluss (+ zusammengefasst) | 0-5, unknown, notApplicable, missing, other; concrete value 0-5 | `case.diagnosisOd.ecogPerformanceStatusScore` (DIP default `unknown`) |
 | Grading | 0,1,2,3,4,5,X,L,M,H,B,U,T, missing, other | `case.diagnosisOd.grading` |
 | Vortherapien | number of prior systemic therapies 0/1/2/≥3; with intention K/P/S/X; with treatmentType O/A/N/I/S | `case.priorProcedures[]` (DIP: guideline therapies with a period) |
 | Molekulare Vordiagnostik | per type (genomeShortRead … none); none documented | `case.priorDiagnostics[].type` |
 | Dauer Erstdiagnose bis GFK1 | mean, median, Q1, Q3, min, max in days (QUARTILE.INC) | `mainDiagnosis.date` → GFK1 |
-| Bearbeitungsdauer medizinisch (GFK1 bis GFK2) | computable; no GFK2 yet; impossible date; statistics | GFK1 → GFK2 |
+| Bearbeitungsdauer medizinisch (GFK1 bis GFK2) | computable; no GFK2 yet; impossible date; of the computable: GFK2 on the day of GFK1 (0 days); statistics without the 0-day cases | GFK1 → GFK2 |
 | Bearbeitungsdauer dokumentarisch (GFK2 bis Einreichung beim KDK) | as above | GFK2 → `submission.date` of the first submission with a plan |
 | Dauer GFK2 bis Beginn einer empfohlenen Therapie | computable; statistics | GFK2 → earliest `therapyStartDate` of an implemented recommendation |
 | Zeitstrahl: Tage relativ zur GFK1 | `ohne GFK1: Fälle`; per milestone `M: Fälle`, `M: 1. Quartil (Tage)`, `M: Median (Tage)`, `M: 3. Quartil (Tage)` and, for milestones after GFK1, `M: unplausibel (vor GFK1)` | below |
@@ -155,11 +127,11 @@ Base "Fälle" = all cases of the entity and period unless stated otherwise.
 | GFK2 (MTB): Ergebnis nach Tumorentität | per entity group: GFK2 documented; therapy or study recommendation | |
 | Systemische Therapieempfehlungen (Empfehlungen) | per recommendation: evidence level m1A…m4, undefined, other; evidenceLevelDetails is/iv/Z/Z(FDA)/R; type inLabel/offLabel/compassionateUse/secPreventive/unknown; therapeuticStrategy CH…SO; with variants; priority 1 | `recommendedSystemicTherapies[].evidenceLevel/evidenceLevelDetails/type/therapeuticStrategy/variants/priority` |
 | Studienempfehlungen (Empfehlungen) | register NCT/DRKS/Eudra-CT/CTIS/other/yesButStudyIsUnknown; evidence level | `recommendedStudies[].register/evidenceLevel` |
-| Umsetzung | of cases with a recommendation: with follow-up; ≥1 recommendation started; the same of those with follow-up; therapy without reference to a recommendation; recommendations started (of all recommendations); termination reason E…U / none and response CR/PR/SD/PD / none of started recommendations | `followUp.followUpOds[].therapies[].reference/therapyStartDate/terminationReasonOBDS/therapyResponse` |
+| Umsetzung (sequenzierte Fälle mit Therapie- oder Studienempfehlung) | of cases with a therapy or study recommendation: with follow-up; ≥1 recommendation started; the same of those with follow-up; therapy without reference to a recommendation; recommendations started (of all recommendations); termination reason E…U / none and response CR/PR/SD/PD / none of started recommendations | `followUp.followUpOds[].therapies[].reference/therapyStartDate/terminationReasonOBDS/therapyResponse` |
 | Molekulare Befunde | molecular transmitted; ≥1 SNV/indel; ≥1 CNV; germline variant reported; TMB given; TMB ≥ 10 mut/Mb; HRD status given; HRD high; statistics of SNV and CNV per case and of TMB | `molecular.smallVariants[]`, `copyNumberVariants[]`, `genomicSource`, `complexBiomarkers[].tmb/hrdHigh` (max TMB if several) |
 | Follow-up und Vitalstatus | with followup submission; with follow-up content; deceased; lastContactDate; metachronous tumours | `followUpOds[].vitalStatus/lastContactDate/metachroneDiagnoses` |
 | Follow-up: Erstmeldung mindestens N Monate vor dem Stichtag (N = 4, 8, 12, 18, 24) | cases; without / with 1, 2, 3, ≥4 followup submissions; deceased | the intervals of the stakeholders' query document |
-| Follow-up nach SOP-Intervall (sequenzierte Fälle mit GFK2), … je Kategorie | follow-up category 1/2/3; state at the reference date (deceased, not yet due, current, overdue), in total and per category; current of due; category 2 beyond 24 months; no contact for 12 months (lost to follow-up) | see *Follow-up after the MTB* below |
+| Follow-up nach SOP-Intervall (sequenzierte Fälle mit GFK2), … je Kategorie | follow-up category 1/2/3; state at the reference date (deceased, not yet due, lost to follow-up, current, overdue), in total and per category; current of due (without lost to follow-up); category 2 beyond 24 months; no contact for 12 months (lost to follow-up) | see *Follow-up after the MTB* below |
 | Dauer GFK2 bis erstes Follow-up | computable; only follow-ups before GFK2; mean, median, Q1, Q3, min, max in days | GFK2 → earliest `followUpDate` on or after GFK2 |
 | Follow-up: Pflichtfelder nach SOP | per follow-up entry: `followUpDate` readable, `vitalStatus` living/deceased, ECOG 0-5; per follow-up therapy: `therapyStartDate` readable, `substances`; `therapyResponseDate` of therapies with a response | `followUpOds[]`, `followUpOds[].therapies[]` |
 | Follow-up: Ansprechen, Allgemeinzustand und Vitalstatus | response documented of started recommendations begun ≥ 8 weeks before the reference date; ECOG 0-5 in the latest follow-up; vital status of the latest follow-up (deceased, living, not given, no follow-up) | `therapyResponse`, `ecogPerformanceStatusScore`, `vitalStatus` |
@@ -171,19 +143,20 @@ Base "Fälle" = all cases of the entity and period unless stated otherwise.
 The follow-up schedule and mandatory fields as defined by the network's MTB follow-up SOP, as far as the
 Datenkranz carries them. Base: the sequenced cases with a GFK2 date (`with_mtb` with
 `plan.carePlanOd.molecularBoardDecisionDate`); all at `--reference-date`; follow-ups of all submissions, each once
-(`followUpOds[]` deduplicated). Not diagnosis rows: exact with `--suppress-scope diagnoses`.
+(`followUpOds[]` deduplicated).
 
 | Term | Definition |
 |---|---|
 | Kategorie 1 | an implemented recommendation (a follow-up therapy whose `reference` is a recommendation, as in *Umsetzung*); interval 3 months |
 | Kategorie 2 | a therapy or study recommendation, none started; interval 3 months, from 24 months after GFK2 on 12 months (the SOP limits the follow-up of recommendations not started to two years; the case is then followed up for vital status like category 3) |
 | Kategorie 3 | no therapy or study recommendation (no target); interval 12 months |
-| verstorben | `vitalStatus` deceased in any follow-up: no further follow-up due |
+| verstorben | `vitalStatus` deceased in any follow-up: no further follow-up due (also if a later follow-up says living; a `deathDate` without deceased doesn't count, it is a Rückfrage) |
 | noch nicht fällig | GFK2 less than one interval before the reference date |
-| fällig, aktuell | due, and a `followUpDate` in the interval before the reference date (after reference − interval, up to the reference date) |
-| fällig, überfällig | due, and no such `followUpDate` |
-| Follow-up aktuell, von fälligen | current / (current + overdue): the share of due follow-ups that are up to date |
-| lost to follow-up | not deceased, GFK2 ≥ 12 months before the reference date, and no `followUpDate` or `lastContactDate` in the 12 months before it ("no contact for a year"). `followUpDate` is the date of the documentation, used as the date of contact |
+| lost to follow-up | not deceased, GFK2 ≥ 12 months before the reference date, and no `followUpDate` or `lastContactDate` in the 12 months before it ("no contact for a year"). `followUpDate` is the date of the documentation, used as the date of contact. As the SOP has it, the follow-up ends here: such a case is neither due nor overdue (a state of its own; until 25.11.2026 it was counted as overdue) |
+| dates | `followUpDate` and `lastContactDate` as on the timeline: a month (`YYYY-MM`) as its 15th, the same for contact, state and the days to the first follow-up (the earliest `followUpDate` from GFK2 on); deceased at the reference date only by a follow-up and death date up to it |
+| fällig, aktuell | due, not lost, and a `followUpDate` in the interval before the reference date: after the reference date minus the interval (counted back from the reference date, so a month end doesn't shorten the window), up to the reference date |
+| fällig, überfällig | due, not lost, and no such `followUpDate` |
+| Follow-up aktuell, von fälligen | current / (current + overdue): the share of due follow-ups that are up to date; lost to follow-up is not in the base |
 | Ansprechen dokumentiert | `therapyResponse` given, of the started recommendations whose `therapyStartDate` is ≥ 8 weeks before the reference date (first staging 6-8 weeks after the start) |
 | Pflichtfelder | the fields the SOP's documentation guide marks as mandatory for a follow-up and that the DTO has: follow-up date, vital status, ECOG, therapy start, substance, response date of a response (`deathDate` of the deceased in *Füllgrad*) |
 
@@ -194,8 +167,7 @@ initial submission, a recent period has more cases not yet due.
 
 Per milestone M the offset date(M) − GFK1 in days (GFK1 = `metaData.molecularBoardDecisionDate`), aggregated per
 entity and period like every other section: `M: Fälle` counts the cases with an offset (base: the cases of
-the entity and period), the three quartile rows are QUARTILE.INC as in the duration sections, suppressed
-(`<k`) below `--min-cell` values. No mean, minimum or maximum: the extremes are single cases. Dates given as a
+the entity and period), the three quartile rows are QUARTILE.INC as in the duration sections. No mean, minimum or maximum: the extremes are single cases. Dates given as a
 month (`YYYY-MM`) count as the 15th of that month.
 
 | Milestone M | Date | After GFK1 |
@@ -210,8 +182,8 @@ month (`YYYY-MM`) count as the 15th of that month.
 For a milestone that must lie after GFK1, an offset < 0 is counted in `M: unplausibel (vor GFK1)`, left out of
 `M: Fälle` and of the quartiles, and asked back ("Meilenstein vor GFK1 (Zeitstrahl)"). `ohne GFK1: Fälle`
 counts the cases without a readable `metaData.molecularBoardDecisionDate`; they can't be evaluated (they are
-also in "Fälle nicht auswertbar") and have no timeline. The count rows take part in the complementary
-suppression; the quartiles of a count suppressed only complementarily stay visible (they rest on ≥ k values).
+also in "Fälle nicht auswertbar") and have no timeline. The milestone GFK2 (MTB) keeps offsets of 0 days (dates as
+reported); the duration section leaves them out of its statistics (see below).
 
 Entity groups (ICD-10-GM, first match): Kopf-Hals C00-C14, C30-C32; Ösophagus/Magen C15-C16;
 Kolorektal/Anus C18-C21; Leber/Gallenwege C22-C24; Pankreas C25; Lunge C33-C34; Knochen/Weichteile/
@@ -226,7 +198,7 @@ C81-C96, D45-D47; sonstige bösartige (other C); in situ D00-D09; gutartig/unsic
 | GFK1 nach dem Einreichungsdatum | any submission whose `metaData.molecularBoardDecisionDate` is after its own `submission.date` |
 | GFK2 (MTB) nach dem Einreichungsdatum | GFK2 after the date of the first submission with a plan |
 | GFK2 vor GFK1 | GFK2 before GFK1 |
-| Medizinische Bearbeitungsdauer unplausibel kurz | GFK1 → GFK2 < `--min-medical-days` |
+| Medizinische Bearbeitungsdauer unplausibel kurz | GFK1 → GFK2 < `--min-medical-days`. A GFK2 on the day of GFK1 (0 days; sequencing and evaluation lie between) is counted in its own row of *Bearbeitungsdauer medizinisch* and left out of mean, median, quartiles, minimum and maximum; shorter durations of 1 day or more stay in the statistics. The RD script takes as GFK2 the first plan date after GFK1, so it has no 0-day durations: the two definitions differ |
 | Erstdiagnose nach GFK1 (QS 7) | `mainDiagnosis.date` > GFK1 |
 | Datum vor dem Geburtsmonat (QS 6) | GFK1, diagnosis, GFK2, follow-up, therapy start or prior therapy start before `birthDate`-01 |
 | GFK1 vor der MV-Einwilligung (QS 9) | GFK1 before the date of the latest `mvSequencing` scope |
@@ -237,7 +209,7 @@ C81-C96, D45-D47; sonstige bösartige (other C); in situ D00-D09; gutartig/unsic
 | TNM nicht genau drei Komponenten (QS 5) | `tnmClassifications` given with ≠ 3 entries |
 | decisionToInclude = false, aber sequenziert | not included, libraryType ≠ none |
 | genomicDataCenterId fehlt trotz Sequenzierung | QS part A b |
-| noScopeJustification nicht mehr zulässig (QS 12) | technical/organisational reason in a submission dated from 2026-06-01 |
+| noScopeJustification nicht mehr zulässig (QS 12) | technical/organisational reason in effect in a submission dated from 2026-06-01: `noScopeJustification`, or, where the matrix takes the reason from it (no consent and no justification transmitted), the DIP's `reasonResearchConsentMissing` (`technical-issues`, `organizational-issues`) |
 | Meilenstein vor GFK1 (Zeitstrahl) | GFK2, initial submission, start of an implemented recommendation or first follow-up before GFK1 (overlaps with "GFK1 nach dem Einreichungsdatum" and "GFK2 vor GFK1") |
 | Einreichung nicht konvertierbar / Episode ohne Erstmeldung / Fall nicht auswertbar | as in the RD script |
 
@@ -330,3 +302,14 @@ tells them apart by start date and substances.
    reported separately, and is `diagnosticAssessment` expected for them?
 9. Reasons for not implementing a recommendation: planned in the schema?
 10. TMB cut-off (10 mut/Mb used here) and HRD definition for the reports.
+
+## Upgrade of existing xlsx templates (PR #11)
+
+The row keys of the oncology matrix changed: the section `Umsetzung (sequenzierte Fälle mit Therapieempfehlung)` is
+now `Umsetzung (sequenzierte Fälle mit Therapie- oder Studienempfehlung)` (every key of the section), and there
+are new rows (lost to follow-up in the follow-up state, `davon GFK2 am Tag der GFK1`). A template made by an
+earlier run (`Auswertmatrix_MTB_Template.xlsx`) misses them, and `fill_template.py` stops with "rows of the result
+missing in the template". Recreate it once (`fill_template.py <dnpm_gesamt.json> <template> --new-template`, or
+delete it and run `fill_monthly.py`, which creates it) and apply a custom styling again. A plan counts as GFK2 only
+with content (`carePlanOd` not empty, or recommendations): `{}` and `{"carePlanOd": {}}` are none and don't
+displace an earlier plan.

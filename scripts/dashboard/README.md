@@ -50,7 +50,8 @@ its history). Every detail view has the tabs **Stand** and **Verlauf**. Values l
 - **rd**: key figures Diagnose, Diagnoserate (closed cases), Broad Consent, GFK2, Trio, without Orphacode. LEs
   without any documented GFK2 are flagged "GFK1=GFK2" at the diagnostic rate over closed cases.
 - **onko**: sequenced, GFK2 (MTB), therapy or study recommendation, recommendation started, Broad Consent, follow-up.
-- **datenkranz**: per LE and use case (RD, MTB; the switch "Zeitraum" selects the use case): submissions by type and
+- **datenkranz**: per LE and use case (RD, MTB; the switch "Zeitraum" selects the use case; `Alle` only when no use
+  case is suppressed, so never next to RD or an unknown use case, see Privacy): submissions by type and
   month, cases (episodes with an initial submission, state of the latest non-test submission), episodes without
   initial submission, submissions that could not be converted; for every path of the Datenkranz (generic walk,
   arrays as `[]`) the share of cases where it is filled, for enum-like fields (at most 30 distinct values) the
@@ -66,16 +67,33 @@ time series blocks come from the data. Unknown matrices get generic key figures.
   matrices are shown as counts only.
 - Mode `datenkranz` never outputs case keys, patient or episode ids, TANs, local case ids, free text or identifier-like
   fields: paths with a segment like `id`, `*Id`, `tan*`, `tanC`, `patient`, `identifier`, `address*`, `*name`,
-  `comment`, `note`, `*text`, `description` are skipped, and so is every text field with more than 30 distinct values.
-  The skipped paths are listed by name in the notes of the page.
-- Suppression: `<5` means 1 to 4 cases, or hidden to protect a neighbouring cell (then also 5 or more). The page shows
-  "unterdrückt" without bounds, never 0, and never computes a value back. Bounds (1–4) are shown only for files that
-  state `"suppressed": {"complementary": 0}`. Changes are "n. b." (not computable) as soon as one side is suppressed.
+  `comment`, `note`, `*text`, `description`, `*remark`, `freeText`, `Freitext`, `Bemerkung` are skipped, and so is
+  every text field with more than 30 distinct values. Values are shown only for code-like strings (no blanks, at
+  most 40 characters); a field with any other string (free text) shows its fill rate only, so a single distinct
+  remark never becomes a value label. The skipped paths are listed by name in the notes of the page; the case count
+  in the notes is the one shown (suppressed where the cell is).
+- **Suppression applies to rare diseases (SE/RD) only.** By decision of the data holders (26.11.2026) oncology data
+  is not suppressed: mode `onko` and the use case MTB of mode `datenkranz` show every value exactly, also below 5, and
+  the page then says so instead of explaining suppression (footer, legends, month charts). An oncology matrix or time
+  series that still contains suppressed cells (`<5`, from an older `dnpm_evaluation_matrix.py`) is refused.
+- RD: only the rows that tell which disease a case has are suppressed (decision of the data holders, 26.11.2026:
+  the diagnosis codes). In mode `rd` the matrix decides (`rd_evaluation_matrix.py --suppress-scope codes`, the
+  default: Orphacode and the disease groups; the diagnosis status and every other row exact); the page takes its
+  cells as they are. Since 27.11.2026 the matrix suppresses only counts of 1 to 4 of an LE (no complementary
+  suppression, `"suppressed": {"complementary": 0}`), so the page shows the bounds 1–4; older files with
+  complementary suppression ("<5" also 0 or 5 and more) are shown as "unterdrückt" without bounds. The page never
+  shows a suppressed cell as 0 and never computes a value back. Changes are "n. b." (not computable) as soon as one side is suppressed.
   In the month charts, a month that would follow from the whole period minus the others is hidden too.
-- Mode `datenkranz` suppresses like the matrix scripts: counts from 1 to `--min-cell` − 1 (default 5), every value
-  with a base below that, and, complementarily, the smallest further nonzero cell in every group with exactly one
-  suppressed cell (a row over Gesamt and the LEs, the whole period and its months, the categories of a field and its
-  fill count), until none is left.
+- Mode `datenkranz` suppresses the use case RD (and submissions without a known use case) like the RD matrix, only
+  in the rows of the diagnosis codes: the values of `…diagnoses[].code` (`DIAGNOSIS_CODE_PATH`; not their fill
+  rate). A code of fewer than `--min-cell` cases in the use case gets no row of its own (its name would show that it
+  occurs): such codes are counted together in the row `andere Codes (je unter 5 Fällen)` (`OTHER_CODES`). There an LE's
+  counts from 1 to `--min-cell` − 1 (default 5) are suppressed, nothing else (no complementary suppression: a value
+  can follow from Gesamt or the months). Gesamt and every other row (submissions, cases, fill rates, other values)
+  are exact, also below 5. The use case MTB is exact. There
+  is no use case `Alle` next to a suppressed use case: all use cases minus the exact MTB, or minus a separately
+  suppressed unknown use case, would give the suppressed RD cells away. With several use cases the page has no
+  time series (it would show the months of one use case for all).
 - The file is labelled "Synthetische Daten" when the LE names look synthetic (`LE-A`, `SYN-…`), `--synthetic` /
   `--real` override. The header names the source files, data states and build time; the footer says
   "Aggregate je LE, nur intern". The tables are meant for the data nodes and the LEs, not for publication.
@@ -97,7 +115,7 @@ The embedded copies keep their licence notes; the page footer names them.
 
 ## Files and tests
 
-- `build_dashboard.py`: the builder (inputs, Datenkranz aggregation and suppression, SQLite database for the page,
+- `build_dashboard.py`: the builder (inputs, Datenkranz aggregation and RD suppression, SQLite database for the page,
   page assembly).
 - `template.html`: the page (HTML, CSS, JavaScript; sql.js reads the embedded database). Placeholders `{{TITEL}}`,
   `{{TEXT}}`, `{{NAV_A}}`.

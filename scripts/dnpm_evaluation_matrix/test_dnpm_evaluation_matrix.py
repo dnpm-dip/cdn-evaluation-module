@@ -1,23 +1,18 @@
 """Tests of dnpm_evaluation_matrix.py: python3 -m unittest discover -s scripts/dnpm_evaluation_matrix"""
 
 import contextlib
-import importlib.util
 import io
 import json
 import os
 import random
-import re
-import subprocess
 import tempfile
 import unittest
 from datetime import date
-from types import SimpleNamespace
 
 import dnpm_evaluation_matrix as dm
 
 MDAT_RESEARCH_USE = "2.16.840.1.113883.3.1937.777.24.5.3.8"
 REFERENCE = date(2026, 11, 1)
-PREVIOUS = "647f21b"    # the last commit before --suppress-scope: its output equals that of --suppress-scope all
 
 
 def broad_consent(start="2025-01-01", kind="permit"):
@@ -105,10 +100,9 @@ def row(case, content, submitted_at=None, site="LE-A", reason=dm.NOT_EXPORTED):
     return dm.SubmissionRow(json.dumps([site, case]), submitted_at, content, site, reason)
 
 
-def run(rows, start=None, end=None, failures=(), min_cell=1, resolution=dm.MONTH, cutoff=None, scope=dm.SUPPRESS_ALL):
-    """The matrix; suppression in all rows unless scope says otherwise (the tests of the rules of the suppression)"""
-    return dm.run(rows, list(failures), start, end, cutoff or REFERENCE, min_cell=min_cell, resolution=resolution,
-                  cutoff=cutoff, suppress_scope=scope)
+def run(rows, start=None, end=None, failures=(), resolution=dm.MONTH, cutoff=None):
+    """The matrix (not suppressed)"""
+    return dm.run(rows, list(failures), start, end, cutoff or REFERENCE, resolution=resolution, cutoff=cutoff)
 
 
 def get(result, section, item, entity=dm.TOTAL, field="value"):
@@ -245,6 +239,17 @@ class TumourTests(unittest.TestCase):
         self.assertEqual(get(result, "Grading", dm.MISSING), 1)
         self.assertEqual(get(result, "Diagnose: Kodierung", "Histologie /2 in situ"), 1)
         self.assertEqual(get(result, "Diagnose: Kodierung", "Topographie ICD-O-3-T dreistellig gleich der Hauptdiagnose"), 2)
+
+    def test_the_behaviour_codes_add_up_to_the_cases_with_one(self):
+        # a character after "/" that is no behaviour code (or nothing) is no behaviour code: before, such a case
+        # counted under "mit Verhaltenscode" but under no code
+        result = cases(*(datenkranz(f"t{i}", histology=h)
+                         for i, h in enumerate(("8140/3", "8140/32", "8500/2", "8140/?", "8140/", "8140", "8140/ 6"))))
+        s = "Diagnose: Kodierung"
+        self.assertEqual(get(result, s, "Histologie ICD-O-3-M mit Verhaltenscode"), 4)
+        self.assertEqual(sum(get(result, s, f"Histologie {label}") for _, label in dm.BEHAVIOUR), 4)
+        self.assertEqual(get(result, s, "Histologie /3 bösartig (Primärtumor)"), 2)
+        self.assertEqual(get(result, s, "Histologie /6 bösartig (Metastase)"), 1)
 
     def test_prior_therapies(self):
         procedure = {"treatmentType": "O", "intention": "P", "therapyStartDate": "2024-11-01"}
@@ -402,7 +407,7 @@ class FollowUpSopTests(unittest.TestCase):
             datenkranz("c2", therapies=[therapy_rec("r2")], **late, follow_ups=[follow_up("2026-03-01")]),
             # category 3, GFK2 2 months before: not due
             datenkranz("c3", gfk1="2026-08-01", mtb="2026-09-01", submitted="2026-09-10"),
-            # category 3, GFK2 20 months before, no follow-up: overdue and lost to follow-up
+            # category 3, GFK2 20 months before, no follow-up: lost to follow-up (SOP), not due
             datenkranz("c4"),
             # deceased
             datenkranz("c5", follow_ups=[follow_up("2025-06-01", vital="deceased", death="2025-05-20")]),
@@ -422,9 +427,10 @@ class FollowUpSopTests(unittest.TestCase):
         self.assertEqual([get(r, s, label[k]) for k in "123"], [2, 2, 3])     # c1, c7; c2, c6; c3, c4, c5
         self.assertEqual(get(r, s, label["1"], field="base"), 7)
         states = [get(r, s, f"Stand am Stichtag: {st}") for st in dm.FU_STATES]
-        self.assertEqual(states, [1, 1, 3, 2])          # c5; c3; c1, c6, c7; c2, c4
+        self.assertEqual(states, [1, 1, 1, 3, 1])       # c5; c3; c4 lost; c1, c6, c7; c2
+        # lost to follow-up is neither due nor overdue: the base of "aktuell, von fälligen" leaves it out
         self.assertEqual((get(r, s, "Follow-up aktuell, von fälligen"), get(r, s, "Follow-up aktuell, von fälligen", field="base")),
-                         (3, 5))
+                         (3, 4))
         self.assertEqual(get(r, s, "Kategorie 2 ab 24 Monate nach GFK2 (danach Intervall wie Kategorie 3)"), 1)
         lost = "kein dokumentierter Kontakt in den 12 Monaten vor dem Stichtag (lost to follow-up nach SOP)"
         self.assertEqual((get(r, s, lost), get(r, s, lost, field="base")), (1, 2))   # c4 of c4, c6
@@ -433,6 +439,8 @@ class FollowUpSopTests(unittest.TestCase):
         self.assertEqual(get(r, c, f"Kategorie 2: {dm.FU_CURRENT}"), 1)
         self.assertEqual(get(r, c, f"Kategorie 3: {dm.FU_NOT_DUE}"), 1)
         self.assertEqual(get(r, c, f"Kategorie 3: {dm.FU_DECEASED}"), 1)
+        self.assertEqual(get(r, c, f"Kategorie 3: {dm.FU_LOST}"), 1)
+        self.assertEqual(get(r, c, f"Kategorie 3: {dm.FU_OVERDUE}"), 0)
         self.assertEqual(get(r, c, "Kategorie 1: Follow-up aktuell, von fälligen", field="percent"), 100.0)
 
     def test_days_fields_response_and_vital_status(self):
@@ -453,14 +461,6 @@ class FollowUpSopTests(unittest.TestCase):
         self.assertEqual(get(r, s, "ECOG konkret (0-5) im letzten Follow-up", field="base"), 5)
         self.assertEqual([get(r, s, f"Vitalstatus (letztes Follow-up): {v}") for v in ("verstorben", "lebend", dm.MISSING,
                           "ohne Follow-up")], [1, 4, 0, 2])
-
-    def test_follow_up_rows_are_exact_in_the_diagnosis_scope(self):
-        result = cases(datenkranz("c1"), datenkranz("c2", follow_ups=[follow_up("2026-10-01")]), min_cell=5,
-                       scope=dm.SUPPRESS_DIAGNOSES)
-        self.assertEqual(get(result, dm.FU_SECTION, f"Stand am Stichtag: {dm.FU_CURRENT}"), 1)
-        self.assertEqual(get(result, dm.FU_DAYS_SECTION, "Median (Tage)"), 588.0)
-        self.assertTrue(any(n.startswith(dm.FU_NOTE) for n in result["notes"]))
-
 
 class TimelineTests(unittest.TestCase):
     """Zeitstrahl: milestones in days relative to GFK1"""
@@ -529,12 +529,11 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(get(result, self.T, dm.NO_GFK1), 1)
         self.assertEqual(get(result, self.T, "GFK2 (MTB): Fälle"), 1)
 
-    def test_small_cells_hide_count_and_quartiles(self):
+    def test_small_cells_and_their_quartiles_are_exact(self):
         rows = [row(f"a{i}", datenkranz(f"a{i}", follow_ups=[follow_up()] if i < 3 else None)) for i in range(8)]
-        result = run(rows, min_cell=5)
-        self.assertEqual(get(result, self.T, "Erstes Follow-up: Fälle"), "<5")
-        for q in ("1. Quartil", "Median", "3. Quartil"):
-            self.assertEqual(get(result, self.T, f"Erstes Follow-up: {q} (Tage)"), "<5")
+        result = run(rows)
+        self.assertEqual(get(result, self.T, "Erstes Follow-up: Fälle"), 3)
+        self.assertIsInstance(get(result, self.T, "Erstes Follow-up: Median (Tage)"), float)
         self.assertEqual(get(result, self.T, "GFK2 (MTB): Fälle"), 8)
         self.assertEqual(get(result, self.T, "GFK2 (MTB): Median (Tage)"), 41.0)
 
@@ -612,20 +611,22 @@ class PeriodSuppressionTests(unittest.TestCase):
         self.assertEqual(series(result, "Rückfragen", dm.P_TNM, "2025-03"), 1)
         self.assertEqual(series(result, "Rückfragen", dm.P_TNM, "2025-04"), 0)
 
-    def test_suppression(self):
-        result = cases(*[datenkranz(f"t{i}", gender="male" if i < 2 else "female") for i in range(7)], min_cell=5)
-        self.assertEqual(get(result, "Geschlecht", "m"), "<5")
-        self.assertIsNone(get(result, "Geschlecht", "m", field="percent"))
-        # w = base - m would reveal m: complementary suppression
-        self.assertEqual(get(result, "Geschlecht", "w"), "<5")
-        self.assertEqual(get(result, "Geschlecht", "d"), 0)          # zero of a large base stays
-        # a base below the threshold hides the value, also a zero
-        self.assertEqual(get(result, "Diagnose: Kodierung", "germlineDiagnoses angegeben, von bestätigten", field="base"), 0)
-        small = cases(*[datenkranz(f"t{i}") for i in range(3)], min_cell=5)
-        self.assertEqual(get(small, "Geschlecht", "m"), "<5")
-        self.assertEqual(get(small, "Geschlecht", "m", field="base"), "<5")
-        self.assertEqual(get(small, "Bearbeitungsdauer medizinisch", "Median (Tage)"), "<5")
-        self.assertEqual(series(small, "Geschlecht", "w", "2025-03"), "<5")
+    def test_nothing_is_suppressed(self):
+        # the oncology matrix is not suppressed (decision of the data holders): small counts, their bases, shares and
+        # statistics of few values are exact, in the matrix and in the time series
+        result = cases(*[datenkranz(f"t{i}", gender="male" if i < 2 else "female") for i in range(3)])
+        self.assertEqual((get(result, "Geschlecht", "m"), get(result, "Geschlecht", "m", field="base"),
+                          get(result, "Geschlecht", "m", field="percent")), (2, 3, 66.7))
+        self.assertEqual(get(result, "Bearbeitungsdauer medizinisch", "Median (Tage)"), 41.0)
+        self.assertEqual(series(result, "Geschlecht", "w", "2025-03"), 1)
+        values = [v for r in result["rows"] for v in r["values"].values()]
+        values += [v for r in result["time_series"]["rows"] for le in r["values"].values() for v in le.values()]
+        self.assertFalse([v for v in values for f in ("value", "base") if isinstance(v[f], str)])
+        self.assertFalse({"min_cell", "suppress_scope", "suppressed"} & set(result))
+        self.assertTrue(any(n.startswith("Keine Zellen unterdrückt") for n in result["notes"]))
+        self.assertFalse(any("<5" in n for n in result["notes"]))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            dm.main(["in.json", "--min-cell", "5"])      # the options are gone
 
 
 class RobustnessTests(unittest.TestCase):
@@ -757,36 +758,12 @@ class PropertyTests(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)))
 
 
-def hidden(v):
-    return isinstance(v["value"], str) and v["value"].startswith("<")
-
-
-def single_suppressed_groups(result):
-    """The groups of count cells (row across the entities, partition in a column, row across the periods) with
-    exactly one suppressed cell beside a nonzero visible one: that cell could be derived"""
-    entities, periods = result["entities"], result["time_series"]["periods"]
-    rows = [(r, s) for r, s in zip(result["rows"], result["time_series"]["rows"]) if r["unit"] == dm.COUNT]
-
-    def at(pair, le, p):
-        return pair[0]["values"][le] if p == dm.WHOLE else pair[1]["values"][le][p]
-
-    groups = [[at(x, le, p) for le in entities] for x in rows for p in [dm.WHOLE] + periods]
-    groups += [[at(x, le, p) for p in [dm.WHOLE] + periods] for x in rows for le in entities]
-    parts = {}
-    for x in rows:
-        part = dm.partition_of(SimpleNamespace(section=x[0]["section"], item=x[0]["item"]))
-        if part:
-            parts.setdefault(part, []).append(x)
-    groups += [[at(x, le, p) for x in xs] for xs in parts.values() for le in entities for p in [dm.WHOLE] + periods]
-    return [g for g in groups if sum(hidden(v) for v in g) == 1
-            and any(not hidden(v) and v["value"] for v in g)]
-
-
 class LeakTests(unittest.TestCase):
 
-    def test_notes_title_and_json_reveal_no_small_counts_or_case_keys(self):
+    def test_json_has_no_case_keys_and_rueckfragen_per_le_only(self):
         rows = [row(str(i), datenkranz(f"t{i}", submitted=f"2025-03-{10 + i}")) for i in range(3)]
         rows.append(row("x", datenkranz("tx", type_="test")))
+        rows.append(row("b0", datenkranz("tb", submitted="2025-03-20"), site="LE-B"))
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "in.json")
             with open(path, "w") as f:
@@ -794,267 +771,24 @@ class LeakTests(unittest.TestCase):
                             **({"case": "a", "content": datenkranz("tp", tnm=("cT1",), submitted="2025-03-01")} if i == 0 else {})}
                            for i, r in enumerate(rows)], f)
             out = os.path.join(tmp, "m")
-            dm.main([path, "--output", out, "--reference-date", "2026-11-01", "--rueckfragen-per-le", "--suppress-scope", "all"])
+            with contextlib.redirect_stderr(io.StringIO()):
+                dm.main([path, "--output", out, "--reference-date", "2026-11-01", "--rueckfragen-per-le"])
             with open(out + ".json", encoding="utf-8") as f:
                 text = f.read()
-            per_le = sorted(name for name in os.listdir(tmp) if name.startswith("m_rueckfragen_"))
-            with open(os.path.join(tmp, per_le[0]), encoding="utf-8-sig") as f:
+            names = sorted(name for name in os.listdir(tmp) if "rueckfragen" in name)
+            with open(os.path.join(tmp, "m_rueckfragen_LE-A.csv"), encoding="utf-8-sig") as f:
                 le_lines = f.read().splitlines()
+            with open(os.path.join(tmp, "m_rueckfragen_LE-B.csv"), encoding="utf-8-sig") as f:
+                b_lines = f.read().splitlines()
         result = json.loads(text)
-        self.assertTrue(result["notes"][0].startswith("<5 Fälle"))
-        self.assertTrue(result["notes"][1].startswith("<5 Testeinreichungen"))
-        self.assertEqual(result["title"], "AUSWERTUNG MTB gesamter Export (Erstmeldungen 03.2025 - 03.2025)")
+        self.assertTrue(result["notes"][0].startswith("4 Fälle"))
         self.assertNotIn("problems", result)
         self.assertNotIn('\\"a\\"', text)           # no case key
-        self.assertEqual(per_le, ["m_rueckfragen_LE-A.csv"])
+        # only the files per LE, not the one of all LEs
+        self.assertEqual(names, ["m_rueckfragen_LE-A.csv", "m_rueckfragen_LE-B.csv"])
         self.assertEqual(len(le_lines), 2)
         self.assertTrue(le_lines[1].startswith(f"LE-A (LE-A-ID);{dm.P_TNM};"))
-
-
-class ComplementarySuppressionTests(unittest.TestCase):
-
-    def test_an_le_cell_is_not_derivable_from_gesamt(self):
-        rows = [row(f"a{i}", datenkranz(f"a{i}", gender="male" if i < 2 else "female")) for i in range(8)]
-        rows += [row(f"b{i}", datenkranz(f"b{i}", gender="male" if i < 9 else "female"), site="LE-B") for i in range(14)]
-        result = run(rows, min_cell=5)
-        self.assertEqual(get(result, "Geschlecht", "m", entity="LE-A"), "<5")
-        # LE-A w = 8 - m would give m; then Gesamt w - LE-B w would give LE-A w, Gesamt m - LE-B m LE-A m
-        self.assertEqual(get(result, "Geschlecht", "w", entity="LE-A"), "<5")
-        self.assertEqual(get(result, "Geschlecht", "w", entity="LE-B"), "<5")
-        self.assertEqual(get(result, "Geschlecht", "m", entity="LE-B"), "<5")
-        self.assertEqual((get(result, "Geschlecht", "m"), get(result, "Geschlecht", "w")), (11, 11))
-        self.assertEqual(single_suppressed_groups(result), [])
-
-    def test_complementary_cells_use_the_primary_marker_and_are_counted(self):
-        rows = [row(f"a{i}", datenkranz(f"a{i}", gender="male" if i < 2 else "female")) for i in range(8)]
-        rows += [row(f"b{i}", datenkranz(f"b{i}", gender="male" if i < 9 else "female"), site="LE-B") for i in range(14)]
-        result = run(rows, min_cell=5)
-        values = [v["value"] for r in result["rows"] for v in r["values"].values()]
-        series_values = [v["value"] for r in result["time_series"]["rows"] for le in r["values"].values()
-                         for v in le.values()]
-        self.assertFalse({x for x in values + series_values if isinstance(x, str)} - {"<5"})
-        counts = result["suppressed"]
-        self.assertGreaterEqual(counts["complementary"], 3)       # LE-A w, LE-B w, LE-B m at least
-        self.assertEqual(counts["primary"] + counts["complementary"], values.count("<5"))
-        series_counts = result["time_series"]["suppressed"]
-        self.assertEqual(series_counts["primary"] + series_counts["complementary"], series_values.count("<5"))
-        self.assertIn("kann daher auch 5 oder mehr", " ".join(result["notes"]))
-
-    def test_a_category_is_not_derivable_from_the_base(self):
-        result = cases(*[datenkranz(f"t{i}", coverage="PKV" if i < 3 else "GKV" if i < 9 else "BG") for i in range(16)],
-                       min_cell=5)
-        self.assertEqual(get(result, "Versicherung", "PKV"), "<5")
-        self.assertEqual(get(result, "Versicherung", "GKV"), "<5")      # the smallest other nonzero
-        self.assertEqual(get(result, "Versicherung", "andere"), 7)
-
-    def test_a_period_is_not_derivable_from_the_whole_period(self):
-        rows = [row(f"m{i}", datenkranz(f"m{i}", submitted="2025-03-05")) for i in range(2)]
-        rows += [row(f"n{i}", datenkranz(f"n{i}", submitted="2025-04-05")) for i in range(6)]
-        rows += [row(f"o{i}", datenkranz(f"o{i}", submitted="2025-05-05")) for i in range(7)]
-        result = run(rows, min_cell=5)
-        self.assertEqual(series(result, "Fälle", CASES, "2025-03"), "<5")
-        self.assertEqual(series(result, "Fälle", CASES, "2025-04"), "<5")
-        self.assertEqual(series(result, "Fälle", CASES, "2025-05"), 7)
-        self.assertEqual(get(result, "Fälle", CASES), 15)
-
-    def test_no_group_with_a_single_suppressed_cell(self):
-        for seed in range(2):
-            result = run(random_submissions(seed, 150), min_cell=5)
-            self.assertEqual(single_suppressed_groups(result), [], seed)
-
-
-def is_diagnosis(r):
-    return dm.is_diagnosis_row(SimpleNamespace(section=r["section"], item=r["item"]))
-
-
-def scope_groups(result):
-    """The groups of diagnosis count cells the diagnosis scope closes (row across the entities, row across the
-    periods, PARTITIONS and DIAGNOSIS_PARTITIONS in a column), as lists of (row index, entity, period)"""
-    entities, periods = result["entities"], [dm.WHOLE] + result["time_series"]["periods"]
-    rows = [i for i, r in enumerate(result["rows"]) if r["unit"] == dm.COUNT and is_diagnosis(r)]
-    groups = [[(i, le, p) for le in entities] for i in rows for p in periods]
-    groups += [[(i, le, p) for p in periods] for i in rows for le in entities]
-    parts = {}
-    for i in rows:
-        r = SimpleNamespace(**result["rows"][i])
-        if dm.partition_of(r):
-            parts.setdefault(dm.partition_of(r), []).append(i)
-        for n, (section, item) in enumerate(dm.DIAGNOSIS_PARTITIONS):
-            if re.fullmatch(section, r.section) and re.match(item, r.item):
-                parts.setdefault(n, []).append(i)
-        for n, keys in enumerate(dm.DIAGNOSIS_KEY_PARTITIONS):
-            if r.key in keys:
-                parts.setdefault(("keys", n), []).append(i)
-    groups += [[(i, le, p) for i in xs] for xs in parts.values() for le in entities for p in periods]
-    return [g for g in groups if len(g) > 1]
-
-
-def cell_at(result, i, le, p):
-    return result["rows"][i]["values"][le] if p == dm.WHOLE else result["time_series"]["rows"][i]["values"][le][p]
-
-
-class DiagnosisScopeTests(unittest.TestCase):
-    """--suppress-scope diagnoses: only the diagnosis rows are suppressed, all other numbers are exact"""
-
-    def test_the_diagnosis_sections_and_bases_exist(self):
-        result = run(random_submissions(1, 60))
-        sections = {r["section"] for r in result["rows"]}
-        self.assertEqual([s for s in dm.DIAGNOSIS_SECTIONS if s not in sections], [])
-        keys = {r["key"] for r in result["rows"]}
-        labels = {r["base_label"] for r in result["rows"]}
-        self.assertEqual([k for k in dm.DIAGNOSIS_BASES.values() if k not in keys], [])
-        self.assertEqual([b for b in dm.DIAGNOSIS_BASES if b not in labels], [])
-        self.assertEqual([x for x in dm.DIAGNOSIS_ITEMS if f"{x[0]} | {x[1]}" not in keys], [])
-        self.assertEqual([k for x in dm.DIAGNOSIS_KEY_PARTITIONS + dm.DIAGNOSIS_LINKED for k in x if k not in keys], [])
-        for section, item in dm.DIAGNOSIS_PARTITIONS:
-            self.assertGreater(sum(1 for r in result["rows"] if re.fullmatch(section, r["section"])
-                                   and re.match(item, r["item"])), 1, item)
-
-    def test_stage_grading_hereditary_and_germline_variant_are_diagnosis_rows(self):
-        germline = {"smallVariants": [{"genomicSource": "germline", "gene": {"code": "BRCA1"}}]}
-        result = cases(*[datenkranz(f"t{i}", grading=None if i < 2 else "3", tnm=() if i == 0 else ("cT2", "cN1", "cM0"),
-                                    disease="hereditary" if i == 0 else "oncological",
-                                    molecular=germline if i == 1 else None) for i in range(8)],
-                       min_cell=5, scope=dm.SUPPRESS_DIAGNOSES)
-        self.assertEqual(get(result, dm.GRADING_SECTION, dm.MISSING), "<5")
-        self.assertEqual(get(result, dm.GRADING_SECTION, "3 (schlecht differenziert)"), "<5")        # 8 - 2: complementary in the partition
-        # the fill rate is the cases minus "nicht angegeben": suppressed with it
-        self.assertEqual(get(result, dm.FILL_CASES, "case.diagnosisOd.grading"), "<5")
-        self.assertEqual(get(result, dm.STAGE_SECTION, "kein TNM"), "<5")
-        self.assertEqual(get(result, dm.FILL_CASES, "case.diagnosisOd.tnmClassifications"), "<5")
-        self.assertEqual(get(result, dm.FILL_CASES, "TNM oder additionalClassification"), "<5")   # = TNM here
-        self.assertEqual(get(result, "Fälle", "davon hereditär (diseaseType hereditary)"), "<5")
-        self.assertEqual(get(result, "Molekulare Befunde", "Keimbahnvariante berichtet (genomicSource germline)"), "<5")
-        self.assertEqual(get(result, "Fälle", CASES), 8)
-        self.assertEqual(get(result, "ECOG bei Einschluss", "1"), 8)
-        self.assertEqual(get(result, "Füllgrad optionaler Felder (Fälle)", "case.priorProcedures"), 0)
-
-    def test_only_diagnosis_rows_are_suppressed(self):
-        result = cases(*[datenkranz(f"t{i}", gender="male" if i < 2 else "female", main="C50.9" if i < 2 else "C34.1")
-                         for i in range(7)], min_cell=5, scope=dm.SUPPRESS_DIAGNOSES)
-        self.assertEqual(result["suppress_scope"], dm.SUPPRESS_DIAGNOSES)
-        self.assertEqual((get(result, "Geschlecht", "m"), get(result, "Geschlecht", "m", field="percent")), (2, 28.6))
-        self.assertEqual(get(result, "Tumorentität (Hauptdiagnose", "Mamma (C50)"), "<5")
-        self.assertEqual(get(result, "Tumorentität (Hauptdiagnose", "Lunge (C33-C34)"), "<5")   # 7 - Mamma
-        self.assertEqual(get(result, "Bearbeitungsdauer medizinisch", "Median (Tage)"), 41.0)
-        self.assertTrue(result["notes"][0].startswith("7 Fälle"))
-        self.assertTrue(any(n.startswith("Unterdrückt werden nur die Diagnosezeilen") for n in result["notes"]))
-        few = cases(*[datenkranz(f"t{i}") for i in range(3)], min_cell=5, scope=dm.SUPPRESS_DIAGNOSES)
-        self.assertEqual(get(few, "Fälle", CASES), 3)
-        self.assertEqual(get(few, "Tumorentität (Hauptdiagnose", "Mamma (C50)"), "<5")   # a 0 of 3 cases, too
-
-    def test_a_diagnosis_cell_is_not_the_exact_total_minus_shown_zeros(self):
-        # LE-A: 10 sequenced lung cases without GFK2, 2 breast cases with: "GFK2 dokumentiert" (2) is exact, and
-        # with the other entities shown as 0 the breast cases would be 2
-        rows = [row(f"l{i}", datenkranz(f"l{i}", mtb=None)) for i in range(10)]
-        rows += [row(f"m{i}", datenkranz(f"m{i}", main="C50.9")) for i in range(2)]
-        rows += [row(f"b{i}", datenkranz(f"b{i}", main="C50.9"), site="LE-B") for i in range(9)]
-        result = run(rows, min_cell=5, scope=dm.SUPPRESS_DIAGNOSES)
-        self.assertEqual(get(result, "GFK2 (MTB): Ergebnis (sequenzierte", "GFK2 dokumentiert (plan.carePlanOd)", "LE-A"), 2)
-        s = "GFK2 (MTB): Ergebnis nach Tumorentität"
-        shown = [r["values"]["LE-A"]["value"] for r in result["rows"]
-                 if r["section"].startswith(s) and r["item"].endswith(": GFK2 dokumentiert")]
-        self.assertEqual(get(result, s, "Mamma (C50): GFK2 dokumentiert", "LE-A"), "<5")
-        self.assertGreaterEqual(shown.count("<5"), 2, shown)
-        self.assertEqual(get(result, s, "Lunge (C33-C34): GFK2 dokumentiert", "LE-A"), "<5")   # the 0 beside LE-B's 0
-        # the base of a row that is the count of a suppressed diagnosis row is suppressed with it
-        self.assertEqual(get(result, "Tumorentität (sequenzierte", "Lunge (C33-C34)", "LE-A"), "<5")
-        self.assertEqual(get(result, s, "Lunge (C33-C34): GFK2 dokumentiert", "LE-A", "base"), "<5")
-        self.assertEqual(single_scope_groups(result), [])
-
-    def test_non_diagnosis_cells_exact_and_no_suppressed_cell_follows_from_shown_ones(self):
-        for seed, n in ((0, 150), (3, 40), (5, 15)):
-            with self.subTest(seed=seed):
-                rows = random_submissions(seed, n)
-                full = run(rows, resolution=dm.QUARTER)
-                result = run(rows, min_cell=5, resolution=dm.QUARTER, scope=dm.SUPPRESS_DIAGNOSES)
-                hidden_cells = 0
-                for i, (r, f) in enumerate(zip(result["rows"], full["rows"])):
-                    for le in result["entities"]:
-                        for p in [dm.WHOLE] + result["time_series"]["periods"]:
-                            shown, true = cell_at(result, i, le, p), cell_at(full, i, le, p)
-                            if is_diagnosis(r):
-                                hidden_cells += hidden(shown)
-                                if not hidden(shown) and shown["base"] != "<5":
-                                    self.assertEqual(shown, true, (r["key"], le, p))
-                            else:
-                                self.assertEqual(shown, true, (r["key"], le, p))
-                self.assertGreater(hidden_cells, 0)
-                self.assertEqual(single_scope_groups(result), [])
-                # linked diagnosis rows are suppressed together
-                index = {r["key"]: i for i, r in enumerate(result["rows"])}
-                for a, b in dm.DIAGNOSIS_LINKED:
-                    for le in result["entities"]:
-                        for p in [dm.WHOLE] + result["time_series"]["periods"]:
-                            self.assertEqual(hidden(cell_at(result, index[a], le, p)),
-                                             hidden(cell_at(result, index[b], le, p)), (a, le, p))
-                # a base that is a count of another row is suppressed where that count is
-                index = {r["key"]: i for i, r in enumerate(result["rows"])}
-                for j, r in enumerate(result["rows"]):
-                    if r["base_label"] in dm.DIAGNOSIS_BASES:
-                        for le in result["entities"]:
-                            if hidden(cell_at(result, index[dm.DIAGNOSIS_BASES[r["base_label"]]], le, dm.WHOLE)):
-                                self.assertEqual(cell_at(result, j, le, dm.WHOLE)["base"], "<5", (r["key"], le))
-
-    def test_scope_all_is_unchanged_and_an_unknown_scope_is_refused(self):
-        # the previous version of the script (before --suppress-scope), from the git history
-        try:
-            source = subprocess.run(["git", "show", f"{PREVIOUS}:scripts/dnpm_evaluation_matrix/dnpm_evaluation_matrix.py"],
-                                    cwd=os.path.dirname(os.path.abspath(__file__)), capture_output=True, check=True).stdout
-        except (OSError, subprocess.CalledProcessError):
-            self.skipTest(f"commit {PREVIOUS} not available")
-        with tempfile.TemporaryDirectory() as tmp:
-            with open(os.path.join(tmp, "previous_matrix.py"), "wb") as f:
-                f.write(source)
-            spec = importlib.util.spec_from_file_location("previous_matrix", os.path.join(tmp, "previous_matrix.py"))
-            previous = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(previous)
-            for seed, n in ((2, 40), (4, 150)):
-                rows = random_submissions(seed, n)
-                path = os.path.join(tmp, "in.json")
-                with open(path, "w") as f:
-                    json.dump([{"case": r.case, "site": r.site, "submittedAt": r.submitted_at, "content": r.content}
-                               for r in rows], f)
-                outputs = []
-                for name, main, scope in (("new", dm.main, ["--suppress-scope", "all"]), ("old", previous.main, [])):
-                    out = os.path.join(tmp, name)
-                    # without the rows and the note added since (follow-up after the SOP)
-                    with contextlib.redirect_stderr(io.StringIO()), without_follow_up_sop():
-                        main([path, "--output", out, "--reference-date", "2026-11-01", "--resolution", "quarter", *scope])
-                    files = {}
-                    for suffix in (".json", ".csv", "_zeitreihe.csv", "_rueckfragen.csv"):
-                        with open(out + suffix, "rb") as f:
-                            files[suffix] = f.read()
-                    outputs.append(files)
-                new, old = outputs
-                self.assertEqual(json.loads(new.pop(".json")), {**json.loads(old.pop(".json")), "suppress_scope": "all"})
-                self.assertEqual(new, old)      # the CSVs byte by byte
-        with self.assertRaises(ValueError):
-            run(random_submissions(1, 10), scope="none")
-
-
-@contextlib.contextmanager
-def without_follow_up_sop():
-    """dm.run (and dm.main) without the follow-up rows and note after the SOP (added after PREVIOUS)"""
-    matrix_rows, run_ = dm.matrix_rows, dm.run_passes
-
-    def rows(*args, **kwargs):
-        return [r for r in matrix_rows(*args, **kwargs) if r.section not in dm.FU_SECTIONS]
-
-    def run(*args, **kwargs):
-        result = run_(*args, **kwargs)
-        result["notes"] = [n for n in result["notes"] if not n.startswith(dm.FU_NOTE)]
-        return result
-    dm.matrix_rows, dm.run_passes = rows, run
-    try:
-        yield
-    finally:
-        dm.matrix_rows, dm.run_passes = matrix_rows, run_
-
-
-def single_scope_groups(result):
-    """The diagnosis groups with exactly one suppressed cell: with the exact totals, that cell could be derived"""
-    return [g for g in scope_groups(result) if sum(hidden(cell_at(result, *k)) for k in g) == 1]
+        self.assertEqual(len(b_lines), 1)               # the header only: LE-B has no Rückfrage
 
 
 class ReviewTests(unittest.TestCase):
@@ -1089,6 +823,118 @@ class ReviewTests(unittest.TestCase):
         self.assertFalse(any(r["item"].endswith("(DIP: lost to follow-up)") for r in result["rows"]))
 
 
+class Review20261125Tests(unittest.TestCase):
+    """Fixes after the review of 25.11.2026 (synthetic data)"""
+
+    def test_a_consent_starting_after_the_date_is_not_valid_yet_and_the_end_day_is(self):
+        ref = date(2026, 11, 24)
+        later = broad_consent(start="2027-01-01")
+        self.assertFalse(dm.permits_research_use([{"scope": later}], ref))
+        self.assertTrue(dm.permits_research_use([{"scope": broad_consent(start="2026-11-24")}], ref))
+        ends = broad_consent(start="2025-01-01")
+        ends["provision"]["provision"][0]["period"]["end"] = "2026-11-24"
+        self.assertTrue(dm.permits_research_use([{"scope": ends}], ref))
+        self.assertFalse(dm.permits_research_use([{"scope": ends}], date(2026, 11, 25)))
+        result = cases(datenkranz("t1", consents=[later], submitted="2025-03-01"))
+        self.assertEqual(get(result, "Einwilligung", "Broad Consent gültig zum Stichtag"), 0)
+
+    def test_qs12_checks_the_dip_reason_too(self):
+        rows = [row("a", datenkranz("t1", submitted="2026-07-01", gfk1="2026-06-01", mtb="2026-06-20",
+                                    mv_consent_date="2026-05-01"), reason="technical-issues"),
+                row("b", datenkranz("t2", submitted="2026-05-01", gfk1="2026-04-01", mtb="2026-04-20",
+                                    mv_consent_date="2026-03-01"), reason="technical-issues")]
+        found = problems(run(rows, cutoff=date(2026, 11, 1)), dm.P_JUSTIFICATION)
+        self.assertEqual([(p["case"], p["detail"]) for p in found],
+                         [(rows[0].case, "reasonResearchConsentMissing (DIP): technical-issues")])   # before 06/2026: none
+
+    def test_gfk2_on_the_day_of_gfk1_is_counted_apart_from_the_statistics(self):
+        result = cases(datenkranz("t1", gfk1="2025-01-10", mtb="2025-01-10"), datenkranz("t2", gfk1="2025-01-10", mtb="2025-02-20"),
+                       datenkranz("t3", gfk1="2025-01-10", mtb="2025-02-09"))
+        s = "Bearbeitungsdauer medizinisch (GFK1 bis GFK2)"
+        self.assertEqual(get(result, s, "Dauer berechenbar"), 3)
+        self.assertEqual(get(result, s, dm.SAME_DAY), 1)
+        self.assertEqual(get(result, s, "Minimum (Tage)"), 30.0)
+        self.assertEqual(get(result, s, "Median (Tage)"), 35.5)
+        self.assertEqual(len(problems(result, dm.P_SHORT_MEDICAL)), 1)    # still a Rückfrage
+
+    def test_the_follow_up_window_counts_back_from_the_reference_date(self):
+        # 30.11. is within the 3 months before 28.02.; adding 3 months to it gives 28.02. and made it overdue
+        self.assertTrue(dm.within([date(2025, 11, 30)], 3, date(2026, 2, 28)))
+        self.assertFalse(dm.within([date(2025, 11, 28)], 3, date(2026, 2, 28)))     # exactly one interval before
+        self.assertTrue(dm.within([date(2026, 2, 28)], 3, date(2026, 2, 28)))
+        self.assertFalse(dm.within([date(2026, 3, 1)], 3, date(2026, 2, 28)))
+
+    def test_a_case_is_dated_by_its_earliest_initial_submission_and_times_are_parsed(self):
+        rows = [row("a", datenkranz("t2", submitted="2025-05-02"), "2025-05-02T10:00:00+02:00"),
+                row("a", datenkranz("t1", submitted="2025-04-30"), "2025-04-30T23:30:00-02:00")]
+        case = dm.build_cases(rows)[0][0]
+        self.assertEqual(case.initial.content["metaData"]["tanC"], "t1")
+        result = run(rows)
+        self.assertEqual(result["time_series"]["periods"][0], "2025-04")
+        self.assertEqual(series(result, "Fälle", CASES, "2025-04"), 1)
+        # time zones: 23:30 -02:00 is 01:30 UTC of the next day, after 00:30 UTC
+        early = dm.SubmissionRow("k", "2025-05-01T00:30:00+00:00", {}, "LE-A")
+        late = dm.SubmissionRow("k", "2025-04-30T23:30:00-02:00", {}, "LE-A")
+        self.assertLess(dm.submitted_order(early), dm.submitted_order(late))
+
+    def test_an_empty_plan_is_no_documented_gfk2(self):
+        content = datenkranz("t1", mtb=None)
+        content["plan"] = {}
+        result = cases(content, datenkranz("t2"))
+        self.assertEqual(get(result, "GFK2 (MTB): Ergebnis (sequenzierte", "GFK2 dokumentiert (plan.carePlanOd)"), 1)
+
+
+class Review20261126Tests(unittest.TestCase):
+    """Fixes after the cross-model review of 26.11.2026 (synthetic data)"""
+
+    def evaluated(self, *contents, ref=date(2026, 11, 1)):
+        case = dm.build_cases([row("a", c) for c in contents])[0][0]
+        return dm.evaluate_case(case, ref, 14)
+
+    def test_an_empty_care_plan_is_no_gfk2_and_doesnt_displace_an_earlier_plan(self):
+        empty = datenkranz("t1", mtb=None)
+        empty["plan"] = {"carePlanOd": {}}
+        result = cases(empty, datenkranz("t2"))
+        self.assertEqual(get(result, "GFK2 (MTB): Ergebnis (sequenzierte", "GFK2 dokumentiert (plan.carePlanOd)"), 1)
+        populated = datenkranz("t1", submitted="2025-03-01", therapies=[therapy_rec("r1")])
+        later = datenkranz("t2", type_="followup", submitted="2025-04-01", mtb=None)
+        later["plan"] = {"carePlanOd": {}}
+        e = self.evaluated(populated, later)
+        self.assertTrue(e.has_plan)
+        self.assertEqual(len(e.therapies), 1)
+        self.assertTrue(self.evaluated(datenkranz("t1", mtb="2025-02-20")).has_plan)     # a plan with only its date
+
+    def test_month_dates_are_contacts_and_the_first_follow_up_is_the_earliest(self):
+        e = self.evaluated(datenkranz("t1", mtb="2025-02-20", follow_ups=[follow_up("2026-10")]))
+        self.assertEqual(e.contact_dates, [date(2026, 10, 15)])
+        self.assertNotEqual(dm.follow_up_state(e, date(2026, 11, 1)), dm.FU_LOST)
+        e = self.evaluated(datenkranz("t1", mtb="2025-02-20", follow_ups=[follow_up("2026-09-01"), follow_up("2025-03-10")]))
+        self.assertEqual(e.first_fu_days, 18)
+        self.assertEqual(e.fu_dates, sorted(e.fu_dates))
+
+    def test_a_death_after_the_reference_date_doesnt_change_the_state_at_it(self):
+        dead_later = follow_up("2026-12-01", vital="deceased", death="2026-11-20")
+        self.assertFalse(self.evaluated(datenkranz("t1", follow_ups=[dead_later])).deceased)
+        self.assertTrue(self.evaluated(datenkranz("t1", follow_ups=[dead_later]), ref=date(2026, 12, 15)).deceased)
+
+    def test_a_permit_starting_after_the_date_doesnt_cancel_a_valid_one(self):
+        ref = date(2026, 11, 1)
+        valid, renewal = broad_consent(start="2024-06-01"), broad_consent(start="2027-01-01")
+        self.assertTrue(dm.permits_research_use([{"scope": valid}, {"scope": renewal}], ref))
+        self.assertTrue(dm.permits_research_use([{"scope": renewal}, {"scope": valid}], ref))
+        self.assertFalse(dm.permits_research_use([{"scope": renewal}], ref))
+        self.assertFalse(dm.permits_research_use([{"scope": valid}, {"scope": broad_consent(start="2024-06-01", kind="deny")}], ref))
+
+    def test_without_a_submission_date_the_earliest_instant_dates_the_case(self):
+        a, b = datenkranz("t1"), datenkranz("t2")
+        for c in (a, b):
+            del c["metaData"]["submission"]["date"]
+        rows = [row("a", a, "2025-03-31T23:30:00-02:00"), row("a", b, "2025-04-01T00:30:00Z")]
+        case = dm.build_cases(rows)[0][0]
+        self.assertEqual(case.initial.content["metaData"]["tanC"], "t2")
+        self.assertEqual(dm.submission_date(case.initial), date(2025, 4, 1))
+
+
 class InputOutputTests(unittest.TestCase):
 
     def test_reads_the_export_with_reasons(self):
@@ -1120,7 +966,8 @@ class InputOutputTests(unittest.TestCase):
                 json.dump([{"case": "a", "site": "LE-A", "submittedAt": "2025-03-01T00:00:00",
                             "content": datenkranz("t1", mtb="2025-04-01")}], f)
             out = os.path.join(tmp, "matrix")
-            dm.main([path, "--output", out, "--min-cell", "1", "--reference-date", "2026-11-01"])
+            with contextlib.redirect_stderr(io.StringIO()):
+                dm.main([path, "--output", out, "--reference-date", "2026-11-01"])
             with open(out + ".json", encoding="utf-8") as f:
                 result = json.load(f)
             with open(out + ".csv", encoding="utf-8-sig") as f:
@@ -1129,8 +976,8 @@ class InputOutputTests(unittest.TestCase):
                 series_lines = f.read().splitlines()
             with open(out + "_rueckfragen.csv", encoding="utf-8-sig") as f:
                 problem_lines = f.read().splitlines()
-        self.assertEqual(set(result), {"title", "period", "min_cell", "suppress_scope", "suppressed", "reference_date", "cutoff", "entities", "labels",
-                                       "rows", "notes", "time_series"})       # no case keys
+        self.assertEqual(set(result), {"title", "period", "reference_date", "cutoff", "entities", "labels", "rows",
+                                       "notes", "time_series"})       # no case keys
         self.assertEqual(lines[0], "LE;Abschnitt;Kategorie;Einheit;Wert;Bezug;Basis;Anteil (%)")
         self.assertIn("Gesamt;Geschlecht;w;Anzahl;1;Fälle;1;100,0", lines)
         self.assertIn("LE-A (LE-A-ID);2025-03;Geschlecht;w;Anzahl;1;Fälle;1;100,0", series_lines)
@@ -1199,10 +1046,28 @@ class StreamingTests(unittest.TestCase):
                     with self.subTest(kind=type(data).__name__, **kwargs), mock_chunk(5):
                         start, end, cutoff = kwargs.get("start"), kwargs.get("end"), kwargs.get("cutoff")
                         rows, failures = dm.load_submissions(path)
-                        expected = dm.run(rows, failures, start, end, cutoff or REFERENCE, 1, cutoff=cutoff)
-                        actual = dm.run_file(dm.InputFile(path), start, end, cutoff or REFERENCE, 1, cutoff=cutoff)
+                        expected = dm.run(rows, failures, start, end, cutoff or REFERENCE, cutoff=cutoff)
+                        actual = dm.run_file(dm.InputFile(path), start, end, cutoff or REFERENCE, cutoff=cutoff)
                         self.assertEqual(actual, expected)
                         self.assertEqual(get(actual, "Fälle", CASES), 9 if start else 2 if cutoff else 10)
+
+    def test_parsed_input_gives_the_same_rows(self):
+        # submissions_from (monthly_matrices parses the export once for RD and oncology) = load_submissions
+        failures = [{"site": "LE-A", "useCase": "MTB", "patient": "x", "episodeOfCare": "e1", "tan": "tx",
+                     "submittedAt": "2025-03-01T10:00:00", "error": "conversion failed"}]
+        inputs = [export_json(self.rows(), failures), export_json(self.rows(), columns_with_reason=False),
+                  [{"case": r.case, "site": r.site, "submittedAt": r.submitted_at, "content": r.content,
+                    **({"reasonResearchConsentMissing": "abgelehnt"} if i == 0 else {})} for i, r in enumerate(self.rows())],
+                  [{"case": r.case, "site": r.site, "submittedAt": r.submitted_at, "content": r.content} for r in self.rows()]]
+        with tempfile.TemporaryDirectory() as tmp:
+            for n, data in enumerate(inputs):
+                with self.subTest(input=n):
+                    path = self.write(tmp, data)
+                    rows, failed = dm.load_submissions(path)
+                    rows2, failed2 = dm.submissions_from(json.loads(json.dumps(data)), path)
+                    self.assertEqual([(r.case, r.submitted_at, r.content, r.site, r.reason) for r in rows],
+                                     [(r.case, r.submitted_at, r.content, r.site, r.reason) for r in rows2])
+                    self.assertEqual(failed, failed2)
 
     def test_broken_inputs_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1233,6 +1098,82 @@ class StreamingTests(unittest.TestCase):
         lines = out.getvalue().splitlines()
         self.assertEqual(len(lines), 11)
         self.assertEqual(lines[-1].strip(), "Durchgang 1/2: 100 % von 2.0 GB")
+
+
+class MergeReviewTests(unittest.TestCase):
+    """Findings of the review of the merge with upstream 0.1.6 (streaming input)"""
+
+    def test_run_reads_an_iterator_like_a_list(self):
+        rows = [row("a", datenkranz("t1")), row("b", datenkranz("t2", submitted="2025-04-01"))]
+        self.assertEqual(dm.run(iter(rows), iter([]), None, None, REFERENCE), dm.run(rows, [], None, None, REFERENCE))
+
+    def test_a_complete_case_missing_in_the_second_pass_is_refused(self):
+        rows = [row("a", datenkranz("t1")), row("b", datenkranz("t2"))]
+        passes = {1: rows, 2: rows[:1]}
+        with self.assertRaisesRegex(ValueError, "changed between the two passes"):
+            dm.run_passes(lambda n: iter(passes[n]), lambda: [], None, None, REFERENCE)
+
+    def test_a_number_cut_at_the_end_of_the_buffer(self):
+        data = export_json([row("a", datenkranz("t1"))])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "in.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"count": 1.5, "flag": 12e1, ' + json.dumps(data)[1:])
+            for chunk in range(1, 40):      # some chunk ends the buffer after "1." or "12e"
+                with self.subTest(chunk=chunk), mock_chunk(chunk):
+                    rows, _ = dm.load_submissions(path)
+                    self.assertEqual(len(rows), 1)
+
+    def test_columns_after_the_rows_keep_the_reason(self):
+        data = export_json([row("a", datenkranz("t1"))])
+        data["tables"][0]["rows"][0]["reasonResearchConsentMissing"] = "technical-issues"
+        table = data["tables"][0]
+        data["tables"][0] = {"name": table["name"], "rows": table["rows"], "columns": table["columns"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "in.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            rows, _ = dm.load_submissions(path)
+        self.assertEqual(rows[0].reason, "technical-issues")
+
+    def test_reason_column_known_from_rows_after_the_cutoff(self):
+        entries = [{"case": "a", "site": "LE-A", "submittedAt": "2025-03-01T10:00:00", "content": datenkranz("t1")},
+                   {"case": "b", "site": "LE-A", "submittedAt": "2025-06-01T10:00:00",
+                    "content": datenkranz("t2", submitted="2025-06-01"), "reasonResearchConsentMissing": None}]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "in.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(entries, f)
+            cutoff = date(2025, 4, 15)
+            rows, failures = dm.load_submissions(path)
+            expected = dm.run(rows, failures, None, None, cutoff, cutoff=cutoff)
+            actual = dm.run_file(dm.InputFile(path), None, None, cutoff, cutoff=cutoff)
+        self.assertEqual(actual, expected)
+        self.assertFalse(any("keine Spalte reasonResearchConsentMissing" in n for n in actual["notes"]))
+
+    def test_a_failure_before_the_latest_converted_submission_is_not_stale(self):
+        rows = [row("a", datenkranz("t1", submitted="2025-03-10"))]
+        failures = [dm.Failure("LE-A", json.dumps(["LE-A", "a"]), "t0", "2025-03-01T00:00:00", "conversion failed")]
+        result = run(rows, failures=failures)
+        self.assertEqual(get(result, "Fälle", "davon Episode mit älterem Stand ausgewertet (eine spätere Einreichung nicht konvertierbar)"), 0)
+        self.assertFalse(problems(result, dm.P_NOT_CONVERTED)[0]["detail"].startswith("Episode mit älterem Stand"))
+
+    def test_therapy_started_after_the_reference_date_is_not_started_yet(self):
+        later = {"reference": "r1", "therapyStartDate": "2026-12-01"}
+        result = cases(datenkranz("t1", therapies=[therapy_rec("r1")], follow_ups=[follow_up(therapies=[later])]))
+        s = dm.FU_SECTION
+        self.assertEqual(get(result, s, "Kategorie 1: empfohlene Therapie begonnen (Intervall 3 Monate)"), 0)
+        self.assertEqual(get(result, s, "Kategorie 2: Therapie- oder Studienempfehlung, nicht begonnen (Intervall 3 Monate)"), 1)
+
+    def test_death_in_a_month_after_the_reference_date(self):
+        result = cases(datenkranz("t1", follow_ups=[follow_up(fu_date="2026-12", vital="deceased", death="2026-12")]))
+        self.assertEqual(get(result, dm.FU_SECTION, f"Stand am Stichtag: {dm.FU_DECEASED}"), 0)
+
+    def test_a_later_plan_without_care_plan_keeps_the_documented_gfk2(self):
+        later = datenkranz("t2", type_="followup", submitted="2025-05-01", therapies=[therapy_rec("r1")])
+        del later["plan"]["carePlanOd"]
+        result = run([row("a", datenkranz("t1")), row("a", later)])
+        self.assertEqual(get(result, "GFK2 (MTB): Ergebnis", "GFK2 dokumentiert (plan.carePlanOd)"), 1)
 
 
 @contextlib.contextmanager

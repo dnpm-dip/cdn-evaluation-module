@@ -210,10 +210,11 @@ class DatenkranzModeTests(Base):
         # RD: only the values of the diagnosis codes are suppressed (decision of 26.11.2026), the case count is exact
         self.assertEqual(cases, [("LE-A", "40"), ("LE-B", "3")])
         self.assertEqual(db.execute("SELECT wert_text FROM wert_stand_alle_le w JOIN kennzahl k USING (zeile) WHERE k.kategorie LIKE 'Fallzahl%'").fetchone()[0], "43")
-        # LE-B has 3 cases with ORPHA:558; with two LEs, Gesamt minus LE-A would give them away: LE-A is suppressed too
+        # LE-B has 3 cases with ORPHA:558: suppressed; LE-A (40) and Gesamt exact (no complementary suppression,
+        # 27.11.2026: Gesamt minus LE-A gives LE-B's count, accepted)
         code = lambda kat: db.execute("SELECT le, wert_text FROM wert_stand w JOIN kennzahl k USING (zeile) WHERE w.zeitraum = 'gesamt' "
                                       "AND k.kategorie = ? ORDER BY le", [kat]).fetchall()
-        self.assertEqual(code("case.diagnosisRd.diagnoses[].code: ORPHA:558"), [("LE-A", "<5"), ("LE-B", "<5")])
+        self.assertEqual(code("case.diagnosisRd.diagnoses[].code: ORPHA:558"), [("LE-A", "40"), ("LE-B", "<5")])
         # every suppressed cell is a value of a diagnosis code; the fill rate of the codes and every other row are exact
         rows = db.execute("SELECT DISTINCT k.kategorie FROM wert_stand w JOIN kennzahl k USING (zeile) WHERE w.unterdrueckt = 1").fetchall()
         self.assertTrue(rows)
@@ -232,16 +233,18 @@ class DatenkranzModeTests(Base):
         self.assertIn("case.diagnosisRd.diagnoses[].code: " + bd.OTHER_CODES.format(min_cell=5), kats)
         self.assertIn("case.diagnosisRd.diagnoses[].code: ORPHA:558", kats)      # 43 cases
 
-    def test_no_group_with_one_suppressed_cell(self):
+    def test_only_small_code_counts_of_the_les(self):
+        # primary only (27.11.2026): a code count 1 to 4 of an LE is suppressed, Gesamt and every other cell exact
         p = self.write("export.json", submissions(n_a=23, n_b=9))
         _, db = self.build("--mode", "datenkranz", p)
-        per = {}
-        for zeile, le, unt in db.execute("SELECT zeile, le, unterdrueckt FROM wert_stand WHERE zeitraum = 'gesamt'"):
-            per.setdefault(zeile, []).append(unt)
-        for zeile, unt in db.execute("SELECT zeile, unterdrueckt FROM wert_stand_alle_le WHERE zeitraum = 'gesamt'"):
-            per.setdefault(zeile, []).append(unt)
-        for zeile, flags in per.items():
-            self.assertNotEqual(sum(flags), 1, f"row {zeile}: exactly one suppressed cell over Gesamt and the LEs")
+        rows = db.execute("SELECT k.kategorie, w.wert_text, w.unterdrueckt FROM wert_stand w JOIN kennzahl k USING (zeile) "
+                          "WHERE w.zeitraum = 'gesamt'").fetchall()
+        self.assertTrue(any(u for _, _, u in rows))
+        for kat, text, u in rows:
+            if u:
+                self.assertTrue(kat.startswith("case.diagnosisRd.diagnoses[].code: "), kat)
+                self.assertEqual(text, "<5")
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM wert_stand_alle_le WHERE unterdrueckt = 1").fetchone()[0], 0)
 
     def test_walk_and_names(self):
         self.assertEqual(list(bd.walk({"a": [{"b": 1}, {"b": None}], "c": ""})), [("a[].b", 1)])

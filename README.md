@@ -95,8 +95,8 @@ run export-datenkranz --site UKT --usecase RD --output /out
 The RD evaluation matrix (Auswertematrix) is computed from such an export by
 `scripts/rd_evaluation_matrix/rd_evaluation_matrix.py`, in Python (standard library only) and on
 the Datenkranz alone, so that it can be shared with the other KDKs. It reports every value in total
-and per Leistungserbringer (counts below 5 of the rows derived from the diagnosis codes suppressed, plus
-complementary cells in these rows so that none can be recomputed from sums, see below), and lists the cases to clarify with their LE
+and per Leistungserbringer (an LE's counts of 1 to 4 in the rows derived from the diagnosis codes suppressed, nothing
+else, see below), and lists the cases to clarify with their LE
 (Rückfragen). Specification: `docs/rd-evaluation-matrix.txt`. Export without `--until`, since later
 follow-ups determine the status of a case, and set the evaluation period in the script instead:
 ```
@@ -113,81 +113,25 @@ total matrix together with matrices per quarter, use `monthly_matrices.py` (belo
 (https://www.orphadata.com/data/xml/en_product7.xml), needed for the disease groups.
 Tests: `python3 -m unittest discover -s scripts/rd_evaluation_matrix`.
 
-Small-cell suppression (`--min-cell`, default 5, 1 disables; `--suppress-scope codes|all`, default `codes`).
-By decision of the data holders (26.11.2026) only the diagnosis codes themselves are suppressed: with `codes` only
-the rows that tell *which* disease a case has, i.e. the rows derived from its diagnosis codes (Orphacode, and the
-ICD-10 codes of the neuromuscular group), are suppressed (`CODE_SECTIONS`, `CODE_ITEMS` in
-`rd_evaluation_matrix.py`):
+Small-cell suppression (`--min-cell`, default 5, 1 disables). By decision of the data holders (26. and 27.11.2026)
+only the diagnosis codes are suppressed, and only primarily: in the rows that tell *which* disease a case has, the
+rows derived from its diagnosis codes (Orphacode, and the ICD-10 codes of the neuromuscular group; `CODE_SECTIONS`,
+`CODE_ITEMS` in `rd_evaluation_matrix.py`), an LE's count of 1 to `--min-cell − 1` is shown as `<5`:
 - `Orphacode` (without Orphacode, `noMatchingCodeExists`),
 - `Erkrankungsgruppen gesamt`, `Erkrankungsgruppen Adult (ab 18)`, `Erkrankungsgruppen Pädiatrisch (unter 18)`,
   each group with its status rows (group × status),
 - the row `Rückfragen an LE (…) | Diagnose ohne Erkrankungsgruppe`.
 
-Every other count, share and duration statistic is shown exactly, also below 5, including the diagnosis status rows
-(`Diagnosestatus (alle Fälle)`, `Diagnoserate (abgeschlossene Fälle)`, `Diagnoserate nach WGS-Seq. Art`,
-`Diagnosestatus nach Altersgruppe`, `Vorbefunde, Status …` and `Vorbefunde nach Jahr, Status …`): they tell whether
-a case has a diagnosis, not which one. The bases of the code rows are suppressed with them (the cases of a disease
-group, base of its status rows), except those that count no code (`EXACT_CODE_BASES`: the cases, the cases of the
-age block of a disease group block). Every suppressed cell, also every complementary one and every one of the
-protection below, is a code cell: the suppression never spills into another row. The complementary suppression
-stays closed within the code rows: per row over the LEs and Gesamt, and per sum relation of a column, also against
-an exact total or margin (e.g. the groups sum to the exact cases of the block, a status summed over the groups is
-the exactly shown `Diagnosestatus` where no case is left unsequenced). The relations are the partitions found from
-the counted sets and those of `sum_relations()`, which also run across sections: a disease group against its four
-status rows and their base, Adult + Pädiatrisch = gesamt, the statuses over the groups against `Diagnosestatus`
-(per age block against `Diagnosestatus nach Altersgruppe`), "ohne Orphacode" against the group "unbekannt: kein
-Orphacode", "Diagnose ohne Erkrankungsgruppe" against the unknown groups, and those a reader knows from the data
-where they hold. Where the only other parts of such a relation are exact or zeros, a zero code cell is suppressed
-instead (preferably one whose row has a nonzero Gesamt), so that a suppressed count isn't the exact total minus
-shown zeros; a zero that is known to be 0 anyway (next to exact zeros, also through other relations, as all counts
-are ≥ 0) is never chosen, and where one side of a relation shows only zeros, a zero of that side is suppressed too
-(in a row the zero of Gesamt). Gesamt is suppressed where it is the count of a single LE, and then complementarily
-within the Gesamt column, also in rows with several LEs. The former scope `diagnoses` (also the status rows) is
-gone; `--suppress-scope diagnoses` is refused with a hint, and results written with it (`"suppress_scope":
-"diagnoses"`) are still read by `fill_template.py` and the dashboard. A code cell's quantity is kept apart from an exact cell
-that happens to count the same cases. `--suppress-scope all` suppresses every row, with
-the same relations. Tested on random synthetic sets (`SumRelationTests`): no relation has exactly one suppressed
-cell. Several files of the same cases (a total matrix and the matrices per quarter) are suppressed
-together (`run_joint`, used by `monthly_matrices.py`): each cell of the total is then also the sum of the same cell
-of the periods (per LE and Gesamt), so that no period follows from the total and the other periods by a single
-relation (tested in `scripts/monthly_matrices`, `JointSuppressionTests`). The losses that have no date (submissions
-that couldn't be converted, episodes without a readable initial submission) are counted in every matrix of a run
-and are equal there, not added up (`NOT_ADDITIVE`). Separate runs are each closed on their own but not together. The submissions of an episode are ordered by `submittedAt` parsed as a time (time zones to UTC), as in the
-oncology matrix; the latest one gives the case's state.
-
-**Protection against the whole system.** The closure closes every single relation, not systems of them: several
-relations, each with two or more suppressed cells, can together still determine a suppressed count (e.g. an LE's
-quarter from two quarter totals, two LE totals and shown zeros; also where every case has a GFK2, the exact row
-"noch keine GFK2" = 0 makes the open cases 0 and the closed cases the exact sequenced cases). After the closure,
-every run therefore checks the whole linear system of all files of the run (`protect` in `rd_evaluation_matrix.py`):
-the relations between single cells as a reader sees them (Gesamt = Σ LEs per row, total = Σ quarters per cell,
-the categories of a section, `sum_relations()`, cells that count the same set in every column), with the zeros
-a reader can infer (all counts are ≥ 0) as constants. A suppressed count follows exactly if it is 0 in every
-solution of the homogeneous system; this is checked with one pseudo-random solution (sparse elimination modulo
-a 61-bit prime), which errs, if at all, towards "follows". As long as a count of 1 to `--min-cell − 1` follows,
-further cells are suppressed (per such count the cheapest one next to it through the suppressed cells: a nonzero
-LE cell of the smallest count first, zeros, Gesamt and the total last; more of them where a count stays
-computable), then the closure again; deterministic (every choice is ordered by the cells, the same output
-whatever `PYTHONHASHSEED`). With `--suppress-scope codes` these further cells are code cells too, zeros included
-where a reader can't infer them. Where a code count can't be protected cell by cell (it stays computable for long,
-or follows even with every code cell suppressed), the whole code block of that column is suppressed (every code
-row of the LE in that file, zeros included), then with Gesamt of the file, then the LE and Gesamt in every file,
-then every column, always the code rows only and never another row; the notes give the number of such columns
-(`suppressed.whole_blocks` in the JSON). **The output is blocked** if a suppressed count still
-followed (it shouldn't): `rd_evaluation_matrix.py` and `monthly_matrices.py` then write nothing (files of the run
-already written are removed, those of an earlier run are left), print the cells (LE, section, item; no counts,
-for the KDK only) and exit with an error. Tested with an independent exact solver (fractions) on random synthetic
-sets, also with tiny LEs, and on the counterexamples of the review (`ProtectionTests`, `JointProtectionTests`).
-Runtime on a synthetic set of 25 LEs, ~710 rows, five quarters and their total (6 files): see the PR (about one
-to two minutes with `codes`, 20 to 35 s with `--suppress-scope all`).
-Not checked: bounds (all counts are ≥ 0, so a suppressed cell is at most a shown count it is part of, e.g. the
-open cases at most "noch keine GFK2") and, with `--suppress-scope all`, the duration statistics, which are hidden
-per file: the extrema and quartiles of the total bound the hidden ones of the periods (all equal where minimum =
-maximum). Known limitation: in a row where only one LE counts, its count is protected, but the zeros of the other LEs
-show where the cases are. The data owners decided (26.11.2026) that
-only the diagnosis codes are suppressed, and that showing the small counts of every other row per LE (diagnosis
-status, sex, age group, insurance, consent, durations of single cases, …) is acceptable; `--suppress-scope all`
-remains as the opt-out.
+The bases of the code rows are suppressed with them where they are 1 to 4 (the cases of a disease group, base of its
+status rows), except those that count no code (`EXACT_CODE_BASES`). Gesamt and every other count, share and duration
+statistic are shown exactly, also below 5, including the diagnosis status rows. **There is no complementary
+suppression**: a suppressed count can follow from shown sums (Gesamt minus the other LEs, a group minus its other
+status rows, the total matrix minus the other quarters); every `<5` is a count of 1 to 4
+(`"suppressed": {"cells": n, "complementary": 0}` in the JSON). The tables are for the data nodes and the LE
+concerned, not for publication. `--suppress-scope` has `codes` only; the former `diagnoses` and `all` are refused
+with a hint, and results written with them are still read by `fill_template.py` and the dashboard. The submissions
+of an episode are ordered by `submittedAt` parsed as a time (time zones to UTC), as in the oncology matrix; the
+latest one gives the case's state.
 
 Follow-up (sections `Follow-up (Fälle mit GFK2)`, `Dauer GFK2 bis erstes Follow-up`,
 `Follow-up: Pflichtfelder (Follow-up-Einträge aller Einreichungen)`, not code rows, so exact), the same
@@ -259,16 +203,12 @@ Three things to know when reading the figures:
   follow-up rates are lower and its durations shorter. With `--follow-up-due-days N` the lines
   "fällig: … innerhalb der Frist" compare between periods: cases whose GFK2 is at least N days before
   `--reference-date` (best the date of the export), follow-ups within N days of the GFK2.
-- Counts below `--min-cell` (default 5) are suppressed as in the matrix, percentages with a suppressed count
-  or base and medians of fewer values are left out, and, stricter than the matrix, every count within fewer
-  cases, also a zero; the plots show such periods as gaps. Neither output contains case keys or TANs. The
-  cells per LE and month are small all the same, and part of the suppressed ones follow from the totals and
-  the other cells: the tables, suppressed or not (`--min-cell 1`), are meant for the data nodes and the LE
-  concerned, not for publication, and not to be handed out next to the quarterly matrices (months and quarters
-  aren't suppressed together: a quarter is the sum of its months). `--suppress-scope codes` (default) applies this,
-  as in the matrix, only to the rows derived from the diagnosis codes; the time series has none, so with `codes`
-  every figure is exact, also `Diagnosestatus (alle Fälle)` and `Diagnoserate (abgeschlossene Fälle)`;
-  `--suppress-scope all` suppresses every block.
+- Neither output contains case keys or TANs. The cells per LE and month are small: the tables are meant for the
+  data nodes and the LE concerned, not for publication, and not to be handed out next to the quarterly matrices
+  (months and quarters
+  aren't suppressed together: a quarter is the sum of its months). As in the matrix only the rows derived from the
+  diagnosis codes are suppressed; the time series has none, so every figure is exact, also `Diagnosestatus (alle
+  Fälle)` and `Diagnoserate (abgeschlossene Fälle)` (`--suppress-scope all` was removed on 27.11.2026).
 
 The tests run with those of the matrix (`python3 -m unittest discover -s scripts/rd_evaluation_matrix`);
 those of the plots are skipped without matplotlib.
@@ -287,19 +227,14 @@ Tests: `python3 -m unittest discover -s scripts/data_quality_mvh`.
 The RD and oncology matrices for a whole period together with one matrix per calendar quarter (one evaluation
 per quarter of initial submission, one xlsx each, Q4/2025 = Erstmeldung 2025-10-01 to before 2026-01-01; oncology
 also per month with `--matrix dnpm --period month`) come from one run of `scripts/monthly_matrices/monthly_matrices.py` (standard
-library only, on PROD). It reads the export once and writes `<dir>/rd/rd_<period>.json` and
+library only, on PROD). It parses the export once for RD and oncology and writes `<dir>/rd/rd_<period>.json` and
 `<dir>/dnpm/dnpm_<period>.json` (`<period>` = `YYYY-Qn` or `YYYY-MM`), and the total matrix of exactly these
 periods as `<period>` = `gesamt`. The first period is that of the earliest initial submission in the export, so
 there are no empty leading periods; `--from`/`--until` (`YYYY-MM` or `YYYY-Qn`) narrow the range.
 - RD (SE): **only per quarter**, `--period month` is refused for `--matrix rd` and `both` (monthly RD cells are
-  small, and months next to quarters would have to be suppressed together). The total and the quarter matrices are
-  **suppressed together** (`rd_evaluation_matrix.run_joint`) and checked against the whole system of all files
-  (see *Protection against the whole system* above): no suppressed count follows from the total and the quarters,
-  also not from several relations together; otherwise **nothing is written** (no RD and no oncology file of the
-  run, those of an earlier run stay) and the run ends with an error. `--min-cell`, `--suppress-scope` (default
-  `codes`) and `--follow-up-months` apply to the RD matrices. Hand out only the total and the period matrices
-  of one run; a total from a separate run of `rd_evaluation_matrix.py` is suppressed on its own, and together with
-  these period matrices suppressed cells can become computable.
+  small). Each file, the total and every quarter, is suppressed on its own, primary only (see above): a quarter's
+  suppressed count can follow from the total and the other quarters. `--min-cell` and `--follow-up-months` apply to
+  the RD matrices.
 - Oncology: **not suppressed** (decision of the data holders, see `scripts/dnpm_evaluation_matrix/README.md`); the
   total matrix carries the time series by the same periods.
 

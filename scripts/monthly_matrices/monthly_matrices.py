@@ -9,29 +9,24 @@ submission (Erstmeldung; --from/--until of the scripts set to the period, Q4/202
 the last one that of the latest initial submission (or the one before --until): no empty leading periods. The
 total matrix ("gesamt") covers exactly these periods, from the first day of the first one to the end of the last.
 
-RD: the total and the period matrices are suppressed together (rd_evaluation_matrix.run_joint): besides the
-relations within each matrix, each cell of the total matrix is the sum of the same cell of the period matrices
-(per LE and Gesamt), and the suppression is extended until no suppressed count follows from all files together,
-also not from several relations (rd_evaluation_matrix.protect). If one still followed, no RD file is written and
-the run ends with an error (the cells on stderr, for the KDK only); nothing of the run is written then, oncology
-neither. Hand out only total and period matrices of the same run: a total matrix from a separate run of
-rd_evaluation_matrix.py is suppressed on its own and, together with these period matrices, can make suppressed
-cells computable; the same holds for monthly RD numbers (e.g. the time series of rd_time_series.py) next to the
-quarters.
+RD: each file (the total and every period) is suppressed on its own, primary only: an LE's count of 1 to
+--min-cell - 1 in the rows derived from the diagnosis codes is "<5", nothing else (decision of the data holders,
+27.11.2026). There is no complementary suppression: a suppressed count can follow from shown sums (Gesamt, the group
+totals, the total minus the other periods).
 Oncology: not suppressed (decision of the data holders), every value exact; the total matrix has the time
 series by the same periods.
 
 Standard library only, so it runs where the export is (PRO); the xlsx are written from the results
 by fill_monthly.py next to this script, outside of PRO (needs openpyxl).
 
-The export is read once and written as the respective script writes it (<period> = YYYY-Qn or YYYY-MM, the
+The export is parsed once for RD and oncology and written as the respective script writes it (<period> = YYYY-Qn or YYYY-MM, the
 total matrix as <period> = gesamt):
   <output-dir>/rd/rd_<period>.json, .csv, _rueckfragen.csv
   <output-dir>/dnpm/dnpm_<period>.json, .csv, _zeitreihe.csv, _rueckfragen.csv
 with --rueckfragen-per-le (recommended) instead of _rueckfragen.csv one _rueckfragen_<LE>.csv per LE, and the RD
 JSON (so the xlsx) without the Rückfragen. RD: small counts are suppressed only in the rows derived from the
-diagnosis codes (--suppress-scope codes, the default; rd.CODE_SECTIONS: Orphacode, the disease groups, "Diagnose ohne
-Erkrankungsgruppe"), every other number exact, also the diagnosis status; --suppress-scope all suppresses every row.
+diagnosis codes (rd.CODE_SECTIONS: Orphacode, the disease groups, "Diagnose ohne Erkrankungsgruppe"), every other
+number exact, also Gesamt and the diagnosis status.
 The Rückfragen contain case keys: only for the respective LEs. The RD JSON contains them as well
 (as written by rd_evaluation_matrix.py, unless --rueckfragen-per-le), the oncology JSON doesn't.
 
@@ -147,10 +142,17 @@ def periods_of(dates, args):
 TOTAL_LABEL = "gesamt"
 
 
-def rd_results(path, args):
-    """The RD total matrix and the period matrices, suppressed together: [(name, result)] (empty without cases).
-    Ends the run (SystemExit) before anything is written if a suppressed count follows from the shown numbers"""
-    rows, failures = rd.load_submissions(path)
+def read_input(path):
+    """The input file, parsed once for RD and oncology: (RD rows and failures, oncology rows and failures)"""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return rd.submissions_from(data, path), dnpm.submissions_from(data, path)
+
+
+def rd_results(source, args):
+    """The RD total matrix and the period matrices, each suppressed on its own: [(name, result)] (empty without
+    cases); source: the RD rows and failures"""
+    rows, failures = source
     heads = rd.load_linearisation(args.orphanet) if args.orphanet else None
     periods_ = periods_of(rd_initial_dates(rows), args)
     if not periods_:
@@ -158,11 +160,7 @@ def rd_results(path, args):
     ranges = [(start, next_period(start, args.period)) for start in periods_]
     total, parts = rd.run_joint(rows, failures, heads, ranges, args.reference_date, args.min_cell, args.min_medical_days,
                                 args.suppress_scope, args.follow_up_months, start=ranges[0][0], end=ranges[-1][1])
-    results = [(TOTAL_LABEL, total)] + [(label(start, args.period), r) for start, r in zip(periods_, parts)]
-    blocked = rd.blocked_message({f"RD {name}": result for name, result in results})
-    if blocked:
-        raise SystemExit(blocked)
-    return results
+    return [(TOTAL_LABEL, total)] + [(label(start, args.period), r) for start, r in zip(periods_, parts)]
 
 
 def write_rd(results, args):
@@ -181,9 +179,10 @@ def write_rd(results, args):
     return len(results) - 1 if results else 0
 
 
-def run_dnpm(path, args):
-    """The oncology total matrix (time series by the periods) and the period matrices; the number of periods"""
-    rows, failures = dnpm.load_submissions(path)
+def run_dnpm(source, args):
+    """The oncology total matrix (time series by the periods) and the period matrices; the number of periods;
+    source: the oncology rows and failures"""
+    rows, failures = source
     out_dir = os.path.join(args.output_dir, DNPM)
     prepare_dir(out_dir, DNPM, args.replace)
     reference_date = args.reference_date or args.cutoff or date.today()
@@ -232,8 +231,8 @@ def main(argv=None):
     parser.add_argument("--min-cell", type=int, default=5,
                         help="RD: counts below are suppressed, 1 disables (default: %(default)s; oncology: not suppressed)")
     parser.add_argument("--suppress-scope", type=rd.scope_argument, choices=rd.SUPPRESS_SCOPES, default=rd.SUPPRESS_CODES,
-                        help="RD: suppress small counts only in the rows derived from the diagnosis codes or in all rows "
-                             "(default: %(default)s)")
+                        help="RD: small counts are suppressed only in the rows derived from the diagnosis codes (the only "
+                             "scope; default: %(default)s)")
     parser.add_argument("--min-medical-days", type=int, default=14,
                         help="shorter GFK1-GFK2 durations are listed for clarification (default: %(default)s)")
     parser.add_argument("--follow-up-months", type=int, default=rd.FU_MONTHS,
@@ -256,17 +255,19 @@ def main(argv=None):
 
     written = []
     if args.matrix in (RD, "both"):
+        earlier_files(os.path.join(args.output_dir, RD), RD, args.replace)     # refused before the long evaluation
+        if args.matrix == "both":
+            earlier_files(os.path.join(args.output_dir, DNPM), DNPM, args.replace)
+    rd_source, dnpm_source = read_input(args.input)        # parsed once for both
+    if args.matrix in (RD, "both"):
         if not args.orphanet:
             print("RD: without --orphanet the disease groups aren't evaluated", file=sys.stderr)
         rd_args = argparse.Namespace(**vars(args))
         rd_args.reference_date = args.reference_date or date.today()
-        earlier_files(os.path.join(args.output_dir, RD), RD, args.replace)     # refused before the long evaluation
-        if args.matrix == "both":
-            earlier_files(os.path.join(args.output_dir, DNPM), DNPM, args.replace)
-        results = rd_results(args.input, rd_args)       # nothing is written if a suppressed count follows
+        results = rd_results(rd_source, rd_args)
         written.append(f"RD {write_rd(results, rd_args)}")
     if args.matrix in (DNPM, "both"):
-        written.append(f"oncology {run_dnpm(args.input, args)}")
+        written.append(f"oncology {run_dnpm(dnpm_source, args)}")
     unit = "quarters" if args.period == QUARTER else "months"
     print(f"Written: {', '.join(written)} {unit} and their total ({TOTAL_LABEL}) into {args.output_dir}; xlsx with "
           "fill_monthly.py", file=sys.stderr)

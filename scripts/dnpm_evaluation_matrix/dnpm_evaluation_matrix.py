@@ -527,6 +527,42 @@ class InputFile:
         self.exported, self.failures = exported, []
 
 
+def submissions_from(data, path="input"):
+    """
+    load_submissions of the parsed input file (monthly_matrices parses it once for RD and oncology): the same rows
+    and failures as InputFile reads them
+    """
+    def export_key(r):
+        return json.dumps([r.get("site"), r.get("patient"), r.get("episodeOfCare")])
+
+    if isinstance(data, dict) and "tables" in data:
+        tables = [t for t in data["tables"] if isinstance(t, dict)] if isinstance(data["tables"], list) else []
+        if "datenkranz" not in [t.get("name") for t in tables]:
+            raise ValueError(f"{path}: no table 'datenkranz', not a result of export-datenkranz")
+        rows, failures = [], []
+        for t in tables:
+            exported = REASON in (t.get("columns") or []) if "columns" in t else None
+            for r in t.get("rows") or []:
+                if t.get("name") == "datenkranz" and r.get("useCase") in (None, "MTB"):
+                    has_reason = exported if exported is not None else REASON in r
+                    rows.append(SubmissionRow(export_key(r), r.get("submittedAt") or "", r.get("content"), r.get("site"),
+                                              r.get(REASON) if has_reason else NOT_EXPORTED))
+                elif t.get("name") == "failures" and r.get("useCase") in (None, "MTB"):
+                    failures.append(Failure(r.get("site"), export_key(r), r.get("tan"), r.get("submittedAt") or "",
+                                            str(r.get("error") or "")))
+        return rows, failures
+    if isinstance(data, list):
+        def key(e):
+            le = e.get("site") or dig(e.get("content"), "metaData", "submission", "submitterId")
+            return json.dumps([le, e.get("case")], sort_keys=True)
+
+        entries = [e for e in data if isinstance(e, dict)]
+        exported = any(REASON in e for e in entries)
+        return [SubmissionRow(key(e), e.get("submittedAt") or "", e.get("content"), e.get("site"),
+                              e.get(REASON) if exported else NOT_EXPORTED) for e in entries], []
+    raise ValueError(f"{path}: neither a result of export-datenkranz nor a list of submissions")
+
+
 def load_submissions(path):
     """The submissions of the input file, and the submissions the export couldn't convert (all in memory)"""
     source = InputFile(path)

@@ -169,6 +169,10 @@ def suppression_line(result):
         return ""
     k = result["min_cell"]
     scope = result.get("suppress_scope", "all")
+    if scope == "codes" and result.get("suppressed", {}).get("complementary") == 0:     # from 27.11.2026
+        return (f"Nur Zeilen aus den Diagnosecodes (Orphacode, Erkrankungsgruppen, siehe Hinweise): Fallzahlen von 1 bis "
+                f"{k - 1} der LEs unterdrückt (<{k}); keine Sekundärunterdrückung, einzelne Werte können sich aus Summen "
+                "ergeben. Alle anderen Zahlen exakt, auch Gesamt, Diagnosestatus und Diagnoserate.")
     if scope == "codes":
         return (f"Nur Zeilen aus den Diagnosecodes (Orphacode, Erkrankungsgruppen, siehe Hinweise): Zellen mit weniger als "
                 f"{k} Fällen unterdrückt (<{k}), ergänzend weitere in diesen Zeilen, damit keine unterdrückte Zahl "

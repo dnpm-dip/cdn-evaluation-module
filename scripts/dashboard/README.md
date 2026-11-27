@@ -79,21 +79,21 @@ time series blocks come from the data. Unknown matrices get generic key figures.
 - RD: only the rows that tell which disease a case has are suppressed (decision of the data holders, 26.11.2026:
   the diagnosis codes). In mode `rd` the matrix decides (`rd_evaluation_matrix.py --suppress-scope codes`, the
   default: Orphacode and the disease groups; the diagnosis status and every other row exact); the page takes its
-  cells as they are. `<5` means 1 to 4 cases, or hidden to protect a neighbouring cell (then also 5 or more). The page shows
-  "unterdrückt" without bounds, never 0, and never computes a value back. Bounds (1–4) are shown only for files that
-  state `"suppressed": {"complementary": 0}`. Changes are "n. b." (not computable) as soon as one side is suppressed.
+  cells as they are. Since 27.11.2026 the matrix suppresses only counts of 1 to 4 of an LE (no complementary
+  suppression, `"suppressed": {"complementary": 0}`), so the page shows the bounds 1–4; older files with
+  complementary suppression ("<5" also 0 or 5 and more) are shown as "unterdrückt" without bounds. The page never
+  shows a suppressed cell as 0 and never computes a value back. Changes are "n. b." (not computable) as soon as one side is suppressed.
   In the month charts, a month that would follow from the whole period minus the others is hidden too.
 - Mode `datenkranz` suppresses the use case RD (and submissions without a known use case) like the RD matrix, only
   in the rows of the diagnosis codes: the values of `…diagnoses[].code` (`DIAGNOSIS_CODE_PATH`; not their fill
   rate). A code of fewer than `--min-cell` cases in the use case gets no row of its own (its name would show that it
-  occurs): such codes are counted together in the row `andere Codes (je unter 5 Fällen)` (`OTHER_CODES`). There: counts from 1 to `--min-cell` − 1 (default 5), every value with a base below that, and,
-  complementarily within these rows, the smallest further nonzero cell in every group with exactly one suppressed
-  cell (a row over Gesamt and the LEs, the whole period and its months), until none is left. Every other row
-  (submissions, cases, fill rates, other values) is exact, also below 5. The use case MTB is exact. There
+  occurs): such codes are counted together in the row `andere Codes (je unter 5 Fällen)` (`OTHER_CODES`). There an LE's
+  counts from 1 to `--min-cell` − 1 (default 5) are suppressed, nothing else (no complementary suppression: a value
+  can follow from Gesamt or the months). Gesamt and every other row (submissions, cases, fill rates, other values)
+  are exact, also below 5. The use case MTB is exact. There
   is no use case `Alle` next to a suppressed use case: all use cases minus the exact MTB, or minus a separately
   suppressed unknown use case, would give the suppressed RD cells away. With several use cases the page has no
-  time series (it would show the months of one use case for all). The closure is per single relation; unlike the
-  RD matrix (see the main README, *Protection against the whole system*) it isn't checked against the whole system.
+  time series (it would show the months of one use case for all).
 - The file is labelled "Synthetische Daten" when the LE names look synthetic (`LE-A`, `SYN-…`), `--synthetic` /
   `--real` override. The header names the source files, data states and build time; the footer says
   "Aggregate je LE, nur intern". The tables are meant for the data nodes and the LEs, not for publication.

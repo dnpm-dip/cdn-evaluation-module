@@ -1051,6 +1051,24 @@ class StreamingTests(unittest.TestCase):
                         self.assertEqual(actual, expected)
                         self.assertEqual(get(actual, "Fälle", CASES), 9 if start else 2 if cutoff else 10)
 
+    def test_parsed_input_gives_the_same_rows(self):
+        # submissions_from (monthly_matrices parses the export once for RD and oncology) = load_submissions
+        failures = [{"site": "LE-A", "useCase": "MTB", "patient": "x", "episodeOfCare": "e1", "tan": "tx",
+                     "submittedAt": "2025-03-01T10:00:00", "error": "conversion failed"}]
+        inputs = [export_json(self.rows(), failures), export_json(self.rows(), columns_with_reason=False),
+                  [{"case": r.case, "site": r.site, "submittedAt": r.submitted_at, "content": r.content,
+                    **({"reasonResearchConsentMissing": "abgelehnt"} if i == 0 else {})} for i, r in enumerate(self.rows())],
+                  [{"case": r.case, "site": r.site, "submittedAt": r.submitted_at, "content": r.content} for r in self.rows()]]
+        with tempfile.TemporaryDirectory() as tmp:
+            for n, data in enumerate(inputs):
+                with self.subTest(input=n):
+                    path = self.write(tmp, data)
+                    rows, failed = dm.load_submissions(path)
+                    rows2, failed2 = dm.submissions_from(json.loads(json.dumps(data)), path)
+                    self.assertEqual([(r.case, r.submitted_at, r.content, r.site, r.reason) for r in rows],
+                                     [(r.case, r.submitted_at, r.content, r.site, r.reason) for r in rows2])
+                    self.assertEqual(failed, failed2)
+
     def test_broken_inputs_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             text = json.dumps(export_json(self.rows()))

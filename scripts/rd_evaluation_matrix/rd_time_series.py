@@ -40,19 +40,10 @@ Output (<output> without extension):
   <output>.csv   long table LE | Zeitraum | Block | Kennzahl | Wert | Bezug | Nenner | Anteil_% |
                  Median | Q1 | Q3 | n, one line per LE, period and figure
   <output>.json  the same lines, with the periods, the LEs and notes
-Counts below --min-cell (default 5) are suppressed ("<5"), percentages are left out if their count
-or base is suppressed, medians and quartiles if computed from fewer values, and every count within
-a group of fewer cases, also a zero. Complementary suppression over the periods: where a figure of
-an LE would have exactly one suppressed period, the smallest other nonzero period (or the whole
-period) is suppressed too, with the same marker, so no suppressed cell is the whole period minus the
-others. Neither output contains case keys or TANs. The cells per LE and period are small all the
-same, and suppressed ones can still follow from the Gesamt column and the other LEs or from the
-other categories: the tables, suppressed or not (--min-cell 1), are meant for the data nodes and the
-LE concerned, not for publication.
---suppress-scope codes (default) applies all of this only to the rows derived from the diagnosis codes
-(rdm.CODE_SECTIONS, rdm.CODE_ITEMS: Orphacode, the disease groups), as the matrix does. The time series has no
-such block, so with codes every count, percentage and statistic is exact, also the diagnosis status and rate;
---suppress-scope all suppresses every block.
+As in the matrix, only the rows derived from the diagnosis codes (rdm.CODE_SECTIONS, rdm.CODE_ITEMS: Orphacode, the
+disease groups) would be suppressed (counts below --min-cell, primary only); the time series has no such block, so
+every count, percentage and statistic is exact, also the diagnosis status and rate. Neither output contains case
+keys or TANs; the tables are meant for the data nodes and the LE concerned, not for publication.
 plot_time_series.py draws the curves from the CSV.
 
 Example:
@@ -581,55 +572,6 @@ def suppressed(line, min_cell, cases=None):
     return values
 
 
-def suppress_complementary(rows, lines, min_cell, due_days):
-    """
-    Complementary suppression over the periods: the whole period is the sum of the others, so in each
-    figure of an LE (count or base) in which exactly one period is suppressed, also the period (or the
-    whole period) with the smallest other nonzero count is, until no figure changes. A base that is
-    also a count of the same LE and period (the cases, the transmitted consents, ...) is the same
-    figure. A zero is left out only in a group of few cases; next to zeros only, the whole period is
-    suppressed instead. In place, with the marker '<min_cell'; a percentage beside it is left out.
-    """
-    hidden_marker = f"<{min_cell}"
-    same = {"Fälle": (B_CASES, CASES), "Fälle ohne übermittelten Broad Consent": (B_CONSENT, CONSENT_MISSING),
-            "Fälle mit übermitteltem Broad Consent": (B_CONSENT, CONSENT_TRANSMITTED),
-            WITH_GFK2: (B_FOLLOW_UP, WITH_GFK2)}
-    if due_days is not None:
-        same[f"Fälle mit GFK2 mindestens {due_days} Tage vor dem Stichtag"] = (B_FOLLOW_UP, DUE)
-
-    cells, size, hidden = [], {}, set()     # cells: (row, field, figure); a figure is (LE, (block, item) or base label)
-    for r, line in zip(rows, lines):
-        for field_, n, figure in (("value", line.n if line.days is None else None, (line.block, line.item)),
-                                  ("base", line.base, same.get(line.base_label, ("base", line.base_label)))):
-            if n is None:
-                continue
-            q = (r["le"], r["period"], figure)
-            cells.append((r, field_, q))
-            size[q] = n
-            if r[field_] is None or r[field_] == hidden_marker:
-                hidden.add(q)
-
-    figures = {}
-    for _, _, q in cells:
-        figures.setdefault((q[0], q[2]), {})[q] = None
-    changed = True
-    while changed:
-        changed = False
-        for members in figures.values():
-            if sum(q in hidden for q in members) != 1:
-                continue
-            shown = [q for q in members if q not in hidden]
-            # a zero left out (a group of few cases) next to only zeros: the whole period, which says they are all zero
-            candidates = [q for q in shown if size[q] > 0] or [q for q in shown if q[1] == WHOLE]
-            if candidates:
-                hidden.add(min(candidates, key=lambda q: (size[q], q[1] == WHOLE)))
-                changed = True
-
-    for r, field_, q in cells:
-        if q in hidden and r[field_] is not None and r[field_] != hidden_marker:
-            r[field_], r["percent"] = hidden_marker, None
-
-
 # ---------------------------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------------------------
@@ -649,7 +591,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
     """
     if suppress_scope not in rdm.SUPPRESS_SCOPES:
         raise ValueError(f"suppress_scope must be one of {rdm.SUPPRESS_SCOPES}: {suppress_scope}")
-    every = suppress_scope == rdm.SUPPRESS_ALL
+    every = False       # --suppress-scope all was removed (27.11.2026): only code lines, of which there are none
     cases, _, without_initial, submitters = rdm.build_cases(rows, start, end)
 
     def in_range(d):
@@ -751,8 +693,6 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
                 result_rows.append({"le": le, "period": period, "block": line.block, "item": line.item,
                                     "base_label": line.base_label, **values})
                 evaluated_lines.append(line)
-    if min_cell > 1:
-        suppress_complementary(result_rows, evaluated_lines, min_cell, due_days)
 
     # the evaluated period, named as in the matrix
     if start or end:
@@ -784,16 +724,7 @@ def run(rows, failures, start, end, reference_date, min_cell=5, resolution=MONTH
         "(metaData.submission.date, nicht konvertierbare Einreichungen nach submittedAt); mit --from/--until zählen "
         "dort nur Einreichungen in diesem Zeitraum, während die Matrix alle nicht konvertierbaren Einreichungen und "
         "alle Episoden ohne Erstmeldung des Exports zählt.",
-        (f"Zellen mit 1 bis {min_cell - 1} Fällen sind unterdrückt (<{min_cell}), ebenso Anteile mit unterdrücktem Wert "
-         f"oder Nenner sowie Median und Quartile aus weniger als {min_cell} Werten. Zählwerte innerhalb von 1 bis "
-         f"{min_cell - 1} Fällen bleiben leer, auch die Null (die Matrix weist sie aus). Ergänzend unterdrückt, ebenfalls "
-         f"als <{min_cell}: wäre in einer Kennzahl eines LE genau ein Zeitraum unterdrückt, auch der Zeitraum (oder "
-         f"'{WHOLE}') mit der kleinsten weiteren Zahl über 0, damit kein unterdrückter Wert als '{WHOLE}' minus die "
-         f"übrigen Zeiträume berechenbar ist; eine Zelle <{min_cell} kann daher auch {min_cell} oder mehr zählen. "
-         "Weitergabesicher ist die Tabelle damit nicht: ein Teil der unterdrückten Zellen folgt aus Gesamt und den "
-         "übrigen LEs oder aus den übrigen Kategorien. Sie ist für die Datenknoten und den jeweiligen LE bestimmt."
-         if min_cell > 1 and every else
-         (f"Unterdrückt werden wie in der Matrix nur Zeilen aus den Diagnosecodes (Orphacode, Erkrankungsgruppen, "
+        ((f"Unterdrückt werden wie in der Matrix nur Zeilen aus den Diagnosecodes (Orphacode, Erkrankungsgruppen, "
           "--suppress-scope codes); die Zeitreihe hat keine solche Zeile. Alle Zahlen, Anteile, Mediane und Quartile "
           f"sind exakt angegeben, auch unter {min_cell}, auch '{B_STATUS}' und '{B_RATE}': sie zeigen, ob ein Fall "
           "eine Diagnose hat, nicht welche. Die Tabelle ist für die Datenknoten und den jeweiligen LE bestimmt.")

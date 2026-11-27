@@ -24,9 +24,9 @@ Suppression applies to rare diseases (SE/RD) only: by decision of the data holde
 (mode onko, use case MTB in mode datenkranz) is not suppressed, every value is exact; an oncology matrix or time
 series with suppressed cells ("<5") is refused. RD: only the rows that tell which disease a case has are suppressed
 (decision of 26.11.2026: the diagnosis codes; the RD matrix decides for its rows, mode datenkranz suppresses the values
-of diagnoses[].code only); "<5" means 1 to 4 cases or hidden to protect a neighbouring cell (then also 5 or more). The page shows it as "unterdrückt" without bounds, never as 0, and never computes it back.
-Bounds 1-4 are shown only for files that state they have no complementary suppression ("suppressed":
-{"complementary": 0}). problems[] (case keys, TANs) is never read.
+of diagnoses[].code only), primary only since 27.11.2026: "<5" means 1 to 4 cases, and the file says so
+("suppressed": {"complementary": 0}), then the page shows the bounds 1-4; in older files "<5" could also be a cell
+hidden to protect a neighbouring one (then "unterdrückt" without bounds). Never shown as 0, never computed back. problems[] (case keys, TANs) is never read.
 
 Third-party files (sql.js, Nunito, Asap) are not part of the repository: they are downloaded once from the pinned
 URLs into --vendor (default: .vendor next to this script), checked against SHA-256 pins, and embedded.
@@ -603,23 +603,10 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
                 for p in ["gesamt"] + months:
                     cells[(r["key"], e, p)] = cnt.c.get((r["key"], e, p), 0)
         hidden = set()
-        if suppressed:          # RD: the suppression groups; only the cells of the code rows are suppressed
+        if suppressed:          # RD: as the matrix, only the counts 1 to min_cell - 1 of an LE in the code rows
             code_rows = [r for r in rows if is_code_row(r)]
-            scope = {(r["key"], e, p) for r in code_rows for e in ents for p in ["gesamt"] + months}
-            gl = []
-            for r in rows:
-                for p in ["gesamt"] + months:
-                    gl.append([(r["key"], e, p) for e in ents])                    # Gesamt and the LEs
-                for e in ents:
-                    gl.append([(r["key"], e, p) for p in ["gesamt"] + months])     # whole run and the months
-            for total, parts in groups:
-                for e in ents:
-                    for p in ["gesamt"] + months:
-                        gl.append([(total, e, p)] + [(k, e, p) for k in parts])    # a partition of a count
-            # values whose base is below min_cell are suppressed too (also 0), then the complementary suppression again
-            small_base = {(r["key"], e, p) for r in code_rows for e in ents for p in ["gesamt"] + months
-                          if 0 < cells[(r["base_key"], e, p)] < min_cell}
-            hidden, primary = suppress(cells, gl, min_cell, small_base, scope)
+            scope = {(r["key"], e, p) for r in code_rows for e in les for p in ["gesamt"] + months}
+            hidden, primary = suppress(cells, [], min_cell, (), scope)
 
         def out(k):
             r = rows[row_index[k[0]]]
@@ -647,16 +634,15 @@ def datenkranz_results(subs, failed, min_cell, use_cases):
             "notes": [f"{out((cases_key, TOTAL, 'gesamt'))['value']} Fälle (Episoden mit Erstmeldung, Use Case {name}), Stand je Fall aus der letzten Nicht-Test-Einreichung; "
                       "Füllgrad und Werte je Fall (ein Fall zählt je Wert einmal), Monat = Monat der Erstmeldung, bei Einreichungen der Monat der Einreichung.",
                       (f"Unterdrückt werden wie in der RD-Matrix nur die Zeilen, die zeigen, welche Erkrankung ein Fall hat: die Werte der Diagnosecodes "
-                       f"(diagnoses[].code; Codes mit weniger als {min_cell} Fällen zusammen in der Zeile 'andere Codes'). Dort sind Zellen mit 1 bis {min_cell - 1} Fällen unterdrückt (<{min_cell}), ebenso Werte mit einer Basis unter "
-                       f"{min_cell}; ergänzend unterdrückt, ebenfalls als <{min_cell} und nur in diesen Zeilen, damit sich keine unterdrückte Zelle aus Gesamt "
-                       "und den übrigen LE oder aus dem Gesamtzeitraum und den Monaten ergibt; eine Zelle <5 kann daher auch 5 oder mehr Fälle zählen. "
-                       "Alle anderen Zahlen (Einreichungen, Fälle, Füllgrade, andere Werte) sind exakt, auch unter 5." if suppressed else
+                       f"(diagnoses[].code; Codes mit weniger als {min_cell} Fällen zusammen in der Zeile 'andere Codes'). Dort sind Fallzahlen von 1 bis {min_cell - 1} "
+                       f"eines LE unterdrückt (<{min_cell}); keine Sekundärunterdrückung, einzelne Werte können sich aus Summen ergeben (Gesamt, die Monate). "
+                       "Alle anderen Zahlen (Gesamt, Einreichungen, Fälle, Füllgrade, andere Werte) sind exakt, auch unter 5." if suppressed else
                        "Keine Unterdrückung (Onkologie, Entscheidung der Datenhalter vom 26.11.2026): alle Werte exakt, auch unter 5."),
                       f"Werte nur bei Feldern mit höchstens {MAX_DISTINCT} verschiedenen kodierten Werten; Datumsfelder als Monate; Freitext nur als Füllgrad. "
                       f"Nicht ausgewertet (Kennungen, Freitext, mehr als {MAX_DISTINCT} verschiedene Texte): " + (", ".join(sorted(skipped)) or "keine") + "."],
         }
         if suppressed:
-            result.update(min_cell=min_cell, suppressed={"primary": primary, "complementary": len(hidden) - primary})
+            result.update(min_cell=min_cell, suppressed={"primary": primary, "complementary": 0})
         results.append((name, result))
     return results, sorted(skipped)
 
